@@ -1,0 +1,12 @@
+.ai/**/*.*
+!.ai/**/*-template.*
+.claude
+
+# Built binaries (root-level only — /prefix prevents matching cmd/inboxatlas/)
+/inboxatlas
+/inboxatlas.exe
+/ia
+/ia.exe
+
+# Test coverage output
+coverage.out
