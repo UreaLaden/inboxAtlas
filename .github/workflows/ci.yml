@@ -6,6 +6,9 @@ on:
   pull_request:
     branches: [main]
 
+env:
+  COVERAGE_THRESHOLD: "90"
+
 jobs:
   govulncheck:
     name: Dependency Check
@@ -32,6 +35,10 @@ jobs:
         uses: actions/setup-go@v5
         with:
           go-version-file: "go.mod"
+
+      - name: Go Fmt
+        run:
+          go fmt ./...
 
       - name: Run lint
         uses: golangci/golangci-lint-action@1e7e51e771db61008b38414a730f564565cf7c20
@@ -73,8 +80,6 @@ jobs:
     name: Validate Test Coverage
     runs-on: ubuntu-latest
     needs: build
-    env:
-      THRESHOLD: 90
 
     steps:
       - uses: actions/checkout@v4
@@ -100,3 +105,13 @@ jobs:
             cat coverage-summary.txt
             echo '```'
           } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Check coverage threshold
+        shell: bash
+        run: |
+          TOTAL=$(go tool cover -func=coverage.out | grep '^total:' | awk '{print $3}' | tr -d '%')
+          echo "Total coverage: ${TOTAL}%"
+          if [ "$(echo "$TOTAL < $COVERAGE_THRESHOLD" | bc -l)" -eq 1 ]; then
+            echo "Coverage ${TOTAL}% is below threshold ${COVERAGE_THRESHOLD}%"
+            exit 1
+          fi
