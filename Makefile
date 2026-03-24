@@ -8,7 +8,7 @@ fmt:
 	go fmt ./...
 
 # Run the golangci-lint linter suite.
-lint:
+lint: fmt
 	golangci-lint run ./...
 
 # Build both the inboxatlas and ia binaries.
@@ -23,12 +23,6 @@ test:
 # Generate coverage profile (prerequisite for all coverage-* targets).
 coverage:
 	go test -coverprofile=coverage.out ./...
-
-# Per-package coverage percentages.
-coverage-pkg: coverage
-	@echo ""
-	@echo "--- Per-package coverage ---"
-	go test -cover ./...
 
 # Function-level breakdown (includes total line at the bottom).
 coverage-func: coverage
