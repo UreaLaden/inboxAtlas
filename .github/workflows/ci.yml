@@ -23,8 +23,8 @@ jobs:
     name: Lint and Format
     runs-on: ubuntu-latest
     permissions:
-      contents: read 
-    
+      contents: read
+
     steps:
       - name: Run lint
         uses: golangci/golangci-lint-action@1e7e51e771db61008b38414a730f564565cf7c20
@@ -35,8 +35,8 @@ jobs:
   build:
     name: Build and Test
     runs-on: ubuntu-latest
-    permissions: 
-      contents: read 
+    permissions:
+      contents: read
       pull-requests: write
 
     steps:
@@ -49,19 +49,37 @@ jobs:
 
       - name: Download dependencies
         run: go mod download
- 
-      - name: Build
+
+      - name: Build CLI
         run: go build ./cmd/inboxatlas
 
-      - name: Run tests
-        run: go test ./...
+      - name: Run tests with coverage
+        run: go test -coverprofile=coverage.out ./...
+
+      - name: Upload coverage profile
+        uses: actions/upload-artifact@v4
+        with:
+          name: go-coverage-profile
+          path: coverage.out
 
   coverage:
-    runs-on: ubuntu-latest
     name: Validate Test Coverage
+    runs-on: ubuntu-latest
     needs: build
 
     steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: "1.21"
+
+      - name: Download coverage profile
+        uses: actions/download-artifact@v4
+        with:
+          name: go-coverage-profile
+
       - name: Print coverage summary
         shell: bash
         run: |
@@ -73,12 +91,3 @@ jobs:
             cat coverage-summary.txt
             echo '```'
           } >> "$GITHUB_STEP_SUMMARY"
-
-      - name: Upload coverage profile
-        uses: actions/upload-artifact@v4
-        with:
-          name: go-coverage-profile
-          path: coverage.out
-      
-
-     
