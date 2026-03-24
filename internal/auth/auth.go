@@ -72,7 +72,7 @@ func RunFlow(ctx context.Context, cfg *oauth2.Config, w io.Writer) (*oauth2.Toke
 	port := listener.Addr().(*net.TCPAddr).Port
 
 	flowCfg := *cfg
-	flowCfg.RedirectURL = fmt.Sprintf("http://localhost:%d/callback", port)
+	flowCfg.RedirectURL = fmt.Sprintf("http://localhost:%d", port)
 
 	state := generateState()
 	authURL := flowCfg.AuthCodeURL(state, oauth2.AccessTypeOffline)
@@ -92,7 +92,7 @@ func runFlow(ctx context.Context, state string, listener net.Listener, _ io.Writ
 	errCh := make(chan error, 1)
 
 	mux := http.NewServeMux()
-	mux.HandleFunc("/callback", func(rw http.ResponseWriter, r *http.Request) {
+	mux.HandleFunc("/", func(rw http.ResponseWriter, r *http.Request) {
 		q := r.URL.Query()
 		if q.Get("state") != state {
 			select {
@@ -220,7 +220,7 @@ func openBrowser(url string) {
 	var cmd *exec.Cmd
 	switch runtime.GOOS {
 	case "windows":
-		cmd = exec.Command("cmd", "/c", "start", url)
+		cmd = exec.Command("rundll32", "url.dll,FileProtocolHandler", url)
 	case "darwin":
 		cmd = exec.Command("open", url)
 	default:

@@ -256,7 +256,7 @@ func TestRunFlow_Success(t *testing.T) {
 	}()
 
 	time.Sleep(30 * time.Millisecond)
-	url := fmt.Sprintf("http://localhost:%d/callback?state=%s&code=authcode123", port, state)
+	url := fmt.Sprintf("http://localhost:%d/?state=%s&code=authcode123", port, state)
 	resp, err := http.Get(url) //nolint:noctx
 	if err != nil {
 		t.Fatalf("GET callback: %v", err)
@@ -288,7 +288,7 @@ func TestRunFlow_StateMismatch(t *testing.T) {
 	}()
 
 	time.Sleep(30 * time.Millisecond)
-	url := fmt.Sprintf("http://localhost:%d/callback?state=wrong-state&code=x", port)
+	url := fmt.Sprintf("http://localhost:%d/?state=wrong-state&code=x", port)
 	resp, _ := http.Get(url) //nolint:noctx
 	if resp != nil {
 		_ = resp.Body.Close()
@@ -316,7 +316,7 @@ func TestRunFlow_OAuthError(t *testing.T) {
 	}()
 
 	time.Sleep(30 * time.Millisecond)
-	url := fmt.Sprintf("http://localhost:%d/callback?state=state&error=access_denied", port)
+	url := fmt.Sprintf("http://localhost:%d/?state=state&error=access_denied", port)
 	resp, _ := http.Get(url) //nolint:noctx
 	if resp != nil {
 		_ = resp.Body.Close()
@@ -344,7 +344,7 @@ func TestRunFlow_NoCode(t *testing.T) {
 	}()
 
 	time.Sleep(30 * time.Millisecond)
-	url := fmt.Sprintf("http://localhost:%d/callback?state=state", port)
+	url := fmt.Sprintf("http://localhost:%d/?state=state", port)
 	resp, _ := http.Get(url) //nolint:noctx
 	if resp != nil {
 		_ = resp.Body.Close()
