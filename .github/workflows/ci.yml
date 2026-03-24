@@ -54,7 +54,7 @@ jobs:
         run: go build ./cmd/inboxatlas
 
       - name: Run tests with coverage
-        run: go test -coverprofile=coverage.out ./...
+        run: make coverage
 
       - name: Upload coverage profile
         uses: actions/upload-artifact@v4
