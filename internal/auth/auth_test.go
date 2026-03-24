@@ -2,6 +2,7 @@ package auth
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"net"
 	"net/http"
@@ -186,6 +187,12 @@ type mockTokenSource struct {
 	err   error
 }
 
+type errReader struct{}
+
+func (errReader) Read(_ []byte) (int, error) {
+	return 0, errors.New("entropy failed")
+}
+
 func (m *mockTokenSource) Token() (*oauth2.Token, error) {
 	return m.token, m.err
 }
@@ -217,6 +224,18 @@ func TestSaveFromSource_TokenError(t *testing.T) {
 	_, err := saveFromSource(src, dir, "gmail", "user@example.com")
 	if err == nil {
 		t.Error("expected error when token source fails")
+	}
+}
+
+func TestSaveFromSource_SaveTokenError(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "gmail"), []byte("block"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	src := &mockTokenSource{token: &oauth2.Token{AccessToken: "refreshed-token"}}
+	if _, err := saveFromSource(src, dir, "gmail", "user@example.com"); err == nil {
+		t.Fatal("expected error when refreshed token cannot be persisted")
 	}
 }
 
@@ -255,8 +274,8 @@ func TestRunFlow_Success(t *testing.T) {
 		done <- flowErr
 	}()
 
-	time.Sleep(30 * time.Millisecond)
-	url := fmt.Sprintf("http://localhost:%d/?state=%s&code=authcode123", port, state)
+	waitForListener(t, listener.Addr().String())
+	url := fmt.Sprintf("http://127.0.0.1:%d/?state=%s&code=authcode123", port, state)
 	resp, err := http.Get(url) //nolint:noctx
 	if err != nil {
 		t.Fatalf("GET callback: %v", err)
@@ -287,8 +306,8 @@ func TestRunFlow_StateMismatch(t *testing.T) {
 		done <- flowErr
 	}()
 
-	time.Sleep(30 * time.Millisecond)
-	url := fmt.Sprintf("http://localhost:%d/?state=wrong-state&code=x", port)
+	waitForListener(t, listener.Addr().String())
+	url := fmt.Sprintf("http://127.0.0.1:%d/?state=wrong-state&code=x", port)
 	resp, _ := http.Get(url) //nolint:noctx
 	if resp != nil {
 		_ = resp.Body.Close()
@@ -315,8 +334,8 @@ func TestRunFlow_OAuthError(t *testing.T) {
 		done <- flowErr
 	}()
 
-	time.Sleep(30 * time.Millisecond)
-	url := fmt.Sprintf("http://localhost:%d/?state=state&error=access_denied", port)
+	waitForListener(t, listener.Addr().String())
+	url := fmt.Sprintf("http://127.0.0.1:%d/?state=state&error=access_denied", port)
 	resp, _ := http.Get(url) //nolint:noctx
 	if resp != nil {
 		_ = resp.Body.Close()
@@ -343,8 +362,8 @@ func TestRunFlow_NoCode(t *testing.T) {
 		done <- flowErr
 	}()
 
-	time.Sleep(30 * time.Millisecond)
-	url := fmt.Sprintf("http://localhost:%d/?state=state", port)
+	waitForListener(t, listener.Addr().String())
+	url := fmt.Sprintf("http://127.0.0.1:%d/?state=state", port)
 	resp, _ := http.Get(url) //nolint:noctx
 	if resp != nil {
 		_ = resp.Body.Close()
@@ -381,17 +400,36 @@ func TestRunFlow_ContextCancelled(t *testing.T) {
 // --- generateState ---
 
 func TestGenerateState_NonEmpty(t *testing.T) {
-	s := generateState()
+	s, err := generateState()
+	if err != nil {
+		t.Fatalf("generateState: %v", err)
+	}
 	if s == "" {
 		t.Error("expected non-empty state")
 	}
 }
 
 func TestGenerateState_Unique(t *testing.T) {
-	s1 := generateState()
-	s2 := generateState()
+	s1, err := generateState()
+	if err != nil {
+		t.Fatalf("generateState: %v", err)
+	}
+	s2, err := generateState()
+	if err != nil {
+		t.Fatalf("generateState: %v", err)
+	}
 	if s1 == s2 {
 		t.Error("expected unique states")
+	}
+}
+
+func TestGenerateState_Error(t *testing.T) {
+	original := stateEntropyReader
+	stateEntropyReader = errReader{}
+	t.Cleanup(func() { stateEntropyReader = original })
+
+	if _, err := generateState(); err == nil {
+		t.Fatal("expected error when entropy reader fails")
 	}
 }
 
@@ -483,8 +521,48 @@ func TestRunFlow_ViaRunFlow_CancelContext(t *testing.T) {
 	}
 }
 
+func TestRunFlow_GenerateStateError(t *testing.T) {
+	original := stateEntropyReader
+	stateEntropyReader = errReader{}
+	t.Cleanup(func() { stateEntropyReader = original })
+
+	var buf strings.Builder
+	_, err := RunFlow(context.Background(), &oauth2.Config{}, &buf)
+	if err == nil {
+		t.Fatal("expected error when state generation fails")
+	}
+}
+
+func TestListenerHost_Fallback(t *testing.T) {
+	if got := listenerHost(&net.TCPAddr{}); got != "127.0.0.1" {
+		t.Fatalf("listenerHost fallback: got %q, want %q", got, "127.0.0.1")
+	}
+}
+
+func TestListenerHost_IP(t *testing.T) {
+	if got := listenerHost(&net.TCPAddr{IP: net.ParseIP("127.0.0.1")}); got != "127.0.0.1" {
+		t.Fatalf("listenerHost IP: got %q, want %q", got, "127.0.0.1")
+	}
+}
+
 // --- openBrowser smoke test ---
 
 func TestOpenBrowser_NoError(t *testing.T) {
 	openBrowser("about:blank") // must not panic
+}
+
+func waitForListener(t *testing.T, address string) {
+	t.Helper()
+
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		conn, err := net.DialTimeout("tcp", address, 50*time.Millisecond)
+		if err == nil {
+			_ = conn.Close()
+			return
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+
+	t.Fatalf("listener %q was not ready before timeout", address)
 }

@@ -13,6 +13,7 @@ import (
 
 	"golang.org/x/oauth2"
 
+	"github.com/UreaLaden/inboxatlas/internal/auth"
 	"github.com/UreaLaden/inboxatlas/internal/config"
 	"github.com/UreaLaden/inboxatlas/internal/storage"
 	"github.com/UreaLaden/inboxatlas/pkg/models"
@@ -356,7 +357,7 @@ func TestRunAuthGmail_MissingCredentials(t *testing.T) {
 	cfg := config.Default()
 	cfg.CredentialsPath = filepath.Join(t.TempDir(), "nonexistent.json")
 	var buf bytes.Buffer
-	err := runAuthGmail(&buf, cfg, "user@example.com", "")
+	err := runAuthGmail(context.Background(), &buf, cfg, "user@example.com", "")
 	if err == nil {
 		t.Fatal("expected error for missing credentials file")
 	}
@@ -381,7 +382,7 @@ func TestRunAuthGmailWithFlow_Success(t *testing.T) {
 
 	tok := &oauth2.Token{AccessToken: "test-access", RefreshToken: "test-refresh"}
 	var buf bytes.Buffer
-	err := runAuthGmailWithFlow(&buf, cfg, "user@example.com", "work", &oauth2.Config{}, mockFlow(tok, nil))
+	err := runAuthGmailWithFlow(context.Background(), &buf, cfg, "user@example.com", "work", &oauth2.Config{}, mockFlow(tok, nil))
 	if err != nil {
 		t.Fatalf("runAuthGmailWithFlow: %v", err)
 	}
@@ -411,7 +412,7 @@ func TestRunAuthGmailWithFlow_AlreadyRegistered(t *testing.T) {
 
 	tok := &oauth2.Token{AccessToken: "test-access"}
 	var buf bytes.Buffer
-	err = runAuthGmailWithFlow(&buf, cfg, "user@example.com", "", &oauth2.Config{}, mockFlow(tok, nil))
+	err = runAuthGmailWithFlow(context.Background(), &buf, cfg, "user@example.com", "", &oauth2.Config{}, mockFlow(tok, nil))
 	if err != nil {
 		t.Fatalf("expected no error for already-registered mailbox: %v", err)
 	}
@@ -424,7 +425,7 @@ func TestRunAuthGmailWithFlow_FlowError(t *testing.T) {
 	cfg.StoragePath = filepath.Join(dir, "test.db")
 
 	var buf bytes.Buffer
-	err := runAuthGmailWithFlow(&buf, cfg, "user@example.com", "", &oauth2.Config{}, mockFlow(nil, fmt.Errorf("flow failed")))
+	err := runAuthGmailWithFlow(context.Background(), &buf, cfg, "user@example.com", "", &oauth2.Config{}, mockFlow(nil, fmt.Errorf("flow failed")))
 	if err == nil {
 		t.Error("expected error when flow fails")
 	}
@@ -443,7 +444,7 @@ func TestRunAuthGmailWithFlow_SaveTokenError(t *testing.T) {
 
 	tok := &oauth2.Token{AccessToken: "test"}
 	var buf bytes.Buffer
-	err := runAuthGmailWithFlow(&buf, cfg, "user@example.com", "", &oauth2.Config{}, mockFlow(tok, nil))
+	err := runAuthGmailWithFlow(context.Background(), &buf, cfg, "user@example.com", "", &oauth2.Config{}, mockFlow(tok, nil))
 	if err == nil {
 		t.Error("expected error when token cannot be saved")
 	}
@@ -457,7 +458,7 @@ func TestRunAuthGmailWithFlow_StorageOpenError(t *testing.T) {
 
 	tok := &oauth2.Token{AccessToken: "test-access"}
 	var buf bytes.Buffer
-	err := runAuthGmailWithFlow(&buf, cfg, "user@example.com", "", &oauth2.Config{}, mockFlow(tok, nil))
+	err := runAuthGmailWithFlow(context.Background(), &buf, cfg, "user@example.com", "", &oauth2.Config{}, mockFlow(tok, nil))
 	if err == nil {
 		t.Error("expected error for bad storage path")
 	}
@@ -472,9 +473,67 @@ func TestRunAuthGmail_MalformedCredentials(t *testing.T) {
 	cfg := config.Default()
 	cfg.CredentialsPath = credPath
 	var buf bytes.Buffer
-	err := runAuthGmail(&buf, cfg, "user@example.com", "")
+	err := runAuthGmail(context.Background(), &buf, cfg, "user@example.com", "")
 	if err == nil {
 		t.Fatal("expected error for malformed credentials")
+	}
+}
+
+func TestRunAuthGmailWithFlow_UsesProvidedContext(t *testing.T) {
+	dir := t.TempDir()
+	cfg := config.Default()
+	cfg.TokenDir = filepath.Join(dir, "tokens")
+	cfg.StoragePath = filepath.Join(dir, "test.db")
+
+	type contextKey string
+	wantCtx := context.WithValue(context.Background(), contextKey("marker"), "ctx-marker")
+	tok := &oauth2.Token{AccessToken: "test-access"}
+
+	var gotCtx context.Context
+	err := runAuthGmailWithFlow(wantCtx, io.Discard, cfg, "user@example.com", "", &oauth2.Config{}, func(ctx context.Context, _ *oauth2.Config, _ io.Writer) (*oauth2.Token, error) {
+		gotCtx = ctx
+		return tok, nil
+	})
+	if err != nil {
+		t.Fatalf("runAuthGmailWithFlow: %v", err)
+	}
+	if gotCtx != wantCtx {
+		t.Error("expected flow to receive the provided context")
+	}
+}
+
+func TestRunAuthGmailWithFlow_CanonicalizesAccount(t *testing.T) {
+	dir := t.TempDir()
+	cfg := config.Default()
+	cfg.TokenDir = filepath.Join(dir, "tokens")
+	cfg.StoragePath = filepath.Join(dir, "test.db")
+
+	tok := &oauth2.Token{AccessToken: "test-access", RefreshToken: "test-refresh"}
+	var buf bytes.Buffer
+	err := runAuthGmailWithFlow(context.Background(), &buf, cfg, "User@Example.com", "work", &oauth2.Config{}, mockFlow(tok, nil))
+	if err != nil {
+		t.Fatalf("runAuthGmailWithFlow: %v", err)
+	}
+	if !strings.Contains(buf.String(), "user@example.com") {
+		t.Errorf("expected canonical email in output, got %q", buf.String())
+	}
+
+	st, err := storage.Open(cfg.StoragePath)
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	defer func() { _ = st.Close() }()
+
+	mb, err := st.GetMailbox(context.Background(), "user@example.com")
+	if err != nil {
+		t.Fatalf("GetMailbox: %v", err)
+	}
+	if mb == nil {
+		t.Fatal("expected canonical mailbox record to be stored")
+	}
+
+	if _, err := os.Stat(auth.TokenPath(cfg.TokenDir, "gmail", "user@example.com")); err != nil {
+		t.Fatalf("expected token file for canonical email: %v", err)
 	}
 }
 

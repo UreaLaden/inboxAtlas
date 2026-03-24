@@ -218,7 +218,7 @@ func buildAuthGmailCmd(cfg config.Config) *cobra.Command {
 		Use:   "gmail",
 		Short: "Authenticate with Gmail using OAuth 2.0",
 		RunE: func(cmd *cobra.Command, _ []string) error {
-			return runAuthGmail(cmd.OutOrStdout(), cfg, account, alias)
+			return runAuthGmail(cmd.Context(), cmd.OutOrStdout(), cfg, account, alias)
 		},
 	}
 	cmd.Flags().StringVar(&account, "account", "", "Gmail address to authenticate")
@@ -229,7 +229,7 @@ func buildAuthGmailCmd(cfg config.Config) *cobra.Command {
 
 // runAuthGmail checks credentials then delegates to runAuthGmailWithFlow using
 // auth.RunFlow as the live flow implementation.
-func runAuthGmail(w io.Writer, cfg config.Config, account, alias string) error {
+func runAuthGmail(ctx context.Context, w io.Writer, cfg config.Config, account, alias string) error {
 	if _, err := os.Stat(cfg.CredentialsPath); err != nil {
 		return fmt.Errorf("credentials file not found at %s — set credentials_path in config or INBOXATLAS_CREDENTIALS_PATH", cfg.CredentialsPath)
 	}
@@ -237,18 +237,20 @@ func runAuthGmail(w io.Writer, cfg config.Config, account, alias string) error {
 	if err != nil {
 		return err
 	}
-	return runAuthGmailWithFlow(w, cfg, account, alias, oauthCfg, auth.RunFlow)
+	return runAuthGmailWithFlow(ctx, w, cfg, account, alias, oauthCfg, auth.RunFlow)
 }
 
 // runAuthGmailWithFlow runs the OAuth flow using flow, saves the token, and
 // registers the mailbox. It is separated from runAuthGmail for testability.
-func runAuthGmailWithFlow(w io.Writer, cfg config.Config, account, alias string, oauthCfg *oauth2.Config, flow func(context.Context, *oauth2.Config, io.Writer) (*oauth2.Token, error)) error {
-	token, err := flow(context.Background(), oauthCfg, w)
+func runAuthGmailWithFlow(ctx context.Context, w io.Writer, cfg config.Config, account, alias string, oauthCfg *oauth2.Config, flow func(context.Context, *oauth2.Config, io.Writer) (*oauth2.Token, error)) error {
+	canonicalAccount := strings.ToLower(account)
+
+	token, err := flow(ctx, oauthCfg, w)
 	if err != nil {
 		return err
 	}
 
-	if err := auth.SaveToken(cfg.TokenDir, "gmail", account, token); err != nil {
+	if err := auth.SaveToken(cfg.TokenDir, "gmail", canonicalAccount, token); err != nil {
 		return err
 	}
 
@@ -258,16 +260,16 @@ func runAuthGmailWithFlow(w io.Writer, cfg config.Config, account, alias string,
 	}
 	defer func() { _ = st.Close() }()
 
-	mb := models.Mailbox{ID: account, Alias: alias, Provider: "gmail"}
-	if err := st.CreateMailbox(context.Background(), mb); err != nil {
+	mb := models.Mailbox{ID: canonicalAccount, Alias: alias, Provider: "gmail"}
+	if err := st.CreateMailbox(ctx, mb); err != nil {
 		// If already registered, treat as no-op.
-		existing, getErr := st.GetMailbox(context.Background(), account)
+		existing, getErr := st.GetMailbox(ctx, canonicalAccount)
 		if getErr != nil || existing == nil {
 			return fmt.Errorf("register mailbox: %w", err)
 		}
 	}
 
-	_, _ = fmt.Fprintf(w, "Authenticated successfully. Mailbox %s registered.\n", strings.ToLower(account))
+	_, _ = fmt.Fprintf(w, "Authenticated successfully. Mailbox %s registered.\n", canonicalAccount)
 	return nil
 }
 

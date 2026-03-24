@@ -21,6 +21,8 @@ import (
 	"golang.org/x/oauth2/google"
 )
 
+var stateEntropyReader io.Reader = rand.Reader
+
 // gmailScope is the read-only Gmail scope used for all auth flows.
 const gmailScope = "https://www.googleapis.com/auth/gmail.readonly"
 
@@ -69,12 +71,17 @@ func RunFlow(ctx context.Context, cfg *oauth2.Config, w io.Writer) (*oauth2.Toke
 	if err != nil {
 		return nil, fmt.Errorf("start local listener: %w", err)
 	}
-	port := listener.Addr().(*net.TCPAddr).Port
+	addr := listener.Addr().(*net.TCPAddr)
+	port := addr.Port
 
 	flowCfg := *cfg
-	flowCfg.RedirectURL = fmt.Sprintf("http://localhost:%d", port)
+	flowCfg.RedirectURL = fmt.Sprintf("http://%s:%d", listenerHost(addr), port)
 
-	state := generateState()
+	state, err := generateState()
+	if err != nil {
+		_ = listener.Close()
+		return nil, err
+	}
 	authURL := flowCfg.AuthCodeURL(state, oauth2.AccessTypeOffline)
 
 	_, _ = fmt.Fprintf(w, "Opening browser for authentication. If it does not open, visit:\n%s\n", authURL)
@@ -208,10 +215,12 @@ func saveFromSource(src oauth2.TokenSource, tokenDir, provider, email string) (*
 }
 
 // generateState returns a random hex string for use as the OAuth state parameter.
-func generateState() string {
+func generateState() (string, error) {
 	b := make([]byte, 16)
-	_, _ = rand.Read(b)
-	return hex.EncodeToString(b)
+	if _, err := io.ReadFull(stateEntropyReader, b); err != nil {
+		return "", fmt.Errorf("generate oauth state: %w", err)
+	}
+	return hex.EncodeToString(b), nil
 }
 
 // openBrowser attempts to open url in the default system browser.
@@ -227,4 +236,15 @@ func openBrowser(url string) {
 		cmd = exec.Command("xdg-open", url)
 	}
 	_ = cmd.Start()
+}
+
+func listenerHost(addr *net.TCPAddr) string {
+	if addr == nil || addr.IP == nil || addr.IP.IsUnspecified() {
+		return "127.0.0.1"
+	}
+	host := addr.IP.String()
+	if host == "" {
+		return "127.0.0.1"
+	}
+	return host
 }
