@@ -13,10 +13,13 @@ import (
 	"text/tabwriter"
 
 	"github.com/spf13/cobra"
+	"golang.org/x/oauth2"
 
+	"github.com/UreaLaden/inboxatlas/internal/auth"
 	"github.com/UreaLaden/inboxatlas/internal/config"
 	"github.com/UreaLaden/inboxatlas/internal/storage"
 	"github.com/UreaLaden/inboxatlas/internal/version"
+	"github.com/UreaLaden/inboxatlas/pkg/models"
 )
 
 func main() {
@@ -76,6 +79,7 @@ func buildRoot(cfg config.Config) *cobra.Command {
 	root.AddCommand(buildVersionCmd())
 	root.AddCommand(buildConfigCmd(cfg))
 	root.AddCommand(buildMailboxCmd(cfg))
+	root.AddCommand(buildAuthCmd(cfg))
 
 	return root
 }
@@ -193,6 +197,80 @@ func runMailboxList(w io.Writer, st *storage.Store) error {
 		_, _ = fmt.Fprintf(tw, "%s\t%s\t%s\t%s\n", mb.Alias, mb.ID, mb.Provider, lastSynced)
 	}
 	return tw.Flush()
+}
+
+// buildAuthCmd returns the "auth" subcommand group.
+func buildAuthCmd(cfg config.Config) *cobra.Command {
+	cmd := &cobra.Command{
+		Use:   "auth",
+		Short: "Authenticate with a mail provider",
+	}
+	cmd.AddCommand(buildAuthGmailCmd(cfg))
+	return cmd
+}
+
+// buildAuthGmailCmd returns the "auth gmail" subcommand.
+func buildAuthGmailCmd(cfg config.Config) *cobra.Command {
+	var account string
+	var alias string
+
+	cmd := &cobra.Command{
+		Use:   "gmail",
+		Short: "Authenticate with Gmail using OAuth 2.0",
+		RunE: func(cmd *cobra.Command, _ []string) error {
+			return runAuthGmail(cmd.Context(), cmd.OutOrStdout(), cfg, account, alias)
+		},
+	}
+	cmd.Flags().StringVar(&account, "account", "", "Gmail address to authenticate")
+	cmd.Flags().StringVar(&alias, "alias", "", "optional alias for this mailbox")
+	_ = cmd.MarkFlagRequired("account")
+	return cmd
+}
+
+// runAuthGmail checks credentials then delegates to runAuthGmailWithFlow using
+// auth.RunFlow as the live flow implementation.
+func runAuthGmail(ctx context.Context, w io.Writer, cfg config.Config, account, alias string) error {
+	if _, err := os.Stat(cfg.CredentialsPath); err != nil {
+		return fmt.Errorf("credentials file not found at %s — set credentials_path in config or INBOXATLAS_CREDENTIALS_PATH", cfg.CredentialsPath)
+	}
+	oauthCfg, err := auth.LoadCredentials(cfg.CredentialsPath)
+	if err != nil {
+		return err
+	}
+	return runAuthGmailWithFlow(ctx, w, cfg, account, alias, oauthCfg, auth.RunFlow)
+}
+
+// runAuthGmailWithFlow runs the OAuth flow using flow, saves the token, and
+// registers the mailbox. It is separated from runAuthGmail for testability.
+func runAuthGmailWithFlow(ctx context.Context, w io.Writer, cfg config.Config, account, alias string, oauthCfg *oauth2.Config, flow func(context.Context, *oauth2.Config, io.Writer) (*oauth2.Token, error)) error {
+	canonicalAccount := strings.ToLower(account)
+
+	token, err := flow(ctx, oauthCfg, w)
+	if err != nil {
+		return err
+	}
+
+	if err := auth.SaveToken(cfg.TokenDir, "gmail", canonicalAccount, token); err != nil {
+		return err
+	}
+
+	st, err := storage.Open(cfg.StoragePath)
+	if err != nil {
+		return fmt.Errorf("open storage: %w", err)
+	}
+	defer func() { _ = st.Close() }()
+
+	mb := models.Mailbox{ID: canonicalAccount, Alias: alias, Provider: "gmail"}
+	if err := st.CreateMailbox(ctx, mb); err != nil {
+		// If already registered, treat as no-op.
+		existing, getErr := st.GetMailbox(ctx, canonicalAccount)
+		if getErr != nil || existing == nil {
+			return fmt.Errorf("register mailbox: %w", err)
+		}
+	}
+
+	_, _ = fmt.Fprintf(w, "Authenticated successfully. Mailbox %s registered.\n", canonicalAccount)
+	return nil
 }
 
 // runMailboxRemove resolves account, optionally prompts for confirmation (reading

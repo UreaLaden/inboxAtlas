@@ -1,5 +1,4 @@
 .ai/**/*.*
-!.ai/**/*-template.*
 .claude
 
 # Built binaries (root-level only — /prefix prevents matching cmd/inboxatlas/)
