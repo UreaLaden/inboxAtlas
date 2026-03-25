@@ -53,7 +53,7 @@ func TestBuildRoot_HasSubcommands(t *testing.T) {
 	for _, cmd := range root.Commands() {
 		names[cmd.Name()] = true
 	}
-	for _, want := range []string{"version", "config", "mailbox", "auth"} {
+	for _, want := range []string{"version", "config", "mailbox", "auth", "sync"} {
 		if !names[want] {
 			t.Errorf("expected subcommand %q to be registered", want)
 		}
@@ -536,6 +536,231 @@ func TestRunAuthGmailWithFlow_CanonicalizesAccount(t *testing.T) {
 
 	if _, err := os.Stat(auth.TokenPath(cfg.TokenDir, "gmail", "user@example.com")); err != nil {
 		t.Fatalf("expected token file for canonical email: %v", err)
+	}
+}
+
+// --- buildConfigShowCmd — new fields ---
+
+func TestBuildConfigShowCmd_IncludesNewFields(t *testing.T) {
+	cfg := config.Default()
+	cmd := buildConfigShowCmd(cfg)
+
+	var buf bytes.Buffer
+	cmd.SetOut(&buf)
+	if err := cmd.Execute(); err != nil {
+		t.Fatalf("Execute: %v", err)
+	}
+	out := buf.String()
+	for _, want := range []string{"token_storage", "sync_delay_ms"} {
+		if !strings.Contains(out, want) {
+			t.Errorf("expected %q in config show output", want)
+		}
+	}
+}
+
+// --- buildSyncCmd ---
+
+func TestBuildSyncCmd_Subcommands(t *testing.T) {
+	cmd := buildSyncCmd(config.Default())
+	names := make(map[string]bool)
+	for _, sub := range cmd.Commands() {
+		names[sub.Name()] = true
+	}
+	for _, want := range []string{"gmail", "status"} {
+		if !names[want] {
+			t.Errorf("expected subcommand %q under sync", want)
+		}
+	}
+}
+
+func TestBuildSyncGmailCmd_RequiresAccount(t *testing.T) {
+	cmd := buildSyncGmailCmd(config.Default())
+	cmd.SetArgs([]string{}) // no --account
+	var buf bytes.Buffer
+	cmd.SetOut(&buf)
+	if err := cmd.Execute(); err == nil {
+		t.Error("expected error when --account is missing")
+	}
+}
+
+func TestBuildSyncStatusCmd_RequiresAccount(t *testing.T) {
+	cmd := buildSyncStatusCmd(config.Default())
+	cmd.SetArgs([]string{}) // no --account
+	var buf bytes.Buffer
+	cmd.SetOut(&buf)
+	if err := cmd.Execute(); err == nil {
+		t.Error("expected error when --account is missing")
+	}
+}
+
+// --- runSyncStatus ---
+
+func TestRunSyncStatus_NoCheckpoint(t *testing.T) {
+	dir := t.TempDir()
+	dbPath := filepath.Join(dir, "test.db")
+	st, err := storage.Open(dbPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := st.CreateMailbox(context.Background(), models.Mailbox{ID: "user@example.com", Provider: "gmail"}); err != nil {
+		t.Fatal(err)
+	}
+	_ = st.Close()
+
+	cfg := config.Default()
+	cfg.StoragePath = dbPath
+
+	var buf bytes.Buffer
+	if err := runSyncStatus(&buf, cfg, "user@example.com"); err != nil {
+		t.Fatalf("runSyncStatus: %v", err)
+	}
+	if !strings.Contains(buf.String(), "No sync checkpoint found") {
+		t.Errorf("expected 'No sync checkpoint found', got: %q", buf.String())
+	}
+}
+
+func TestRunSyncStatus_WithCheckpoint(t *testing.T) {
+	dir := t.TempDir()
+	dbPath := filepath.Join(dir, "test.db")
+	st, err := storage.Open(dbPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx := context.Background()
+	if err := st.CreateMailbox(ctx, models.Mailbox{ID: "user@example.com", Provider: "gmail"}); err != nil {
+		t.Fatal(err)
+	}
+	now := time.Date(2026, 1, 15, 10, 0, 0, 0, time.UTC)
+	_ = st.SaveCheckpoint(ctx, storage.SyncCheckpoint{
+		MailboxID:      "user@example.com",
+		Provider:       "gmail",
+		MessagesSynced: 42,
+		Status:         "completed",
+		StartedAt:      now,
+		UpdatedAt:      now,
+	})
+	_ = st.Close()
+
+	cfg := config.Default()
+	cfg.StoragePath = dbPath
+
+	var buf bytes.Buffer
+	if err := runSyncStatus(&buf, cfg, "user@example.com"); err != nil {
+		t.Fatalf("runSyncStatus: %v", err)
+	}
+	out := buf.String()
+	for _, want := range []string{"user@example.com", "gmail", "completed", "42"} {
+		if !strings.Contains(out, want) {
+			t.Errorf("expected %q in output:\n%s", want, out)
+		}
+	}
+}
+
+func TestRunSyncStatus_UnknownMailbox(t *testing.T) {
+	dir := t.TempDir()
+	cfg := config.Default()
+	cfg.StoragePath = filepath.Join(dir, "test.db")
+
+	var buf bytes.Buffer
+	err := runSyncStatus(&buf, cfg, "nobody@example.com")
+	if err == nil {
+		t.Error("expected error for unregistered mailbox")
+	}
+}
+
+// --- runSyncGmail error paths ---
+
+func TestRunSyncGmail_MissingCredentials(t *testing.T) {
+	dir := t.TempDir()
+	dbPath := filepath.Join(dir, "test.db")
+	st, err := storage.Open(dbPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := st.CreateMailbox(context.Background(), models.Mailbox{ID: "user@example.com", Provider: "gmail"}); err != nil {
+		t.Fatal(err)
+	}
+	_ = st.Close()
+
+	cfg := config.Default()
+	cfg.StoragePath = dbPath
+	cfg.CredentialsPath = filepath.Join(dir, "nonexistent.json")
+
+	var buf bytes.Buffer
+	err = runSyncGmail(context.Background(), &buf, cfg, "user@example.com")
+	if err == nil {
+		t.Fatal("expected error for missing credentials")
+	}
+	if !strings.Contains(err.Error(), "credentials file not found") {
+		t.Errorf("expected 'credentials file not found', got: %v", err)
+	}
+}
+
+func TestRunSyncGmail_UnknownMailbox(t *testing.T) {
+	dir := t.TempDir()
+	cfg := config.Default()
+	cfg.StoragePath = filepath.Join(dir, "test.db")
+
+	var buf bytes.Buffer
+	err := runSyncGmail(context.Background(), &buf, cfg, "nobody@example.com")
+	if err == nil {
+		t.Error("expected error for unregistered mailbox")
+	}
+}
+
+func TestRunSyncGmail_MalformedCredentials(t *testing.T) {
+	dir := t.TempDir()
+	dbPath := filepath.Join(dir, "test.db")
+	st, err := storage.Open(dbPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := st.CreateMailbox(context.Background(), models.Mailbox{ID: "user@example.com", Provider: "gmail"}); err != nil {
+		t.Fatal(err)
+	}
+	_ = st.Close()
+
+	credPath := filepath.Join(dir, "credentials.json")
+	if err := os.WriteFile(credPath, []byte("not-json"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	cfg := config.Default()
+	cfg.StoragePath = dbPath
+	cfg.CredentialsPath = credPath
+
+	var buf bytes.Buffer
+	err = runSyncGmail(context.Background(), &buf, cfg, "user@example.com")
+	if err == nil {
+		t.Fatal("expected error for malformed credentials")
+	}
+}
+
+func TestBuildSyncGmailCmd_RunE_UnknownMailbox(t *testing.T) {
+	dir := t.TempDir()
+	cfg := config.Default()
+	cfg.StoragePath = filepath.Join(dir, "test.db")
+
+	cmd := buildSyncGmailCmd(cfg)
+	cmd.SetArgs([]string{"--account", "nobody@example.com"})
+	var buf bytes.Buffer
+	cmd.SetOut(&buf)
+	if err := cmd.Execute(); err == nil {
+		t.Error("expected error for unknown mailbox in RunE")
+	}
+}
+
+func TestBuildSyncStatusCmd_RunE_UnknownMailbox(t *testing.T) {
+	dir := t.TempDir()
+	cfg := config.Default()
+	cfg.StoragePath = filepath.Join(dir, "test.db")
+
+	cmd := buildSyncStatusCmd(cfg)
+	cmd.SetArgs([]string{"--account", "nobody@example.com"})
+	var buf bytes.Buffer
+	cmd.SetOut(&buf)
+	if err := cmd.Execute(); err == nil {
+		t.Error("expected error for unknown mailbox in RunE")
 	}
 }
 

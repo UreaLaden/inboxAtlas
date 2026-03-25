@@ -172,6 +172,31 @@ func TestConfig_TokenStorageEnvOverride(t *testing.T) {
 	}
 }
 
+func TestConfig_SyncDelayMSDefault(t *testing.T) {
+	cfg := Default()
+	if cfg.SyncDelayMS != 100 {
+		t.Errorf("SyncDelayMS default: got %d, want 100", cfg.SyncDelayMS)
+	}
+}
+
+func TestConfig_SyncDelayMSEnvOverride(t *testing.T) {
+	t.Setenv("INBOXATLAS_SYNC_DELAY_MS", "200")
+	cfg := Default()
+	applyEnv(&cfg)
+	if cfg.SyncDelayMS != 200 {
+		t.Errorf("SyncDelayMS env override: got %d, want 200", cfg.SyncDelayMS)
+	}
+}
+
+func TestConfig_SyncDelayMSEnvInvalid(t *testing.T) {
+	t.Setenv("INBOXATLAS_SYNC_DELAY_MS", "notanumber")
+	cfg := Default()
+	applyEnv(&cfg)
+	if cfg.SyncDelayMS != 100 {
+		t.Errorf("SyncDelayMS should stay at default for invalid env, got %d", cfg.SyncDelayMS)
+	}
+}
+
 func TestEnsureDirs(t *testing.T) {
 	tmp := t.TempDir()
 	t.Setenv("HOME", tmp)

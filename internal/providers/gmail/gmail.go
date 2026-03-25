@@ -3,18 +3,40 @@ package gmail
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"net/mail"
 	"strings"
 
 	"golang.org/x/oauth2"
 	gmailapi "google.golang.org/api/gmail/v1"
+	"google.golang.org/api/googleapi"
 	"google.golang.org/api/option"
 
 	"github.com/UreaLaden/inboxatlas/internal/auth"
 	"github.com/UreaLaden/inboxatlas/internal/normalization"
 	"github.com/UreaLaden/inboxatlas/pkg/models"
 )
+
+// retryableError marks a provider error as eligible for backoff retry.
+type retryableError struct{ err error }
+
+func (e *retryableError) Error() string     { return e.err.Error() }
+func (e *retryableError) IsRetryable() bool { return true }
+func (e *retryableError) Unwrap() error     { return e.err }
+
+// wrapIfRetryable returns a *retryableError if err is a *googleapi.Error with
+// code 429 or 503. All other errors are returned unchanged.
+func wrapIfRetryable(err error) error {
+	if err == nil {
+		return nil
+	}
+	var apiErr *googleapi.Error
+	if errors.As(err, &apiErr) && (apiErr.Code == 429 || apiErr.Code == 503) {
+		return &retryableError{err: err}
+	}
+	return err
+}
 
 // Provider implements models.MailProvider for Gmail using the Gmail REST API.
 // Call New to construct a Provider; call Authenticate before any other method.
@@ -61,7 +83,7 @@ func (p *Provider) ListMessages(ctx context.Context, pageToken string) ([]string
 	}
 	resp, err := req.Context(ctx).Do()
 	if err != nil {
-		return nil, "", fmt.Errorf("gmail: list messages: %w", err)
+		return nil, "", fmt.Errorf("gmail: list messages: %w", wrapIfRetryable(err))
 	}
 	ids := make([]string, 0, len(resp.Messages))
 	for _, m := range resp.Messages {
@@ -79,7 +101,7 @@ func (p *Provider) GetMessageMeta(ctx context.Context, id string) (*models.Messa
 	}
 	msg, err := p.svc.Users.Messages.Get(p.email, id).Format("metadata").Context(ctx).Do()
 	if err != nil {
-		return nil, fmt.Errorf("gmail: get message %s: %w", id, err)
+		return nil, fmt.Errorf("gmail: get message %s: %w", id, wrapIfRetryable(err))
 	}
 	return parseMessageMeta(p.email, msg), nil
 }

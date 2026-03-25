@@ -11,9 +11,11 @@ import (
 
 	"golang.org/x/oauth2"
 	gmailapi "google.golang.org/api/gmail/v1"
+	"google.golang.org/api/googleapi"
 	"google.golang.org/api/option"
 
 	"github.com/UreaLaden/inboxatlas/internal/auth"
+	"github.com/UreaLaden/inboxatlas/pkg/models"
 )
 
 // stubTokenStorage is a minimal auth.TokenStorage for testing Authenticate errors.
@@ -362,5 +364,40 @@ func TestGetMessageMeta_APIError(t *testing.T) {
 	_, err := p.GetMessageMeta(context.Background(), "missing")
 	if err == nil {
 		t.Fatal("expected error from API failure")
+	}
+}
+
+// --- wrapIfRetryable ---
+
+func TestWrapIfRetryable_429(t *testing.T) {
+	apiErr := &googleapi.Error{Code: 429, Message: "quota exceeded"}
+	wrapped := wrapIfRetryable(apiErr)
+	var re models.RetryableError
+	if !errors.As(wrapped, &re) || !re.IsRetryable() {
+		t.Error("expected retryable error for 429")
+	}
+}
+
+func TestWrapIfRetryable_503(t *testing.T) {
+	apiErr := &googleapi.Error{Code: 503, Message: "unavailable"}
+	wrapped := wrapIfRetryable(apiErr)
+	var re models.RetryableError
+	if !errors.As(wrapped, &re) || !re.IsRetryable() {
+		t.Error("expected retryable error for 503")
+	}
+}
+
+func TestWrapIfRetryable_Other(t *testing.T) {
+	apiErr := &googleapi.Error{Code: 404, Message: "not found"}
+	wrapped := wrapIfRetryable(apiErr)
+	var re models.RetryableError
+	if errors.As(wrapped, &re) {
+		t.Error("expected non-retryable error for 404")
+	}
+}
+
+func TestWrapIfRetryable_Nil(t *testing.T) {
+	if wrapIfRetryable(nil) != nil {
+		t.Error("expected nil for nil input")
 	}
 }

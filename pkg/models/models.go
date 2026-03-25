@@ -45,3 +45,12 @@ type MailProvider interface {
 	ListMessages(ctx context.Context, pageToken string) (ids []string, nextToken string, err error)
 	GetMessageMeta(ctx context.Context, id string) (*MessageMeta, error)
 }
+
+// RetryableError is implemented by errors from MailProvider methods that the
+// ingestion pipeline may safely retry with exponential backoff.
+// Providers wrap HTTP 429 (quota exceeded) and 503 (service unavailable) errors
+// in a type implementing this interface; the ingestion layer checks it via errors.As.
+type RetryableError interface {
+	error
+	IsRetryable() bool
+}

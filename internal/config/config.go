@@ -5,6 +5,7 @@ package config
 import (
 	"os"
 	"path/filepath"
+	"strconv"
 
 	"github.com/BurntSushi/toml"
 )
@@ -19,6 +20,7 @@ type Config struct {
 	DefaultProvider string `toml:"default_provider"`
 	CredentialsPath string `toml:"credentials_path"`
 	TokenStorage    string `toml:"token_storage"` // "keyring" (default) or "file"
+	SyncDelayMS     int    `toml:"sync_delay_ms"` // per-request delay floor in milliseconds (default 100)
 }
 
 // Default returns a Config populated with default values derived from the
@@ -32,6 +34,7 @@ func Default() Config {
 		DefaultProvider: "gmail",
 		CredentialsPath: filepath.Join(home, ".config", "inboxatlas", "credentials.json"),
 		TokenStorage:    "keyring",
+		SyncDelayMS:     100,
 	}
 }
 
@@ -88,6 +91,11 @@ func applyEnv(cfg *Config) {
 	}
 	if v := os.Getenv("INBOXATLAS_TOKEN_STORAGE"); v != "" {
 		cfg.TokenStorage = v
+	}
+	if v := os.Getenv("INBOXATLAS_SYNC_DELAY_MS"); v != "" {
+		if n, err := strconv.Atoi(v); err == nil {
+			cfg.SyncDelayMS = n
+		}
 	}
 }
 
