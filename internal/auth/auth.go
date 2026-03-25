@@ -20,6 +20,9 @@ import (
 	keyring "github.com/zalando/go-keyring"
 	"golang.org/x/oauth2"
 	"golang.org/x/oauth2/google"
+	"golang.org/x/oauth2/jwt"
+	gmailapi "google.golang.org/api/gmail/v1"
+	"google.golang.org/api/option"
 
 	"github.com/UreaLaden/inboxatlas/internal/config"
 )
@@ -40,6 +43,20 @@ type installedApp struct {
 	ClientSecret string   `json:"client_secret"`
 	RedirectURIs []string `json:"redirect_uris"`
 }
+
+type serviceAccountFile struct {
+	Type        string `json:"type"`
+	ClientEmail string `json:"client_email"`
+	PrivateKey  string `json:"private_key"`
+	TokenURI    string `json:"token_uri"`
+}
+
+type gmailCredentialsKind string
+
+const (
+	gmailCredentialsKindInstalled      gmailCredentialsKind = "desktop_oauth"
+	gmailCredentialsKindServiceAccount gmailCredentialsKind = "service_account"
+)
 
 // TokenStorage abstracts OAuth token persistence. Callers use this interface;
 // FileTokenStorage and KeyringTokenStorage provide the concrete implementations.
@@ -120,13 +137,131 @@ func NewTokenStorage(cfg *config.Config) TokenStorage {
 	return &KeyringTokenStorage{service: "inboxatlas", fallback: file}
 }
 
-// LoadCredentials reads the Google OAuth credentials JSON at path and returns
-// a configured oauth2.Config for the Gmail readonly scope.
-func LoadCredentials(path string) (*oauth2.Config, error) {
+var gmailProfileFetcher = func(ctx context.Context, src oauth2.TokenSource) (string, error) {
+	svc, err := gmailapi.NewService(ctx, option.WithTokenSource(src))
+	if err != nil {
+		return "", fmt.Errorf("build gmail service: %w", err)
+	}
+	profile, err := svc.Users.GetProfile("me").Context(ctx).Do()
+	if err != nil {
+		return "", fmt.Errorf("get gmail profile: %w", err)
+	}
+	return strings.ToLower(profile.EmailAddress), nil
+}
+
+// LoadInstalledAppCredentials reads the Google desktop OAuth credentials JSON
+// at path and returns a configured oauth2.Config for the Gmail readonly scope.
+func LoadInstalledAppCredentials(path string) (*oauth2.Config, error) {
 	data, err := os.ReadFile(path)
 	if err != nil {
 		return nil, fmt.Errorf("read credentials: %w", err)
 	}
+	return loadInstalledAppCredentialsJSON(data)
+}
+
+// LoadServiceAccountJWTConfig reads the Google service-account credentials JSON
+// at path and returns a jwt.Config for the Gmail readonly scope.
+func LoadServiceAccountJWTConfig(path string) (*jwt.Config, error) {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return nil, fmt.Errorf("read credentials: %w", err)
+	}
+	return loadServiceAccountJWTConfigJSON(data)
+}
+
+// LoadCredentials reads the Google OAuth credentials JSON at path and returns
+// a configured oauth2.Config for the Gmail readonly scope.
+func LoadCredentials(path string) (*oauth2.Config, error) {
+	return LoadInstalledAppCredentials(path)
+}
+
+// ResolveGmailTokenSource selects the Gmail auth mode for mailboxID and returns
+// a token-source factory for the chosen mode.
+func ResolveGmailTokenSource(cfg *config.Config, mailboxID string) (func(context.Context) (oauth2.TokenSource, error), error) {
+	data, err := os.ReadFile(cfg.CredentialsPath)
+	if err != nil {
+		return nil, fmt.Errorf("read credentials: %w", err)
+	}
+	canonicalMailbox := strings.ToLower(mailboxID)
+	kind, err := detectGmailCredentialsKind(data)
+	if err != nil {
+		return nil, err
+	}
+
+	switch kind {
+	case gmailCredentialsKindServiceAccount:
+		jwtCfg, err := loadServiceAccountJWTConfigJSON(data)
+		if err != nil {
+			return nil, err
+		}
+		return func(ctx context.Context) (oauth2.TokenSource, error) {
+			delegatedCfg := *jwtCfg
+			delegatedCfg.Subject = canonicalMailbox
+			return delegatedCfg.TokenSource(ctx), nil
+		}, nil
+	case gmailCredentialsKindInstalled:
+		oauthCfg, err := loadInstalledAppCredentialsJSON(data)
+		if err != nil {
+			return nil, err
+		}
+		ts := NewTokenStorage(cfg)
+		if _, err := ts.Load("gmail", canonicalMailbox); err != nil {
+			return nil, fmt.Errorf("gmail auth: no stored user token for %s — run 'inboxatlas auth gmail --account %s' first: %w", canonicalMailbox, canonicalMailbox, err)
+		}
+		return func(ctx context.Context) (oauth2.TokenSource, error) {
+			token, err := ts.Load("gmail", canonicalMailbox)
+			if err != nil {
+				return nil, fmt.Errorf("gmail auth: no stored user token for %s — run 'inboxatlas auth gmail --account %s' first: %w", canonicalMailbox, canonicalMailbox, err)
+			}
+			return oauthCfg.TokenSource(ctx, token), nil
+		}, nil
+	default:
+		return nil, fmt.Errorf("unsupported gmail credentials kind %q", kind)
+	}
+}
+
+// ValidateGmailDelegation validates that the service-account key at path can
+// impersonate mailboxID for Gmail readonly access.
+func ValidateGmailDelegation(ctx context.Context, path, mailboxID string) error {
+	jwtCfg, err := LoadServiceAccountJWTConfig(path)
+	if err != nil {
+		return err
+	}
+	canonicalMailbox := strings.ToLower(mailboxID)
+	delegatedCfg := *jwtCfg
+	delegatedCfg.Subject = canonicalMailbox
+	email, err := gmailProfileFetcher(ctx, delegatedCfg.TokenSource(ctx))
+	if err != nil {
+		return fmt.Errorf("validate delegated gmail auth for %s: %w", canonicalMailbox, err)
+	}
+	if email != canonicalMailbox {
+		return fmt.Errorf("delegated gmail profile mismatch: got %s, want %s", email, canonicalMailbox)
+	}
+	return nil
+}
+
+func detectGmailCredentialsKind(data []byte) (gmailCredentialsKind, error) {
+	var cf credentialsFile
+	if err := json.Unmarshal(data, &cf); err != nil {
+		return "", fmt.Errorf("parse credentials: %w", err)
+	}
+
+	if cf.Installed != nil {
+		return gmailCredentialsKindInstalled, nil
+	}
+
+	var sa serviceAccountFile
+	if err := json.Unmarshal(data, &sa); err != nil {
+		return "", fmt.Errorf("parse credentials: %w", err)
+	}
+	if sa.Type == "service_account" && sa.ClientEmail != "" && sa.PrivateKey != "" && sa.TokenURI != "" {
+		return gmailCredentialsKindServiceAccount, nil
+	}
+
+	return "", fmt.Errorf("credentials file must be desktop OAuth ('installed') or service account JSON")
+}
+
+func loadInstalledAppCredentialsJSON(data []byte) (*oauth2.Config, error) {
 	var cf credentialsFile
 	if err := json.Unmarshal(data, &cf); err != nil {
 		return nil, fmt.Errorf("parse credentials: %w", err)
@@ -140,6 +275,22 @@ func LoadCredentials(path string) (*oauth2.Config, error) {
 		Endpoint:     google.Endpoint,
 		Scopes:       []string{gmailScope},
 	}, nil
+}
+
+func loadServiceAccountJWTConfigJSON(data []byte) (*jwt.Config, error) {
+	kind, err := detectGmailCredentialsKind(data)
+	if err != nil {
+		return nil, err
+	}
+	if kind != gmailCredentialsKindServiceAccount {
+		return nil, fmt.Errorf("credentials file is not a service account key")
+	}
+	jwtCfg, err := google.JWTConfigFromJSON(data, gmailScope)
+	if err != nil {
+		return nil, fmt.Errorf("parse service account credentials: %w", err)
+	}
+	jwtCfg.Subject = ""
+	return jwtCfg, nil
 }
 
 // codeExchanger exchanges an authorization code for an OAuth token.

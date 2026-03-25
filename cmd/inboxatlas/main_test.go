@@ -15,6 +15,7 @@ import (
 
 	"github.com/UreaLaden/inboxatlas/internal/auth"
 	"github.com/UreaLaden/inboxatlas/internal/config"
+	"github.com/UreaLaden/inboxatlas/internal/ingestion"
 	"github.com/UreaLaden/inboxatlas/internal/storage"
 	"github.com/UreaLaden/inboxatlas/pkg/models"
 )
@@ -351,6 +352,13 @@ func TestBuildAuthGmailCmd_MissingAccount(t *testing.T) {
 	}
 }
 
+func TestBuildAuthGmailCmd_DelegatedFlag(t *testing.T) {
+	cmd := buildAuthGmailCmd(config.Default())
+	if cmd.Flags().Lookup("delegated") == nil {
+		t.Fatal("expected --delegated flag")
+	}
+}
+
 // --- runAuthGmail ---
 
 func TestRunAuthGmail_MissingCredentials(t *testing.T) {
@@ -477,6 +485,47 @@ func TestRunAuthGmail_MalformedCredentials(t *testing.T) {
 	err := runAuthGmail(context.Background(), &buf, cfg, "user@example.com", "")
 	if err == nil {
 		t.Fatal("expected error for malformed credentials")
+	}
+}
+
+func TestRunAuthGmailDelegated_Success(t *testing.T) {
+	dir := t.TempDir()
+	cfg := config.Default()
+	cfg.StoragePath = filepath.Join(dir, "test.db")
+	cfg.CredentialsPath = filepath.Join(dir, "service-account.json")
+	if err := os.WriteFile(cfg.CredentialsPath, []byte(`{}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	orig := validateGmailDelegation
+	validateGmailDelegation = func(context.Context, string, string) error { return nil }
+	t.Cleanup(func() { validateGmailDelegation = orig })
+
+	var buf bytes.Buffer
+	if err := runAuthGmailDelegated(context.Background(), &buf, cfg, "User@Example.com", "work"); err != nil {
+		t.Fatalf("runAuthGmailDelegated: %v", err)
+	}
+	if !strings.Contains(buf.String(), "Delegation validated successfully") {
+		t.Fatalf("unexpected output: %q", buf.String())
+	}
+}
+
+func TestRunAuthGmailDelegated_ValidationError(t *testing.T) {
+	dir := t.TempDir()
+	cfg := config.Default()
+	cfg.StoragePath = filepath.Join(dir, "test.db")
+	cfg.CredentialsPath = filepath.Join(dir, "service-account.json")
+	if err := os.WriteFile(cfg.CredentialsPath, []byte(`{}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	orig := validateGmailDelegation
+	validateGmailDelegation = func(context.Context, string, string) error { return fmt.Errorf("delegation failed") }
+	t.Cleanup(func() { validateGmailDelegation = orig })
+
+	err := runAuthGmailDelegated(context.Background(), io.Discard, cfg, "user@example.com", "")
+	if err == nil {
+		t.Fatal("expected delegated validation error")
 	}
 }
 
@@ -736,6 +785,61 @@ func TestRunSyncGmail_MalformedCredentials(t *testing.T) {
 	}
 }
 
+func TestRunSyncGmail_UsesResolvedTokenSource(t *testing.T) {
+	dir := t.TempDir()
+	dbPath := filepath.Join(dir, "test.db")
+	st, err := storage.Open(dbPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := st.CreateMailbox(context.Background(), models.Mailbox{ID: "user@example.com", Provider: "gmail"}); err != nil {
+		t.Fatal(err)
+	}
+	_ = st.Close()
+
+	cfg := config.Default()
+	cfg.StoragePath = dbPath
+	cfg.CredentialsPath = filepath.Join(dir, "credentials.json")
+	if err := os.WriteFile(cfg.CredentialsPath, []byte(`{}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	origResolve := resolveGmailTokenSource
+	origProvider := newGmailProvider
+	origRunIngestion := runIngestion
+	t.Cleanup(func() {
+		resolveGmailTokenSource = origResolve
+		newGmailProvider = origProvider
+		runIngestion = origRunIngestion
+	})
+
+	resolveCalled := false
+	providerCreated := false
+	ingestionCalled := false
+
+	resolveGmailTokenSource = func(_ *config.Config, mailboxID string) (func(context.Context) (oauth2.TokenSource, error), error) {
+		resolveCalled = mailboxID == "user@example.com"
+		return func(context.Context) (oauth2.TokenSource, error) {
+			return oauth2.StaticTokenSource(&oauth2.Token{AccessToken: "tok"}), nil
+		}, nil
+	}
+	newGmailProvider = func(email string, tokenSourceFactory func(context.Context) (oauth2.TokenSource, error)) models.MailProvider {
+		providerCreated = email == "user@example.com" && tokenSourceFactory != nil
+		return stubMailProvider{}
+	}
+	runIngestion = func(_ context.Context, opts ingestion.Options) error {
+		ingestionCalled = opts.MailboxID == "user@example.com" && opts.MailProvider != nil
+		return nil
+	}
+
+	if err := runSyncGmail(context.Background(), io.Discard, cfg, "user@example.com"); err != nil {
+		t.Fatalf("runSyncGmail: %v", err)
+	}
+	if !resolveCalled || !providerCreated || !ingestionCalled {
+		t.Fatalf("expected resolve/provider/ingestion path, got resolve=%v provider=%v ingestion=%v", resolveCalled, providerCreated, ingestionCalled)
+	}
+}
+
 func TestBuildSyncGmailCmd_RunE_UnknownMailbox(t *testing.T) {
 	dir := t.TempDir()
 	cfg := config.Default()
@@ -767,4 +871,16 @@ func TestBuildSyncStatusCmd_RunE_UnknownMailbox(t *testing.T) {
 // fixedTime returns a deterministic time for use in tests.
 func fixedTime() time.Time {
 	return time.Date(2026, 1, 1, 9, 0, 0, 0, time.UTC)
+}
+
+type stubMailProvider struct{}
+
+func (stubMailProvider) Authenticate(context.Context) error { return nil }
+
+func (stubMailProvider) ListMessages(context.Context, string) ([]string, string, error) {
+	return nil, "", nil
+}
+
+func (stubMailProvider) GetMessageMeta(context.Context, string) (*models.MessageMeta, error) {
+	return &models.MessageMeta{}, nil
 }

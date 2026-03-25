@@ -14,40 +14,38 @@ import (
 	"google.golang.org/api/googleapi"
 	"google.golang.org/api/option"
 
-	"github.com/UreaLaden/inboxatlas/internal/auth"
 	"github.com/UreaLaden/inboxatlas/pkg/models"
 )
 
-// stubTokenStorage is a minimal auth.TokenStorage for testing Authenticate errors.
-type stubTokenStorage struct {
-	token *oauth2.Token
-	err   error
-}
-
-func (s *stubTokenStorage) Save(_, _ string, _ *oauth2.Token) error { return nil }
-func (s *stubTokenStorage) Load(_, _ string) (*oauth2.Token, error) { return s.token, s.err }
-
-var _ auth.TokenStorage = (*stubTokenStorage)(nil)
-
 // --- Authenticate ---
 
-func TestAuthenticate_LoadTokenError(t *testing.T) {
-	ts := &stubTokenStorage{err: errors.New("no token")}
-	p := New(&oauth2.Config{}, ts, "user@example.com")
+func TestAuthenticate_TokenSourceFactoryError(t *testing.T) {
+	p := New("user@example.com", func(context.Context) (oauth2.TokenSource, error) {
+		return nil, errors.New("no token source")
+	})
 	err := p.Authenticate(context.Background())
 	if err == nil {
-		t.Fatal("expected error when LoadToken fails")
+		t.Fatal("expected error when token source factory fails")
 	}
 }
 
 func TestAuthenticate_Success(t *testing.T) {
-	ts := &stubTokenStorage{token: &oauth2.Token{AccessToken: "fake-token"}}
-	p := New(&oauth2.Config{}, ts, "user@example.com")
+	p := New("user@example.com", func(context.Context) (oauth2.TokenSource, error) {
+		return oauth2.StaticTokenSource(&oauth2.Token{AccessToken: "fake-token"}), nil
+	})
 	if err := p.Authenticate(context.Background()); err != nil {
 		t.Fatalf("Authenticate: unexpected error: %v", err)
 	}
 	if p.svc == nil {
 		t.Fatal("expected svc to be set after Authenticate")
+	}
+}
+
+func TestAuthenticate_NilTokenSourceFactory(t *testing.T) {
+	p := New("user@example.com", nil)
+	err := p.Authenticate(context.Background())
+	if err == nil {
+		t.Fatal("expected error when token source factory is nil")
 	}
 }
 
