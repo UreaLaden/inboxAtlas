@@ -11,12 +11,15 @@ import (
 	"path/filepath"
 	"strings"
 	"text/tabwriter"
+	"time"
 
 	"github.com/spf13/cobra"
 	"golang.org/x/oauth2"
 
 	"github.com/UreaLaden/inboxatlas/internal/auth"
 	"github.com/UreaLaden/inboxatlas/internal/config"
+	"github.com/UreaLaden/inboxatlas/internal/ingestion"
+	gmailprovider "github.com/UreaLaden/inboxatlas/internal/providers/gmail"
 	"github.com/UreaLaden/inboxatlas/internal/storage"
 	"github.com/UreaLaden/inboxatlas/internal/version"
 	"github.com/UreaLaden/inboxatlas/pkg/models"
@@ -80,6 +83,7 @@ func buildRoot(cfg config.Config) *cobra.Command {
 	root.AddCommand(buildConfigCmd(cfg))
 	root.AddCommand(buildMailboxCmd(cfg))
 	root.AddCommand(buildAuthCmd(cfg))
+	root.AddCommand(buildSyncCmd(cfg))
 
 	return root
 }
@@ -118,6 +122,8 @@ func buildConfigShowCmd(cfg config.Config) *cobra.Command {
 			_, _ = fmt.Fprintf(w, "token_dir:         %s\n", cfg.TokenDir)
 			_, _ = fmt.Fprintf(w, "default_provider:  %s\n", cfg.DefaultProvider)
 			_, _ = fmt.Fprintf(w, "credentials_path:  %s\n", cfg.CredentialsPath)
+			_, _ = fmt.Fprintf(w, "token_storage:     %s\n", cfg.TokenStorage)
+			_, _ = fmt.Fprintf(w, "sync_delay_ms:     %d\n", cfg.SyncDelayMS)
 		},
 	}
 }
@@ -271,6 +277,117 @@ func runAuthGmailWithFlow(ctx context.Context, w io.Writer, cfg config.Config, a
 	}
 
 	_, _ = fmt.Fprintf(w, "Authenticated successfully. Mailbox %s registered.\n", canonicalAccount)
+	return nil
+}
+
+// buildSyncCmd returns the "sync" subcommand group.
+func buildSyncCmd(cfg config.Config) *cobra.Command {
+	cmd := &cobra.Command{
+		Use:   "sync",
+		Short: "Sync messages from a mail provider",
+	}
+	cmd.AddCommand(buildSyncGmailCmd(cfg))
+	cmd.AddCommand(buildSyncStatusCmd(cfg))
+	return cmd
+}
+
+// buildSyncGmailCmd returns the "sync gmail" subcommand.
+func buildSyncGmailCmd(cfg config.Config) *cobra.Command {
+	var account string
+	cmd := &cobra.Command{
+		Use:   "gmail",
+		Short: "Sync messages from Gmail",
+		RunE: func(cmd *cobra.Command, _ []string) error {
+			return runSyncGmail(cmd.Context(), cmd.OutOrStdout(), cfg, account)
+		},
+	}
+	cmd.Flags().StringVar(&account, "account", "", "mailbox email or alias to sync")
+	_ = cmd.MarkFlagRequired("account")
+	return cmd
+}
+
+// buildSyncStatusCmd returns the "sync status" subcommand.
+func buildSyncStatusCmd(cfg config.Config) *cobra.Command {
+	var account string
+	cmd := &cobra.Command{
+		Use:   "status",
+		Short: "Show sync status for a mailbox",
+		RunE: func(cmd *cobra.Command, _ []string) error {
+			return runSyncStatus(cmd.OutOrStdout(), cfg, account)
+		},
+	}
+	cmd.Flags().StringVar(&account, "account", "", "mailbox email or alias")
+	_ = cmd.MarkFlagRequired("account")
+	return cmd
+}
+
+// runSyncGmail resolves the mailbox, loads credentials, builds a Gmail provider,
+// and runs a full ingestion sync. It is separated from the Cobra handler for
+// testability.
+func runSyncGmail(ctx context.Context, w io.Writer, cfg config.Config, account string) error {
+	st, err := storage.Open(cfg.StoragePath)
+	if err != nil {
+		return fmt.Errorf("open storage: %w", err)
+	}
+	defer func() { _ = st.Close() }()
+
+	mb, err := storage.ResolveMailbox(ctx, st, account)
+	if err != nil {
+		return err
+	}
+
+	if _, err := os.Stat(cfg.CredentialsPath); err != nil {
+		return fmt.Errorf("credentials file not found at %s — set credentials_path in config or INBOXATLAS_CREDENTIALS_PATH", cfg.CredentialsPath)
+	}
+	oauthCfg, err := auth.LoadCredentials(cfg.CredentialsPath)
+	if err != nil {
+		return err
+	}
+
+	ts := auth.NewTokenStorage(&cfg)
+	provider := gmailprovider.New(oauthCfg, ts, mb.ID)
+
+	return ingestion.Run(ctx, ingestion.Options{
+		MailboxID:    mb.ID,
+		Provider:     "gmail",
+		MailProvider: provider,
+		Store:        st,
+		Stdout:       w,
+		RequestDelay: time.Duration(cfg.SyncDelayMS) * time.Millisecond,
+		MaxRetries:   5,
+	})
+}
+
+// runSyncStatus prints the current sync checkpoint for a mailbox to w. It is
+// separated from the Cobra handler for testability.
+func runSyncStatus(w io.Writer, cfg config.Config, account string) error {
+	st, err := storage.Open(cfg.StoragePath)
+	if err != nil {
+		return fmt.Errorf("open storage: %w", err)
+	}
+	defer func() { _ = st.Close() }()
+
+	ctx := context.Background()
+	mb, err := storage.ResolveMailbox(ctx, st, account)
+	if err != nil {
+		return err
+	}
+
+	cp, err := st.GetCheckpoint(ctx, mb.ID, "gmail")
+	if err != nil {
+		return fmt.Errorf("get sync status: %w", err)
+	}
+	if cp == nil {
+		_, _ = fmt.Fprintf(w, "No sync checkpoint found for %s (gmail).\n", mb.ID)
+		return nil
+	}
+
+	_, _ = fmt.Fprintf(w, "Mailbox:         %s\n", mb.ID)
+	_, _ = fmt.Fprintf(w, "Provider:        %s\n", cp.Provider)
+	_, _ = fmt.Fprintf(w, "Status:          %s\n", cp.Status)
+	_, _ = fmt.Fprintf(w, "Messages synced: %d\n", cp.MessagesSynced)
+	_, _ = fmt.Fprintf(w, "Started:         %s\n", cp.StartedAt.Format("2006-01-02 15:04:05"))
+	_, _ = fmt.Fprintf(w, "Last updated:    %s\n", cp.UpdatedAt.Format("2006-01-02 15:04:05"))
 	return nil
 }
 
