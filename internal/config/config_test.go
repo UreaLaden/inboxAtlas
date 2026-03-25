@@ -156,6 +156,22 @@ func TestLoadInvalidTOML(t *testing.T) {
 	}
 }
 
+func TestConfig_TokenStorageDefault(t *testing.T) {
+	cfg := Default()
+	if cfg.TokenStorage != "keyring" {
+		t.Errorf("TokenStorage default: got %q, want %q", cfg.TokenStorage, "keyring")
+	}
+}
+
+func TestConfig_TokenStorageEnvOverride(t *testing.T) {
+	t.Setenv("INBOXATLAS_TOKEN_STORAGE", "file")
+	cfg := Default()
+	applyEnv(&cfg)
+	if cfg.TokenStorage != "file" {
+		t.Errorf("TokenStorage env override: got %q, want %q", cfg.TokenStorage, "file")
+	}
+}
+
 func TestEnsureDirs(t *testing.T) {
 	tmp := t.TempDir()
 	t.Setenv("HOME", tmp)

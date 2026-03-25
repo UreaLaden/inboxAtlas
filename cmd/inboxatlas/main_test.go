@@ -435,6 +435,7 @@ func TestRunAuthGmailWithFlow_SaveTokenError(t *testing.T) {
 	dir := t.TempDir()
 	cfg := config.Default()
 	cfg.StoragePath = filepath.Join(dir, "test.db")
+	cfg.TokenStorage = "file" // use file storage so blocked dir causes an error
 	// Block token directory: create a file where SaveToken would create a dir.
 	tokenFile := filepath.Join(dir, "tokens")
 	if err := os.WriteFile(tokenFile, []byte("block"), 0o600); err != nil {
@@ -507,6 +508,7 @@ func TestRunAuthGmailWithFlow_CanonicalizesAccount(t *testing.T) {
 	cfg := config.Default()
 	cfg.TokenDir = filepath.Join(dir, "tokens")
 	cfg.StoragePath = filepath.Join(dir, "test.db")
+	cfg.TokenStorage = "file" // use file storage so token path can be verified on disk
 
 	tok := &oauth2.Token{AccessToken: "test-access", RefreshToken: "test-refresh"}
 	var buf bytes.Buffer
