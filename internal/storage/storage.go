@@ -4,6 +4,7 @@ package storage
 import (
 	"context"
 	"database/sql"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"strings"
@@ -47,6 +48,56 @@ CREATE TABLE IF NOT EXISTS mailboxes (
     provider       TEXT NOT NULL,
     created_at     TEXT NOT NULL,
     last_synced_at TEXT
+);
+
+CREATE TABLE IF NOT EXISTS messages (
+    id              TEXT PRIMARY KEY,
+    mailbox_id      TEXT NOT NULL REFERENCES mailboxes(id),
+    provider        TEXT NOT NULL,
+    provider_id     TEXT NOT NULL,
+    thread_id       TEXT,
+    from_email      TEXT,
+    from_name       TEXT,
+    domain          TEXT,
+    subject         TEXT,
+    snippet         TEXT,
+    received_at     TEXT,
+    labels          TEXT,
+    UNIQUE (provider_id, mailbox_id)
+);
+
+CREATE TABLE IF NOT EXISTS sync_checkpoint (
+    mailbox_id      TEXT NOT NULL,
+    provider        TEXT NOT NULL,
+    page_cursor     TEXT,
+    messages_synced INTEGER NOT NULL DEFAULT 0,
+    status          TEXT NOT NULL DEFAULT 'running',
+    started_at      TEXT NOT NULL,
+    updated_at      TEXT NOT NULL,
+    PRIMARY KEY (mailbox_id, provider)
+);
+
+CREATE TABLE IF NOT EXISTS sender_stats (
+    mailbox_id    TEXT NOT NULL REFERENCES mailboxes(id),
+    from_email    TEXT NOT NULL,
+    from_name     TEXT,
+    domain        TEXT,
+    message_count INTEGER NOT NULL DEFAULT 0,
+    PRIMARY KEY (mailbox_id, from_email)
+);
+
+CREATE TABLE IF NOT EXISTS domain_stats (
+    mailbox_id    TEXT NOT NULL REFERENCES mailboxes(id),
+    domain        TEXT NOT NULL,
+    message_count INTEGER NOT NULL DEFAULT 0,
+    PRIMARY KEY (mailbox_id, domain)
+);
+
+CREATE TABLE IF NOT EXISTS subject_term_stats (
+    mailbox_id    TEXT NOT NULL REFERENCES mailboxes(id),
+    term          TEXT NOT NULL,
+    message_count INTEGER NOT NULL DEFAULT 0,
+    PRIMARY KEY (mailbox_id, term)
 );
 `
 
@@ -215,4 +266,125 @@ func nullableString(s string) any {
 		return nil
 	}
 	return s
+}
+
+// SyncCheckpoint records progress for a single mailbox sync session.
+// Status values: "running", "completed", "interrupted".
+type SyncCheckpoint struct {
+	MailboxID      string
+	Provider       string
+	PageCursor     string // next page token to resume from; empty means start
+	MessagesSynced int
+	Status         string
+	StartedAt      time.Time
+	UpdatedAt      time.Time
+}
+
+// UpsertMessage inserts msg into the messages table. Duplicate inserts (same
+// provider_id + mailbox_id) are silently ignored — re-syncing is idempotent.
+func (s *Store) UpsertMessage(ctx context.Context, msg models.MessageMeta) error {
+	labels := msg.Labels
+	if labels == nil {
+		labels = []string{}
+	}
+	labelsJSON, err := json.Marshal(labels)
+	if err != nil {
+		return fmt.Errorf("marshal labels: %w", err)
+	}
+	_, err = s.db.ExecContext(ctx,
+		`INSERT OR IGNORE INTO messages
+		 (id, mailbox_id, provider, provider_id, thread_id, from_email, from_name, domain, subject, snippet, received_at, labels)
+		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		msg.ProviderID,
+		msg.MailboxID,
+		msg.Provider,
+		msg.ProviderID,
+		msg.ThreadID,
+		msg.FromEmail,
+		msg.FromName,
+		msg.Domain,
+		msg.Subject,
+		msg.Snippet,
+		msg.ReceivedAt.UTC().Format(time.RFC3339),
+		string(labelsJSON),
+	)
+	if err != nil {
+		return fmt.Errorf("upsert message: %w", err)
+	}
+	return nil
+}
+
+// GetCheckpoint returns the sync checkpoint for the given mailbox and provider.
+// Returns (nil, nil) when no checkpoint exists.
+func (s *Store) GetCheckpoint(ctx context.Context, mailboxID, provider string) (*SyncCheckpoint, error) {
+	row := s.db.QueryRowContext(ctx,
+		`SELECT mailbox_id, provider, page_cursor, messages_synced, status, started_at, updated_at
+		 FROM sync_checkpoint WHERE mailbox_id = ? AND provider = ?`,
+		mailboxID, provider,
+	)
+	return scanCheckpoint(row)
+}
+
+// SaveCheckpoint inserts or replaces the sync checkpoint for a mailbox and provider.
+func (s *Store) SaveCheckpoint(ctx context.Context, cp SyncCheckpoint) error {
+	_, err := s.db.ExecContext(ctx,
+		`INSERT OR REPLACE INTO sync_checkpoint
+		 (mailbox_id, provider, page_cursor, messages_synced, status, started_at, updated_at)
+		 VALUES (?, ?, ?, ?, ?, ?, ?)`,
+		cp.MailboxID,
+		cp.Provider,
+		cp.PageCursor,
+		cp.MessagesSynced,
+		cp.Status,
+		cp.StartedAt.UTC().Format(time.RFC3339),
+		cp.UpdatedAt.UTC().Format(time.RFC3339),
+	)
+	if err != nil {
+		return fmt.Errorf("save checkpoint: %w", err)
+	}
+	return nil
+}
+
+// DeleteCheckpoint removes the sync checkpoint for the given mailbox and provider.
+// Returns an error if no matching checkpoint exists.
+func (s *Store) DeleteCheckpoint(ctx context.Context, mailboxID, provider string) error {
+	res, err := s.db.ExecContext(ctx,
+		`DELETE FROM sync_checkpoint WHERE mailbox_id = ? AND provider = ?`,
+		mailboxID, provider,
+	)
+	if err != nil {
+		return fmt.Errorf("delete checkpoint: %w", err)
+	}
+	n, _ := res.RowsAffected()
+	if n == 0 {
+		return fmt.Errorf("checkpoint not found for mailbox %q provider %q", mailboxID, provider)
+	}
+	return nil
+}
+
+// scanCheckpoint reads one sync_checkpoint row from s. Returns (nil, nil) on sql.ErrNoRows.
+func scanCheckpoint(s scanner) (*SyncCheckpoint, error) {
+	var cp SyncCheckpoint
+	var startedAt, updatedAt string
+
+	err := s.Scan(
+		&cp.MailboxID, &cp.Provider, &cp.PageCursor,
+		&cp.MessagesSynced, &cp.Status, &startedAt, &updatedAt,
+	)
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, fmt.Errorf("scan checkpoint: %w", err)
+	}
+
+	cp.StartedAt, err = time.Parse(time.RFC3339, startedAt)
+	if err != nil {
+		return nil, fmt.Errorf("parse checkpoint started_at %q: %w", startedAt, err)
+	}
+	cp.UpdatedAt, err = time.Parse(time.RFC3339, updatedAt)
+	if err != nil {
+		return nil, fmt.Errorf("parse checkpoint updated_at %q: %w", updatedAt, err)
+	}
+	return &cp, nil
 }
