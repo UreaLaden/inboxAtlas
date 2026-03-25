@@ -250,7 +250,8 @@ func runAuthGmailWithFlow(ctx context.Context, w io.Writer, cfg config.Config, a
 		return err
 	}
 
-	if err := auth.SaveToken(cfg.TokenDir, "gmail", canonicalAccount, token); err != nil {
+	ts := auth.NewTokenStorage(&cfg)
+	if err := ts.Save("gmail", canonicalAccount, token); err != nil {
 		return err
 	}
 

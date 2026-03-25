@@ -17,8 +17,11 @@ import (
 	"runtime"
 	"strings"
 
+	keyring "github.com/zalando/go-keyring"
 	"golang.org/x/oauth2"
 	"golang.org/x/oauth2/google"
+
+	"github.com/UreaLaden/inboxatlas/internal/config"
 )
 
 var stateEntropyReader io.Reader = rand.Reader
@@ -36,6 +39,85 @@ type installedApp struct {
 	ClientID     string   `json:"client_id"`
 	ClientSecret string   `json:"client_secret"`
 	RedirectURIs []string `json:"redirect_uris"`
+}
+
+// TokenStorage abstracts OAuth token persistence. Callers use this interface;
+// FileTokenStorage and KeyringTokenStorage provide the concrete implementations.
+type TokenStorage interface {
+	Save(provider, email string, token *oauth2.Token) error
+	Load(provider, email string) (*oauth2.Token, error)
+}
+
+// FileTokenStorage persists tokens as mode-0600 JSON files under TokenDir.
+// This is the fallback implementation when the OS keychain is unavailable.
+type FileTokenStorage struct {
+	TokenDir string
+}
+
+// Save serialises token to JSON and writes it to the token file path with mode 0600.
+func (f *FileTokenStorage) Save(provider, email string, token *oauth2.Token) error {
+	return SaveToken(f.TokenDir, provider, email, token)
+}
+
+// Load reads and deserialises the token stored for the given provider and email.
+func (f *FileTokenStorage) Load(provider, email string) (*oauth2.Token, error) {
+	return LoadToken(f.TokenDir, provider, email)
+}
+
+// KeyringTokenStorage persists tokens in the OS native credential store.
+// If the keychain is unavailable, Save and Load automatically fall back to
+// the provided FileTokenStorage.
+type KeyringTokenStorage struct {
+	service  string
+	fallback *FileTokenStorage
+}
+
+// Save marshals token to JSON and stores it in the OS keyring under service/key.
+// On any keyring error it falls back to writing via FileTokenStorage.
+func (k *KeyringTokenStorage) Save(provider, email string, token *oauth2.Token) error {
+	data, err := json.Marshal(token)
+	if err != nil {
+		return fmt.Errorf("marshal token: %w", err)
+	}
+	key := keyringKey(provider, email)
+	if err := keyring.Set(k.service, key, string(data)); err != nil {
+		return k.fallback.Save(provider, email, token)
+	}
+	return nil
+}
+
+// Load retrieves and unmarshals the token from the OS keyring.
+// On any keyring error it falls back to reading via FileTokenStorage.
+func (k *KeyringTokenStorage) Load(provider, email string) (*oauth2.Token, error) {
+	key := keyringKey(provider, email)
+	data, err := keyring.Get(k.service, key)
+	if err != nil {
+		return k.fallback.Load(provider, email)
+	}
+	var token oauth2.Token
+	if err := json.Unmarshal([]byte(data), &token); err != nil {
+		return nil, fmt.Errorf("parse keyring token: %w", err)
+	}
+	return &token, nil
+}
+
+// keyringKey returns the keyring user key for a given provider and email.
+// Uses the same SHA-256 hash as TokenPath to avoid token values in the key.
+func keyringKey(provider, email string) string {
+	sum := sha256.Sum256([]byte(strings.ToLower(email)))
+	return provider + ":" + hex.EncodeToString(sum[:])
+}
+
+// NewTokenStorage constructs the appropriate TokenStorage for cfg.
+// If cfg.TokenStorage is "file", returns FileTokenStorage.
+// Otherwise (default "keyring"), returns KeyringTokenStorage with
+// FileTokenStorage as automatic fallback.
+func NewTokenStorage(cfg *config.Config) TokenStorage {
+	file := &FileTokenStorage{TokenDir: cfg.TokenDir}
+	if cfg.TokenStorage == "file" {
+		return file
+	}
+	return &KeyringTokenStorage{service: "inboxatlas", fallback: file}
 }
 
 // LoadCredentials reads the Google OAuth credentials JSON at path and returns
@@ -190,25 +272,25 @@ func LoadToken(tokenDir, provider, email string) (*oauth2.Token, error) {
 	return &token, nil
 }
 
-// RefreshAndSave loads the stored token for email, obtains a (possibly
-// refreshed) token via cfg.TokenSource, and persists the result.
-func RefreshAndSave(ctx context.Context, cfg *oauth2.Config, tokenDir, provider, email string) (*oauth2.Token, error) {
-	existing, err := LoadToken(tokenDir, provider, email)
+// RefreshAndSave loads the stored token via ts for email, obtains a (possibly
+// refreshed) token via cfg.TokenSource, and persists the result via ts.
+func RefreshAndSave(ctx context.Context, cfg *oauth2.Config, ts TokenStorage, provider, email string) (*oauth2.Token, error) {
+	existing, err := ts.Load(provider, email)
 	if err != nil {
 		return nil, err
 	}
 	src := cfg.TokenSource(ctx, existing)
-	return saveFromSource(src, tokenDir, provider, email)
+	return saveFromSource(src, ts, provider, email)
 }
 
-// saveFromSource retrieves a token from src and persists it. It is separated
+// saveFromSource retrieves a token from src and persists it via ts. It is separated
 // from RefreshAndSave for testability.
-func saveFromSource(src oauth2.TokenSource, tokenDir, provider, email string) (*oauth2.Token, error) {
+func saveFromSource(src oauth2.TokenSource, ts TokenStorage, provider, email string) (*oauth2.Token, error) {
 	token, err := src.Token()
 	if err != nil {
 		return nil, fmt.Errorf("refresh token: %w", err)
 	}
-	if err := SaveToken(tokenDir, provider, email, token); err != nil {
+	if err := ts.Save(provider, email, token); err != nil {
 		return nil, err
 	}
 	return token, nil

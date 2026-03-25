@@ -13,7 +13,10 @@ import (
 	"testing"
 	"time"
 
+	keyring "github.com/zalando/go-keyring"
 	"golang.org/x/oauth2"
+
+	"github.com/UreaLaden/inboxatlas/internal/config"
 )
 
 // --- LoadCredentials ---
@@ -180,6 +183,84 @@ func TestLoadToken_InvalidJSON(t *testing.T) {
 	}
 }
 
+// --- FileTokenStorage ---
+
+func TestFileTokenStorage_RoundTrip(t *testing.T) {
+	dir := t.TempDir()
+	ts := &FileTokenStorage{TokenDir: dir}
+	token := &oauth2.Token{AccessToken: "file-access", RefreshToken: "file-refresh"}
+	if err := ts.Save("gmail", "user@example.com", token); err != nil {
+		t.Fatalf("FileTokenStorage.Save: %v", err)
+	}
+	loaded, err := ts.Load("gmail", "user@example.com")
+	if err != nil {
+		t.Fatalf("FileTokenStorage.Load: %v", err)
+	}
+	if loaded.AccessToken != token.AccessToken {
+		t.Errorf("AccessToken: got %q, want %q", loaded.AccessToken, token.AccessToken)
+	}
+}
+
+// --- KeyringTokenStorage ---
+
+func TestKeyringTokenStorage_RoundTrip(t *testing.T) {
+	keyring.MockInit()
+	dir := t.TempDir()
+	ks := &KeyringTokenStorage{service: "inboxatlas", fallback: &FileTokenStorage{TokenDir: dir}}
+	token := &oauth2.Token{AccessToken: "keyring-access", RefreshToken: "keyring-refresh"}
+	if err := ks.Save("gmail", "user@example.com", token); err != nil {
+		t.Fatalf("KeyringTokenStorage.Save: %v", err)
+	}
+	loaded, err := ks.Load("gmail", "user@example.com")
+	if err != nil {
+		t.Fatalf("KeyringTokenStorage.Load: %v", err)
+	}
+	if loaded.AccessToken != token.AccessToken {
+		t.Errorf("AccessToken: got %q, want %q", loaded.AccessToken, token.AccessToken)
+	}
+}
+
+func TestKeyringTokenStorage_FallsBackToFile(t *testing.T) {
+	// Initialize empty keyring mock — Load will get ErrNotFound and fall back to file.
+	keyring.MockInit()
+	dir := t.TempDir()
+	fallback := &FileTokenStorage{TokenDir: dir}
+	ks := &KeyringTokenStorage{service: "inboxatlas", fallback: fallback}
+
+	// Write the token to the file store directly (simulating a pre-keyring token).
+	token := &oauth2.Token{AccessToken: "file-fallback-token", RefreshToken: "rf"}
+	if err := SaveToken(dir, "gmail", "user@example.com", token); err != nil {
+		t.Fatal(err)
+	}
+
+	// Load via KeyringTokenStorage — keyring has no entry, so it falls back to file.
+	loaded, err := ks.Load("gmail", "user@example.com")
+	if err != nil {
+		t.Fatalf("KeyringTokenStorage.Load (fallback): %v", err)
+	}
+	if loaded.AccessToken != token.AccessToken {
+		t.Errorf("AccessToken: got %q, want %q (expected fallback to file)", loaded.AccessToken, token.AccessToken)
+	}
+}
+
+// --- NewTokenStorage ---
+
+func TestNewTokenStorage_ReturnsFile(t *testing.T) {
+	cfg := &config.Config{TokenDir: t.TempDir(), TokenStorage: "file"}
+	ts := NewTokenStorage(cfg)
+	if _, ok := ts.(*FileTokenStorage); !ok {
+		t.Errorf("expected *FileTokenStorage, got %T", ts)
+	}
+}
+
+func TestNewTokenStorage_ReturnsKeyring(t *testing.T) {
+	cfg := &config.Config{TokenDir: t.TempDir(), TokenStorage: "keyring"}
+	ts := NewTokenStorage(cfg)
+	if _, ok := ts.(*KeyringTokenStorage); !ok {
+		t.Errorf("expected *KeyringTokenStorage, got %T", ts)
+	}
+}
+
 // --- saveFromSource (RefreshAndSave testable core) ---
 
 type mockTokenSource struct {
@@ -202,7 +283,7 @@ func TestSaveFromSource_Success(t *testing.T) {
 	newToken := &oauth2.Token{AccessToken: "refreshed-token", RefreshToken: "refresh"}
 	src := &mockTokenSource{token: newToken}
 
-	got, err := saveFromSource(src, dir, "gmail", "user@example.com")
+	got, err := saveFromSource(src, &FileTokenStorage{TokenDir: dir}, "gmail", "user@example.com")
 	if err != nil {
 		t.Fatalf("saveFromSource: %v", err)
 	}
@@ -221,7 +302,7 @@ func TestSaveFromSource_Success(t *testing.T) {
 func TestSaveFromSource_TokenError(t *testing.T) {
 	dir := t.TempDir()
 	src := &mockTokenSource{err: fmt.Errorf("token refresh failed")}
-	_, err := saveFromSource(src, dir, "gmail", "user@example.com")
+	_, err := saveFromSource(src, &FileTokenStorage{TokenDir: dir}, "gmail", "user@example.com")
 	if err == nil {
 		t.Error("expected error when token source fails")
 	}
@@ -234,7 +315,7 @@ func TestSaveFromSource_SaveTokenError(t *testing.T) {
 	}
 
 	src := &mockTokenSource{token: &oauth2.Token{AccessToken: "refreshed-token"}}
-	if _, err := saveFromSource(src, dir, "gmail", "user@example.com"); err == nil {
+	if _, err := saveFromSource(src, &FileTokenStorage{TokenDir: dir}, "gmail", "user@example.com"); err == nil {
 		t.Fatal("expected error when refreshed token cannot be persisted")
 	}
 }
@@ -242,7 +323,7 @@ func TestSaveFromSource_SaveTokenError(t *testing.T) {
 func TestRefreshAndSave_LoadError(t *testing.T) {
 	dir := t.TempDir()
 	cfg := &oauth2.Config{}
-	_, err := RefreshAndSave(context.Background(), cfg, dir, "gmail", "nobody@example.com")
+	_, err := RefreshAndSave(context.Background(), cfg, &FileTokenStorage{TokenDir: dir}, "gmail", "nobody@example.com")
 	if err == nil {
 		t.Error("expected error when token file does not exist")
 	}
@@ -458,7 +539,7 @@ func TestRefreshAndSave_PersistsUpdatedToken(t *testing.T) {
 	newTok := &oauth2.Token{AccessToken: "new", RefreshToken: "rf"}
 	src := &mockTokenSource{token: newTok}
 
-	got, err := saveFromSource(src, dir, "gmail", "user@example.com")
+	got, err := saveFromSource(src, &FileTokenStorage{TokenDir: dir}, "gmail", "user@example.com")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -484,7 +565,7 @@ func TestRefreshAndSave_ValidToken(t *testing.T) {
 	if err := SaveToken(dir, "gmail", "user@example.com", tok); err != nil {
 		t.Fatal(err)
 	}
-	got, err := RefreshAndSave(context.Background(), &oauth2.Config{}, dir, "gmail", "user@example.com")
+	got, err := RefreshAndSave(context.Background(), &oauth2.Config{}, &FileTokenStorage{TokenDir: dir}, "gmail", "user@example.com")
 	if err != nil {
 		t.Fatalf("RefreshAndSave: %v", err)
 	}
