@@ -5,8 +5,10 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"log/slog"
 	"net/mail"
 	"strings"
+	"time"
 
 	"golang.org/x/oauth2"
 	gmailapi "google.golang.org/api/gmail/v1"
@@ -120,6 +122,10 @@ func parseMessageMeta(accountEmail string, msg *gmailapi.Message) *models.Messag
 		Provider:   "gmail",
 	}
 
+	if msg.InternalDate > 0 {
+		meta.ReceivedAt = time.UnixMilli(msg.InternalDate)
+	}
+
 	if msg.Payload == nil || msg.Payload.Headers == nil {
 		return meta
 	}
@@ -138,6 +144,9 @@ func parseMessageMeta(accountEmail string, msg *gmailapi.Message) *models.Messag
 	if dateStr := headers["date"]; dateStr != "" {
 		if t, err := mail.ParseDate(dateStr); err == nil {
 			meta.ReceivedAt = t
+		} else {
+			slog.Warn("gmail: failed to parse Date header; using InternalDate fallback",
+				"date", dateStr, "err", err)
 		}
 	}
 

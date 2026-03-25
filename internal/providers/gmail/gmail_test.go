@@ -174,7 +174,8 @@ func TestParseMessageMeta_MissingFromHeader(t *testing.T) {
 
 func TestParseMessageMeta_MalformedDate(t *testing.T) {
 	msg := &gmailapi.Message{
-		Id: "msg3",
+		Id:           "msg3",
+		InternalDate: time.Date(2024, 2, 3, 4, 5, 6, 0, time.UTC).UnixMilli(),
 		Payload: &gmailapi.MessagePart{
 			Headers: []*gmailapi.MessagePartHeader{
 				{Name: "Date", Value: "not-a-date"},
@@ -182,8 +183,22 @@ func TestParseMessageMeta_MalformedDate(t *testing.T) {
 		},
 	}
 	meta := parseMessageMeta("a@b.com", msg)
-	if !meta.ReceivedAt.IsZero() {
-		t.Errorf("ReceivedAt should be zero for malformed date, got %v", meta.ReceivedAt)
+	want := time.Date(2024, 2, 3, 4, 5, 6, 0, time.UTC)
+	if !meta.ReceivedAt.Equal(want) {
+		t.Errorf("ReceivedAt = %v, want %v", meta.ReceivedAt, want)
+	}
+}
+
+func TestParseMessageMeta_UsesInternalDateWhenHeaderMissing(t *testing.T) {
+	msg := &gmailapi.Message{
+		Id:           "msg8",
+		InternalDate: time.Date(2024, 3, 4, 5, 6, 7, 0, time.UTC).UnixMilli(),
+		Payload:      &gmailapi.MessagePart{},
+	}
+	meta := parseMessageMeta("a@b.com", msg)
+	want := time.Date(2024, 3, 4, 5, 6, 7, 0, time.UTC)
+	if !meta.ReceivedAt.Equal(want) {
+		t.Errorf("ReceivedAt = %v, want %v", meta.ReceivedAt, want)
 	}
 }
 

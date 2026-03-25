@@ -74,6 +74,7 @@ CREATE TABLE IF NOT EXISTS sync_checkpoint (
     status          TEXT NOT NULL DEFAULT 'running',
     started_at      TEXT NOT NULL,
     updated_at      TEXT NOT NULL,
+    FOREIGN KEY (mailbox_id) REFERENCES mailboxes(id) ON DELETE CASCADE,
     PRIMARY KEY (mailbox_id, provider)
 );
 

@@ -19,6 +19,13 @@ func newTestStore(t *testing.T) *Store {
 	return st
 }
 
+func createTestMailbox(t *testing.T, st *Store, id string) {
+	t.Helper()
+	if err := st.CreateMailbox(context.Background(), models.Mailbox{ID: id, Provider: "gmail"}); err != nil {
+		t.Fatalf("CreateMailbox(%q): %v", id, err)
+	}
+}
+
 func TestOpen(t *testing.T) {
 	st := newTestStore(t)
 	if st == nil {
@@ -424,6 +431,46 @@ func TestSchema_AllTablesPresent(t *testing.T) {
 	}
 }
 
+func TestSchema_SyncCheckpointHasMailboxForeignKey(t *testing.T) {
+	st := newTestStore(t)
+	ctx := context.Background()
+
+	rows, err := st.db.QueryContext(ctx, `PRAGMA foreign_key_list(sync_checkpoint)`)
+	if err != nil {
+		t.Fatalf("foreign_key_list(sync_checkpoint): %v", err)
+	}
+	defer func() { _ = rows.Close() }()
+
+	var found bool
+	for rows.Next() {
+		var (
+			id       int
+			seq      int
+			table    string
+			from     string
+			to       string
+			onUpdate string
+			onDelete string
+			match    string
+		)
+		if err := rows.Scan(&id, &seq, &table, &from, &to, &onUpdate, &onDelete, &match); err != nil {
+			t.Fatalf("scan foreign key: %v", err)
+		}
+		if table == "mailboxes" && from == "mailbox_id" && to == "id" {
+			found = true
+			if onDelete != "CASCADE" {
+				t.Errorf("on delete = %q, want %q", onDelete, "CASCADE")
+			}
+		}
+	}
+	if err := rows.Err(); err != nil {
+		t.Fatalf("foreign_key_list rows: %v", err)
+	}
+	if !found {
+		t.Fatal("expected sync_checkpoint foreign key on mailbox_id -> mailboxes(id)")
+	}
+}
+
 // --- UpsertMessage ---
 
 func TestUpsertMessage_Insert(t *testing.T) {
@@ -509,6 +556,7 @@ func TestUpsertMessage_NilLabels(t *testing.T) {
 
 func TestGetCheckpoint_NotFound(t *testing.T) {
 	st := newTestStore(t)
+	createTestMailbox(t, st, "user@example.com")
 	cp, err := st.GetCheckpoint(context.Background(), "user@example.com", "gmail")
 	if err != nil {
 		t.Fatalf("GetCheckpoint: %v", err)
@@ -521,6 +569,7 @@ func TestGetCheckpoint_NotFound(t *testing.T) {
 func TestSaveAndGetCheckpoint(t *testing.T) {
 	st := newTestStore(t)
 	ctx := context.Background()
+	createTestMailbox(t, st, "user@example.com")
 
 	now := time.Now().UTC().Truncate(time.Second)
 	cp := SyncCheckpoint{
@@ -560,6 +609,7 @@ func TestSaveAndGetCheckpoint(t *testing.T) {
 func TestSaveCheckpoint_ReplaceSemantics(t *testing.T) {
 	st := newTestStore(t)
 	ctx := context.Background()
+	createTestMailbox(t, st, "user@example.com")
 
 	now := time.Now().UTC().Truncate(time.Second)
 	cp := SyncCheckpoint{
@@ -589,6 +639,7 @@ func TestSaveCheckpoint_ReplaceSemantics(t *testing.T) {
 func TestDeleteCheckpoint_Existing(t *testing.T) {
 	st := newTestStore(t)
 	ctx := context.Background()
+	createTestMailbox(t, st, "user@example.com")
 
 	now := time.Now().UTC()
 	cp := SyncCheckpoint{MailboxID: "user@example.com", Provider: "gmail", Status: "running", StartedAt: now, UpdatedAt: now}
@@ -607,6 +658,7 @@ func TestDeleteCheckpoint_Existing(t *testing.T) {
 
 func TestDeleteCheckpoint_NotFound(t *testing.T) {
 	st := newTestStore(t)
+	createTestMailbox(t, st, "user@example.com")
 	err := st.DeleteCheckpoint(context.Background(), "nobody@example.com", "gmail")
 	if err == nil {
 		t.Error("expected error when deleting non-existent checkpoint")

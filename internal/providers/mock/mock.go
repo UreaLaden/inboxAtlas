@@ -42,20 +42,29 @@ func (m *Provider) ListMessages(_ context.Context, pageToken string) ([]string, 
 		if err != nil {
 			return nil, "", fmt.Errorf("mock: invalid page token %q: %w", pageToken, err)
 		}
+		if offset < 0 {
+			return nil, "", fmt.Errorf("mock: invalid negative page token %q", pageToken)
+		}
 	}
 
 	size := m.PageSize
-	if size == 0 {
+	if size <= 0 {
 		size = 10
 	}
 
 	total := len(m.Messages)
+	if offset >= total {
+		return []string{}, "", nil
+	}
 	end := min(offset+size, total)
 
 	slice := m.Messages[offset:end]
-	ids := make([]string, len(slice))
-	for i, msg := range slice {
-		ids[i] = msg.ProviderID
+	ids := make([]string, 0, len(slice))
+	for _, msg := range slice {
+		if msg == nil {
+			continue
+		}
+		ids = append(ids, msg.ProviderID)
 	}
 
 	var nextToken string
@@ -73,6 +82,9 @@ func (m *Provider) GetMessageMeta(_ context.Context, id string) (*models.Message
 		return nil, m.GetErr
 	}
 	for _, msg := range m.Messages {
+		if msg == nil {
+			continue
+		}
 		if msg.ProviderID == id {
 			cp := *msg
 			return &cp, nil

@@ -117,6 +117,66 @@ func TestMockProvider_ListMessages_InjectedError(t *testing.T) {
 	}
 }
 
+func TestMockProvider_ListMessages_NegativePageToken(t *testing.T) {
+	p := &mock.Provider{Messages: makeMessagesWithIDs("a")}
+	_, _, err := p.ListMessages(context.Background(), "-1")
+	if err == nil {
+		t.Fatal("expected error for negative page token")
+	}
+}
+
+func TestMockProvider_ListMessages_OutOfRangeOffset(t *testing.T) {
+	p := &mock.Provider{Messages: makeMessagesWithIDs("a", "b"), PageSize: 2}
+	ids, next, err := p.ListMessages(context.Background(), "9")
+	if err != nil {
+		t.Fatalf("ListMessages: %v", err)
+	}
+	if len(ids) != 0 {
+		t.Errorf("expected empty ids, got %v", ids)
+	}
+	if next != "" {
+		t.Errorf("nextToken: got %q, want empty", next)
+	}
+}
+
+func TestMockProvider_ListMessages_NonPositivePageSizeDefaults(t *testing.T) {
+	p := &mock.Provider{
+		Messages: makeMessagesWithIDs("a", "b", "c", "d", "e", "f", "g", "h", "i", "j", "k"),
+		PageSize: -5,
+	}
+	ids, next, err := p.ListMessages(context.Background(), "")
+	if err != nil {
+		t.Fatalf("ListMessages: %v", err)
+	}
+	if len(ids) != 10 {
+		t.Errorf("default page size: got %d, want 10", len(ids))
+	}
+	if next != "10" {
+		t.Errorf("nextToken: got %q, want %q", next, "10")
+	}
+}
+
+func TestMockProvider_ListMessages_SkipsNilEntries(t *testing.T) {
+	p := &mock.Provider{
+		Messages: []*models.MessageMeta{
+			{ProviderID: "a"},
+			nil,
+			{ProviderID: "c"},
+		},
+		PageSize: 10,
+	}
+	ids, next, err := p.ListMessages(context.Background(), "")
+	if err != nil {
+		t.Fatalf("ListMessages: %v", err)
+	}
+	if len(ids) != 2 || ids[0] != "a" || ids[1] != "c" {
+		t.Errorf("ids = %v, want [a c]", ids)
+	}
+	if next != "" {
+		t.Errorf("nextToken: got %q, want empty", next)
+	}
+}
+
 // --- GetMessageMeta ---
 
 func TestMockProvider_GetMessageMeta_Found(t *testing.T) {
@@ -161,5 +221,21 @@ func TestMockProvider_GetMessageMeta_InjectedError(t *testing.T) {
 	_, err := p.GetMessageMeta(context.Background(), "x")
 	if !errors.Is(err, wantErr) {
 		t.Errorf("GetMessageMeta: got %v, want %v", err, wantErr)
+	}
+}
+
+func TestMockProvider_GetMessageMeta_SkipsNilEntries(t *testing.T) {
+	p := &mock.Provider{
+		Messages: []*models.MessageMeta{
+			nil,
+			{ProviderID: "x1", Subject: "Hello"},
+		},
+	}
+	got, err := p.GetMessageMeta(context.Background(), "x1")
+	if err != nil {
+		t.Fatalf("GetMessageMeta: %v", err)
+	}
+	if got.ProviderID != "x1" {
+		t.Errorf("ProviderID = %q, want %q", got.ProviderID, "x1")
 	}
 }
