@@ -25,6 +25,13 @@ import (
 	"github.com/UreaLaden/inboxatlas/pkg/models"
 )
 
+var validateGmailDelegation = auth.ValidateGmailDelegation
+var resolveGmailTokenSource = auth.ResolveGmailTokenSource
+var newGmailProvider = func(email string, tokenSourceFactory func(context.Context) (oauth2.TokenSource, error)) models.MailProvider {
+	return gmailprovider.New(email, tokenSourceFactory)
+}
+var runIngestion = ingestion.Run
+
 func main() {
 	cfg, err := config.Load()
 	if err != nil {
@@ -219,16 +226,21 @@ func buildAuthCmd(cfg config.Config) *cobra.Command {
 func buildAuthGmailCmd(cfg config.Config) *cobra.Command {
 	var account string
 	var alias string
+	var delegated bool
 
 	cmd := &cobra.Command{
 		Use:   "gmail",
 		Short: "Authenticate with Gmail using OAuth 2.0",
 		RunE: func(cmd *cobra.Command, _ []string) error {
+			if delegated {
+				return runAuthGmailDelegated(cmd.Context(), cmd.OutOrStdout(), cfg, account, alias)
+			}
 			return runAuthGmail(cmd.Context(), cmd.OutOrStdout(), cfg, account, alias)
 		},
 	}
 	cmd.Flags().StringVar(&account, "account", "", "Gmail address to authenticate")
 	cmd.Flags().StringVar(&alias, "alias", "", "optional alias for this mailbox")
+	cmd.Flags().BoolVar(&delegated, "delegated", false, "validate domain-wide delegation for this mailbox")
 	_ = cmd.MarkFlagRequired("account")
 	return cmd
 }
@@ -239,11 +251,26 @@ func runAuthGmail(ctx context.Context, w io.Writer, cfg config.Config, account, 
 	if _, err := os.Stat(cfg.CredentialsPath); err != nil {
 		return fmt.Errorf("credentials file not found at %s — set credentials_path in config or INBOXATLAS_CREDENTIALS_PATH", cfg.CredentialsPath)
 	}
-	oauthCfg, err := auth.LoadCredentials(cfg.CredentialsPath)
+	oauthCfg, err := auth.LoadInstalledAppCredentials(cfg.CredentialsPath)
 	if err != nil {
 		return err
 	}
 	return runAuthGmailWithFlow(ctx, w, cfg, account, alias, oauthCfg, auth.RunFlow)
+}
+
+func runAuthGmailDelegated(ctx context.Context, w io.Writer, cfg config.Config, account, alias string) error {
+	if _, err := os.Stat(cfg.CredentialsPath); err != nil {
+		return fmt.Errorf("credentials file not found at %s — set credentials_path in config or INBOXATLAS_CREDENTIALS_PATH", cfg.CredentialsPath)
+	}
+	canonicalAccount := strings.ToLower(account)
+	if err := validateGmailDelegation(ctx, cfg.CredentialsPath, canonicalAccount); err != nil {
+		return err
+	}
+	if err := registerMailbox(ctx, cfg, canonicalAccount, alias); err != nil {
+		return err
+	}
+	_, _ = fmt.Fprintf(w, "Delegation validated successfully. Mailbox %s registered.\n", canonicalAccount)
+	return nil
 }
 
 // runAuthGmailWithFlow runs the OAuth flow using flow, saves the token, and
@@ -261,6 +288,15 @@ func runAuthGmailWithFlow(ctx context.Context, w io.Writer, cfg config.Config, a
 		return err
 	}
 
+	if err := registerMailbox(ctx, cfg, canonicalAccount, alias); err != nil {
+		return err
+	}
+
+	_, _ = fmt.Fprintf(w, "Authenticated successfully. Mailbox %s registered.\n", canonicalAccount)
+	return nil
+}
+
+func registerMailbox(ctx context.Context, cfg config.Config, canonicalAccount, alias string) error {
 	st, err := storage.Open(cfg.StoragePath)
 	if err != nil {
 		return fmt.Errorf("open storage: %w", err)
@@ -269,14 +305,11 @@ func runAuthGmailWithFlow(ctx context.Context, w io.Writer, cfg config.Config, a
 
 	mb := models.Mailbox{ID: canonicalAccount, Alias: alias, Provider: "gmail"}
 	if err := st.CreateMailbox(ctx, mb); err != nil {
-		// If already registered, treat as no-op.
 		existing, getErr := st.GetMailbox(ctx, canonicalAccount)
 		if getErr != nil || existing == nil {
 			return fmt.Errorf("register mailbox: %w", err)
 		}
 	}
-
-	_, _ = fmt.Fprintf(w, "Authenticated successfully. Mailbox %s registered.\n", canonicalAccount)
 	return nil
 }
 
@@ -321,7 +354,7 @@ func buildSyncStatusCmd(cfg config.Config) *cobra.Command {
 	return cmd
 }
 
-// runSyncGmail resolves the mailbox, loads credentials, builds a Gmail provider,
+// runSyncGmail resolves the mailbox, resolves the auth mode, builds a Gmail provider,
 // and runs a full ingestion sync. It is separated from the Cobra handler for
 // testability.
 func runSyncGmail(ctx context.Context, w io.Writer, cfg config.Config, account string) error {
@@ -339,15 +372,14 @@ func runSyncGmail(ctx context.Context, w io.Writer, cfg config.Config, account s
 	if _, err := os.Stat(cfg.CredentialsPath); err != nil {
 		return fmt.Errorf("credentials file not found at %s — set credentials_path in config or INBOXATLAS_CREDENTIALS_PATH", cfg.CredentialsPath)
 	}
-	oauthCfg, err := auth.LoadCredentials(cfg.CredentialsPath)
+	tokenSourceFactory, err := resolveGmailTokenSource(&cfg, mb.ID)
 	if err != nil {
 		return err
 	}
 
-	ts := auth.NewTokenStorage(&cfg)
-	provider := gmailprovider.New(oauthCfg, ts, mb.ID)
+	provider := newGmailProvider(mb.ID, tokenSourceFactory)
 
-	return ingestion.Run(ctx, ingestion.Options{
+	return runIngestion(ctx, ingestion.Options{
 		MailboxID:    mb.ID,
 		Provider:     "gmail",
 		MailProvider: provider,

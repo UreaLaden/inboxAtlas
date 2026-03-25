@@ -19,11 +19,30 @@ import (
 	"github.com/UreaLaden/inboxatlas/internal/config"
 )
 
+func desktopCredentialsJSON() string {
+	return `{"installed":{"client_id":"test-id","client_secret":"test-secret","redirect_uris":["http://localhost"]}}`
+}
+
+func serviceAccountCredentialsJSON() string {
+	return `{
+  "type": "service_account",
+  "project_id": "test-project",
+  "private_key_id": "test-key-id",
+  "private_key": "-----BEGIN PRIVATE KEY-----\nMIIEvQIBADANBgkqhkiG9w0BAQEFAASCBKcwggSjAgEAAoIBAQDXY9J2xep1+t0NenE2\nRj3Xr1m66FQmQF5wUxyX5wz12j7YkIcR2F99a8xj2zd0Q0imeISFRCGDpa2BkLomqKgP\n0vvArkH5AO9M/dwZ0pniS3pSke1Mt2rt7NmBGG99nmCaTKty+O+kO5RAwOB1p5MNDoAu\n0aKBslZx2drXr/7EQo1leChX2NDVYqoQZnIcXtNCmieYwgd0CQpZK0s8AjtKoaVHgMHq\nYJv1nVbWcv16O3MHuvb6jVWeItPxX2VINeodIZ6Tn6PvxI6Bfq5lHppZArYrusS4x+h0\nfOkH1ZZ1xdjQbaO5SpM90oCbGyF/F7fs/3Gzdh0dX8GZFODdgNpTi27DAgMBAAECggEA\nAJnXrhIRbkIuAeGHNirMRHkRkNvztNFVQVw1Gc7YCOUMIqFZ3VAbw/T/jGj33jjXNMTv\nEihQ/HVbUaz2YsmiVjCwXTlzAIXazhbugzuDUFcPRl1BDpRP70dNDO7xjMnIKh4j/wcg\n3NEPoPFcAckU4iigIvuXvYDn8ApX2HFqRSbuuSSMzdON3NofM8JrIoYNewc0hXtOD87b\niV/mQJu1WDVYj1WFJsbgx5caX5/C/PObbIVdQydb9h9NP7VDaRao7IhiHBpjz2uVH54F\natoNgtrENcGukdxbYlR5c+3F4iAfDdc0AGJi/7luWGINuD/7++UZ5EKeosFVJeFt3PcT\nYQKBgQD0iDLuhvZux41DmvNmO6PsK0uFUxnCLzpSw0DxVh1T/kZLKZVugRUIaBDdYQzI\nKoEt1TGVtC6zqD2c/Ik2Vq6KYFAsktwVDqveufqdpypuXn7Z1xXHDD236UMtO4Zwzp1T\nwHjMATkUMlzUxr87hcPLZ9eczsQnUnxE27XGr0C+ZwKBgQDg4YAlnXrhIRbkIuAeGHNi\nrMRHkRkNvztNFVQVw1Gc7YCOUMIqFZ3VAbw/T/jGj33jjXNMTvEihQ/HVbUaz2YsmiVj\nCwXTlzAIXazhbugzuDUFcPRl1BDpRP70dNDO7xjMnIKh4j/wcg3NEPoPFcAckU4iigIv\nuXvYDn8ApX2HFqRSbQKBgQCQvOB0fOkH1ZZ1xdjQbaO5SpM90oCbGyF/F7fs/3Gzdh0d\nX8GZFODdgNpTi27DANJQImQxGc1dQc5sKXc5teLoI0lp4rWuIwoMvVJE9idh+NangNh4\ntW7x1YgnSUZXoqBYwygJyI072QtdgQXl3k5ufADG7n2AFDzy83H8XTur2QKBgG1dQc5s\nKXc5teLoI0lp4rWuIwoMvVJE9idh+NangNh4tW7x1YgnSUZXoqBYwygJyI072QtdgQXl\n3k5ufADG7n2AFDzy83H8XTur2qxGn8pY/+bexdFv+DE5jBqFaUG2RgxN6E466+vWXTjh\nAIXazhbugzuDUFcPRl1BDpRP70dNDO7xAoGAHdCqkfNNpJBWlAbIYW/W2PASi6DPd7OJ\nRRqtD9h5pz50jdK5Zk90un0nLBKBPXn1HULICwhf66A1VpzwuNFuIBqmoeZaZX6mE6PD\nLl35H5TADaBrZEcD3xKhsR4HIX66vepQP9en5ZaY1f+T5iAG2wE8xmPKzW0fvkY=\n-----END PRIVATE KEY-----\n",
+  "client_email": "svc-account@test-project.iam.gserviceaccount.com",
+  "client_id": "1234567890",
+  "auth_uri": "https://accounts.google.com/o/oauth2/auth",
+  "token_uri": "https://oauth2.googleapis.com/token",
+  "auth_provider_x509_cert_url": "https://www.googleapis.com/oauth2/v1/certs",
+  "client_x509_cert_url": "https://www.googleapis.com/robot/v1/metadata/x509/svc-account%40test-project.iam.gserviceaccount.com"
+}`
+}
+
 // --- LoadCredentials ---
 
 func TestLoadCredentials_Valid(t *testing.T) {
 	dir := t.TempDir()
-	creds := `{"installed":{"client_id":"test-id","client_secret":"test-secret","redirect_uris":["http://localhost"]}}`
+	creds := desktopCredentialsJSON()
 	p := filepath.Join(dir, "credentials.json")
 	if err := os.WriteFile(p, []byte(creds), 0o600); err != nil {
 		t.Fatal(err)
@@ -40,6 +59,148 @@ func TestLoadCredentials_Valid(t *testing.T) {
 	}
 	if len(cfg.Scopes) != 1 || cfg.Scopes[0] != gmailScope {
 		t.Errorf("Scopes: got %v, want [%s]", cfg.Scopes, gmailScope)
+	}
+}
+
+func TestLoadServiceAccountJWTConfig_Valid(t *testing.T) {
+	dir := t.TempDir()
+	p := filepath.Join(dir, "credentials.json")
+	if err := os.WriteFile(p, []byte(serviceAccountCredentialsJSON()), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := LoadServiceAccountJWTConfig(p)
+	if err != nil {
+		t.Fatalf("LoadServiceAccountJWTConfig: %v", err)
+	}
+	if cfg == nil {
+		t.Fatal("expected JWT config")
+	}
+	if cfg.Email != "svc-account@test-project.iam.gserviceaccount.com" {
+		t.Fatalf("Email = %q", cfg.Email)
+	}
+	if cfg.Subject != "" {
+		t.Fatalf("Subject = %q, want empty", cfg.Subject)
+	}
+}
+
+func TestResolveGmailTokenSource_Delegated(t *testing.T) {
+	dir := t.TempDir()
+	cfg := config.Default()
+	cfg.CredentialsPath = filepath.Join(dir, "service-account.json")
+	if err := os.WriteFile(cfg.CredentialsPath, []byte(serviceAccountCredentialsJSON()), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	factory, err := ResolveGmailTokenSource(&cfg, "User@Example.com")
+	if err != nil {
+		t.Fatalf("ResolveGmailTokenSource: %v", err)
+	}
+	src, err := factory(context.Background())
+	if err != nil {
+		t.Fatalf("factory: %v", err)
+	}
+	if src == nil {
+		t.Fatal("expected token source")
+	}
+}
+
+func TestResolveGmailTokenSource_UserToken(t *testing.T) {
+	dir := t.TempDir()
+	cfg := config.Default()
+	cfg.CredentialsPath = filepath.Join(dir, "desktop.json")
+	cfg.TokenDir = filepath.Join(dir, "tokens")
+	cfg.TokenStorage = "file"
+	if err := os.WriteFile(cfg.CredentialsPath, []byte(desktopCredentialsJSON()), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := SaveToken(cfg.TokenDir, "gmail", "user@example.com", &oauth2.Token{AccessToken: "tok"}); err != nil {
+		t.Fatal(err)
+	}
+
+	factory, err := ResolveGmailTokenSource(&cfg, "user@example.com")
+	if err != nil {
+		t.Fatalf("ResolveGmailTokenSource: %v", err)
+	}
+	src, err := factory(context.Background())
+	if err != nil {
+		t.Fatalf("factory: %v", err)
+	}
+	token, err := src.Token()
+	if err != nil {
+		t.Fatalf("Token: %v", err)
+	}
+	if token.AccessToken != "tok" {
+		t.Fatalf("AccessToken = %q, want tok", token.AccessToken)
+	}
+}
+
+func TestResolveGmailTokenSource_NoStoredToken(t *testing.T) {
+	dir := t.TempDir()
+	cfg := config.Default()
+	cfg.CredentialsPath = filepath.Join(dir, "desktop.json")
+	cfg.TokenDir = filepath.Join(dir, "tokens")
+	cfg.TokenStorage = "file"
+	if err := os.WriteFile(cfg.CredentialsPath, []byte(desktopCredentialsJSON()), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	_, err := ResolveGmailTokenSource(&cfg, "user@example.com")
+	if err == nil {
+		t.Fatal("expected error when no stored token exists")
+	}
+	if !strings.Contains(err.Error(), "no stored user token") {
+		t.Fatalf("unexpected error: %v", err)
+	}
+}
+
+func TestResolveGmailTokenSource_MalformedCredentials(t *testing.T) {
+	dir := t.TempDir()
+	cfg := config.Default()
+	cfg.CredentialsPath = filepath.Join(dir, "bad.json")
+	if err := os.WriteFile(cfg.CredentialsPath, []byte("not-json"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	_, err := ResolveGmailTokenSource(&cfg, "user@example.com")
+	if err == nil {
+		t.Fatal("expected error for malformed credentials")
+	}
+}
+
+func TestValidateGmailDelegation_Success(t *testing.T) {
+	dir := t.TempDir()
+	p := filepath.Join(dir, "service-account.json")
+	if err := os.WriteFile(p, []byte(serviceAccountCredentialsJSON()), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	orig := gmailProfileFetcher
+	gmailProfileFetcher = func(_ context.Context, _ oauth2.TokenSource) (string, error) {
+		return "user@example.com", nil
+	}
+	t.Cleanup(func() { gmailProfileFetcher = orig })
+
+	if err := ValidateGmailDelegation(context.Background(), p, "User@Example.com"); err != nil {
+		t.Fatalf("ValidateGmailDelegation: %v", err)
+	}
+}
+
+func TestValidateGmailDelegation_ProfileMismatch(t *testing.T) {
+	dir := t.TempDir()
+	p := filepath.Join(dir, "service-account.json")
+	if err := os.WriteFile(p, []byte(serviceAccountCredentialsJSON()), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	orig := gmailProfileFetcher
+	gmailProfileFetcher = func(_ context.Context, _ oauth2.TokenSource) (string, error) {
+		return "other@example.com", nil
+	}
+	t.Cleanup(func() { gmailProfileFetcher = orig })
+
+	err := ValidateGmailDelegation(context.Background(), p, "user@example.com")
+	if err == nil {
+		t.Fatal("expected mismatch error")
 	}
 }
 

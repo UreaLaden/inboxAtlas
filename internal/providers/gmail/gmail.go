@@ -15,7 +15,6 @@ import (
 	"google.golang.org/api/googleapi"
 	"google.golang.org/api/option"
 
-	"github.com/UreaLaden/inboxatlas/internal/auth"
 	"github.com/UreaLaden/inboxatlas/internal/normalization"
 	"github.com/UreaLaden/inboxatlas/pkg/models"
 )
@@ -43,27 +42,27 @@ func wrapIfRetryable(err error) error {
 // Provider implements models.MailProvider for Gmail using the Gmail REST API.
 // Call New to construct a Provider; call Authenticate before any other method.
 type Provider struct {
-	cfg   *oauth2.Config
-	ts    auth.TokenStorage // OS-native or file-based token storage
-	email string
-	svc   *gmailapi.Service // nil until Authenticate is called
+	email              string
+	tokenSourceFactory func(context.Context) (oauth2.TokenSource, error)
+	svc                *gmailapi.Service // nil until Authenticate is called
 }
 
-// New constructs a Gmail Provider for the given account. ts supplies the stored
-// OAuth token; cfg is the OAuth2 client configuration.
-func New(cfg *oauth2.Config, ts auth.TokenStorage, email string) *Provider {
-	return &Provider{cfg: cfg, ts: ts, email: email}
+// New constructs a Gmail Provider for the given account using tokenSourceFactory
+// to supply the OAuth token source during Authenticate.
+func New(email string, tokenSourceFactory func(context.Context) (oauth2.TokenSource, error)) *Provider {
+	return &Provider{email: email, tokenSourceFactory: tokenSourceFactory}
 }
 
-// Authenticate loads the stored OAuth token for the account and establishes a
-// Gmail API service. It must be called before ListMessages or GetMessageMeta.
-// If no token exists, it returns an error directing the user to authenticate first.
+// Authenticate establishes a Gmail API service using the configured token
+// source factory. It must be called before ListMessages or GetMessageMeta.
 func (p *Provider) Authenticate(ctx context.Context) error {
-	token, err := p.ts.Load("gmail", p.email)
-	if err != nil {
-		return fmt.Errorf("gmail: no stored token for %s — run 'inboxatlas auth gmail --account %s' first: %w", p.email, p.email, err)
+	if p.tokenSourceFactory == nil {
+		return fmt.Errorf("gmail: token source factory is nil")
 	}
-	src := p.cfg.TokenSource(ctx, token)
+	src, err := p.tokenSourceFactory(ctx)
+	if err != nil {
+		return fmt.Errorf("gmail: authenticate: %w", err)
+	}
 	svc, err := gmailapi.NewService(ctx, option.WithTokenSource(src))
 	if err != nil {
 		return fmt.Errorf("gmail: authenticate: %w", err)
