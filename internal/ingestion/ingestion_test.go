@@ -112,6 +112,13 @@ func TestRun_HappyPath_SinglePage(t *testing.T) {
 	if cp.MessagesSynced != 3 {
 		t.Errorf("MessagesSynced = %d, want 3", cp.MessagesSynced)
 	}
+	mb, err := st.GetMailbox(context.Background(), "user@example.com")
+	if err != nil {
+		t.Fatalf("GetMailbox: %v", err)
+	}
+	if mb == nil || mb.LastSyncedAt == nil {
+		t.Fatalf("expected LastSyncedAt to be set, got %+v", mb)
+	}
 	if !strings.Contains(out.String(), "Sync complete: 3 messages synced.") {
 		t.Errorf("expected completion line in output, got:\n%s", out.String())
 	}
@@ -423,6 +430,173 @@ func TestRun_ProgressOutput(t *testing.T) {
 		if !strings.Contains(output, want) {
 			t.Errorf("expected %q in output:\n%s", want, output)
 		}
+	}
+}
+
+func TestRun_PageCheckpointFailure_SavesInterrupted(t *testing.T) {
+	st := newTestStore(t)
+	p := &mock.Provider{Messages: newMessages(3), PageSize: 2}
+	var out strings.Builder
+
+	origSaveCheckpoint := saveCheckpoint
+	saveCheckpoint = func(ctx context.Context, st *storage.Store, cp storage.SyncCheckpoint) error {
+		if cp.Status == "running" && cp.PageCursor == "2" {
+			return fmt.Errorf("disk full")
+		}
+		return origSaveCheckpoint(ctx, st, cp)
+	}
+	t.Cleanup(func() { saveCheckpoint = origSaveCheckpoint })
+
+	err := Run(context.Background(), defaultOpts(p, st, &out))
+	if err == nil {
+		t.Fatal("expected page checkpoint save error")
+	}
+	if !strings.Contains(err.Error(), "save page checkpoint") {
+		t.Fatalf("expected save page checkpoint error, got %v", err)
+	}
+
+	cp, err := st.GetCheckpoint(context.Background(), "user@example.com", "gmail")
+	if err != nil {
+		t.Fatalf("GetCheckpoint: %v", err)
+	}
+	if cp == nil {
+		t.Fatal("expected checkpoint to exist")
+	}
+	if cp.Status != "interrupted" {
+		t.Fatalf("Status = %q, want interrupted", cp.Status)
+	}
+	if cp.PageCursor != "2" {
+		t.Fatalf("PageCursor = %q, want 2", cp.PageCursor)
+	}
+	if cp.MessagesSynced != 2 {
+		t.Fatalf("MessagesSynced = %d, want 2", cp.MessagesSynced)
+	}
+}
+
+func TestRun_InitialCheckpointFailure_ReturnsError(t *testing.T) {
+	st := newTestStore(t)
+	p := &mock.Provider{Messages: newMessages(1), PageSize: 10}
+	var out strings.Builder
+
+	origSaveCheckpoint := saveCheckpoint
+	saveCheckpoint = func(ctx context.Context, st *storage.Store, cp storage.SyncCheckpoint) error {
+		if cp.Status == "running" && cp.PageCursor == "" && cp.MessagesSynced == 0 {
+			return fmt.Errorf("initial checkpoint failure")
+		}
+		return origSaveCheckpoint(ctx, st, cp)
+	}
+	t.Cleanup(func() { saveCheckpoint = origSaveCheckpoint })
+
+	err := Run(context.Background(), defaultOpts(p, st, &out))
+	if err == nil {
+		t.Fatal("expected initial checkpoint save error")
+	}
+	if !strings.Contains(err.Error(), "save initial checkpoint") {
+		t.Fatalf("expected save initial checkpoint error, got %v", err)
+	}
+
+	cp, err := st.GetCheckpoint(context.Background(), "user@example.com", "gmail")
+	if err != nil {
+		t.Fatalf("GetCheckpoint: %v", err)
+	}
+	if cp != nil {
+		t.Fatalf("expected no checkpoint after initial save failure, got %+v", cp)
+	}
+}
+
+func TestRun_UpdateLastSyncedFailure_SavesInterrupted(t *testing.T) {
+	st := newTestStore(t)
+	p := &mock.Provider{Messages: newMessages(2), PageSize: 10}
+	var out strings.Builder
+
+	origUpdateLastSynced := updateLastSynced
+	updateLastSynced = func(context.Context, *storage.Store, string, time.Time) error {
+		return fmt.Errorf("write mailbox timestamp")
+	}
+	t.Cleanup(func() { updateLastSynced = origUpdateLastSynced })
+
+	err := Run(context.Background(), defaultOpts(p, st, &out))
+	if err == nil {
+		t.Fatal("expected update last synced error")
+	}
+	if !strings.Contains(err.Error(), "update last synced") {
+		t.Fatalf("expected update last synced error, got %v", err)
+	}
+
+	cp, err := st.GetCheckpoint(context.Background(), "user@example.com", "gmail")
+	if err != nil {
+		t.Fatalf("GetCheckpoint: %v", err)
+	}
+	if cp == nil {
+		t.Fatal("expected checkpoint to exist")
+	}
+	if cp.Status != "interrupted" {
+		t.Fatalf("Status = %q, want interrupted", cp.Status)
+	}
+	if cp.PageCursor != "" {
+		t.Fatalf("PageCursor = %q, want empty", cp.PageCursor)
+	}
+	if cp.MessagesSynced != 2 {
+		t.Fatalf("MessagesSynced = %d, want 2", cp.MessagesSynced)
+	}
+
+	mb, err := st.GetMailbox(context.Background(), "user@example.com")
+	if err != nil {
+		t.Fatalf("GetMailbox: %v", err)
+	}
+	if mb == nil {
+		t.Fatal("expected mailbox to exist")
+	}
+	if mb.LastSyncedAt != nil {
+		t.Fatalf("expected LastSyncedAt to remain nil, got %v", *mb.LastSyncedAt)
+	}
+}
+
+func TestRun_SaveCompletedCheckpointFailure_SavesInterrupted(t *testing.T) {
+	st := newTestStore(t)
+	p := &mock.Provider{Messages: newMessages(2), PageSize: 10}
+	var out strings.Builder
+
+	origSaveCheckpoint := saveCheckpoint
+	saveCheckpoint = func(ctx context.Context, st *storage.Store, cp storage.SyncCheckpoint) error {
+		if cp.Status == "completed" {
+			return fmt.Errorf("completed checkpoint failure")
+		}
+		return origSaveCheckpoint(ctx, st, cp)
+	}
+	t.Cleanup(func() { saveCheckpoint = origSaveCheckpoint })
+
+	err := Run(context.Background(), defaultOpts(p, st, &out))
+	if err == nil {
+		t.Fatal("expected save completed checkpoint error")
+	}
+	if !strings.Contains(err.Error(), "save completed checkpoint") {
+		t.Fatalf("expected save completed checkpoint error, got %v", err)
+	}
+
+	cp, err := st.GetCheckpoint(context.Background(), "user@example.com", "gmail")
+	if err != nil {
+		t.Fatalf("GetCheckpoint: %v", err)
+	}
+	if cp == nil {
+		t.Fatal("expected checkpoint to exist")
+	}
+	if cp.Status != "interrupted" {
+		t.Fatalf("Status = %q, want interrupted", cp.Status)
+	}
+	if cp.PageCursor != "" {
+		t.Fatalf("PageCursor = %q, want empty", cp.PageCursor)
+	}
+	if cp.MessagesSynced != 2 {
+		t.Fatalf("MessagesSynced = %d, want 2", cp.MessagesSynced)
+	}
+
+	mb, err := st.GetMailbox(context.Background(), "user@example.com")
+	if err != nil {
+		t.Fatalf("GetMailbox: %v", err)
+	}
+	if mb == nil || mb.LastSyncedAt == nil {
+		t.Fatalf("expected LastSyncedAt to be set before completed checkpoint failure, got %+v", mb)
 	}
 }
 

@@ -20,6 +20,14 @@ import (
 // changing production behaviour.
 var backoffInitialDelay = time.Second
 
+var saveCheckpoint = func(ctx context.Context, st *storage.Store, cp storage.SyncCheckpoint) error {
+	return st.SaveCheckpoint(ctx, cp)
+}
+
+var updateLastSynced = func(ctx context.Context, st *storage.Store, mailboxID string, t time.Time) error {
+	return st.UpdateLastSynced(ctx, mailboxID, t)
+}
+
 // Options holds all parameters for a sync run.
 // RequestDelay 0 defaults to 100ms. MaxRetries 0 defaults to 5.
 type Options struct {
@@ -33,8 +41,9 @@ type Options struct {
 }
 
 // Run executes a full synchronous sync for the mailbox described by opts.
-// Progress lines are written to opts.Stdout. On failure a checkpoint with
-// status "interrupted" is saved before returning the error.
+// Progress lines are written to opts.Stdout. Once the initial "running"
+// checkpoint is written, any later error return makes a best-effort attempt to
+// persist status "interrupted" with the latest safe progress.
 func Run(ctx context.Context, opts Options) error {
 	if opts.MaxRetries == 0 {
 		opts.MaxRetries = 5
@@ -69,7 +78,7 @@ func Run(ctx context.Context, opts Options) error {
 	}
 
 	// Save an initial "running" checkpoint.
-	if err := opts.Store.SaveCheckpoint(ctx, storage.SyncCheckpoint{
+	if err := saveCheckpoint(ctx, opts.Store, storage.SyncCheckpoint{
 		MailboxID:      opts.MailboxID,
 		Provider:       opts.Provider,
 		PageCursor:     pageCursor,
@@ -89,32 +98,28 @@ func Run(ctx context.Context, opts Options) error {
 		// Fetch a page of message IDs with backoff on retryable errors.
 		ids, nextToken, err := listWithBackoff(ctx, opts.MailProvider, pageCursor, opts.MaxRetries)
 		if err != nil {
-			saveInterrupted(opts, pageCursor, messagesSynced, startedAt)
-			return fmt.Errorf("list messages page %d: %w", pageNum, err)
+			return failInterrupted(opts, pageCursor, messagesSynced, startedAt, "list messages page %d: %w", pageNum, err)
 		}
 
 		// Fetch, normalize, and store each message.
 		for _, id := range ids {
 			meta, err := getMetaWithBackoff(ctx, opts.MailProvider, id, opts.MaxRetries)
 			if err != nil {
-				saveInterrupted(opts, pageCursor, messagesSynced, startedAt)
-				return fmt.Errorf("get message %s: %w", id, err)
+				return failInterrupted(opts, pageCursor, messagesSynced, startedAt, "get message %s: %w", id, err)
 			}
 
 			normalized := normalization.NormalizeMessage(*meta)
 			normalized.MailboxID = opts.MailboxID
 
 			if err := opts.Store.UpsertMessage(ctx, normalized); err != nil {
-				saveInterrupted(opts, pageCursor, messagesSynced, startedAt)
-				return fmt.Errorf("upsert message: %w", err)
+				return failInterrupted(opts, pageCursor, messagesSynced, startedAt, "upsert message: %w", err)
 			}
 
 			messagesSynced++
 
 			// Per-request delay floor between GetMessageMeta calls.
 			if err := sleepCtx(ctx, opts.RequestDelay); err != nil {
-				saveInterrupted(opts, pageCursor, messagesSynced, startedAt)
-				return err
+				return failInterrupted(opts, pageCursor, messagesSynced, startedAt, "%w", err)
 			}
 		}
 
@@ -124,7 +129,7 @@ func Run(ctx context.Context, opts Options) error {
 
 		// Advance the cursor and save checkpoint.
 		pageCursor = nextToken
-		if err := opts.Store.SaveCheckpoint(ctx, storage.SyncCheckpoint{
+		if err := saveCheckpoint(ctx, opts.Store, storage.SyncCheckpoint{
 			MailboxID:      opts.MailboxID,
 			Provider:       opts.Provider,
 			PageCursor:     pageCursor,
@@ -133,7 +138,7 @@ func Run(ctx context.Context, opts Options) error {
 			StartedAt:      startedAt,
 			UpdatedAt:      time.Now(),
 		}); err != nil {
-			return fmt.Errorf("save page checkpoint: %w", err)
+			return failInterrupted(opts, pageCursor, messagesSynced, startedAt, "save page checkpoint: %w", err)
 		}
 
 		if pageCursor == "" {
@@ -142,30 +147,35 @@ func Run(ctx context.Context, opts Options) error {
 
 		// Check context between pages.
 		if err := ctx.Err(); err != nil {
-			saveInterrupted(opts, pageCursor, messagesSynced, startedAt)
-			return err
+			return failInterrupted(opts, pageCursor, messagesSynced, startedAt, "%w", err)
 		}
 	}
 
-	// Mark sync complete.
-	if err := opts.Store.SaveCheckpoint(ctx, storage.SyncCheckpoint{
+	completedAt := time.Now()
+	if err := updateLastSynced(ctx, opts.Store, opts.MailboxID, completedAt); err != nil {
+		return failInterrupted(opts, pageCursor, messagesSynced, startedAt, "update last synced: %w", err)
+	}
+
+	// Mark sync complete only after all success conditions have passed.
+	if err := saveCheckpoint(ctx, opts.Store, storage.SyncCheckpoint{
 		MailboxID:      opts.MailboxID,
 		Provider:       opts.Provider,
 		PageCursor:     "",
 		MessagesSynced: messagesSynced,
 		Status:         "completed",
 		StartedAt:      startedAt,
-		UpdatedAt:      time.Now(),
+		UpdatedAt:      completedAt,
 	}); err != nil {
-		return fmt.Errorf("save completed checkpoint: %w", err)
-	}
-
-	if err := opts.Store.UpdateLastSynced(ctx, opts.MailboxID, time.Now()); err != nil {
-		return fmt.Errorf("update last synced: %w", err)
+		return failInterrupted(opts, pageCursor, messagesSynced, startedAt, "save completed checkpoint: %w", err)
 	}
 
 	_, _ = fmt.Fprintf(opts.Stdout, "Sync complete: %d messages synced.\n", messagesSynced)
 	return nil
+}
+
+func failInterrupted(opts Options, cursor string, synced int, startedAt time.Time, format string, args ...any) error {
+	saveInterrupted(opts, cursor, synced, startedAt)
+	return fmt.Errorf(format, args...)
 }
 
 // isRetryable reports whether err (or any error in its chain) implements
@@ -193,7 +203,7 @@ func sleepCtx(ctx context.Context, d time.Duration) error {
 // context so that the save succeeds even when the request context is cancelled.
 // Errors are silently dropped — the caller is already returning an error.
 func saveInterrupted(opts Options, cursor string, synced int, startedAt time.Time) {
-	_ = opts.Store.SaveCheckpoint(context.Background(), storage.SyncCheckpoint{
+	_ = saveCheckpoint(context.Background(), opts.Store, storage.SyncCheckpoint{
 		MailboxID:      opts.MailboxID,
 		Provider:       opts.Provider,
 		PageCursor:     cursor,
