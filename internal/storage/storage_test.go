@@ -686,3 +686,281 @@ func TestEmailCanonicalization(t *testing.T) {
 		t.Errorf("ID should be lowercase, got %q", got.ID)
 	}
 }
+
+// --- Query helpers ---
+
+// seedMessage creates a minimal message with the given fields for query tests.
+func seedMessage(t *testing.T, st *Store, providerID, mailboxID, fromEmail, fromName, domain, subject string, receivedAt time.Time) {
+	t.Helper()
+	msg := models.MessageMeta{
+		ProviderID: providerID,
+		MailboxID:  mailboxID,
+		Provider:   "gmail",
+		FromEmail:  fromEmail,
+		FromName:   fromName,
+		Domain:     domain,
+		Subject:    subject,
+		ReceivedAt: receivedAt,
+	}
+	if err := st.UpsertMessage(context.Background(), msg); err != nil {
+		t.Fatalf("seedMessage(%q): %v", providerID, err)
+	}
+}
+
+// --- QueryMessagesByDomain ---
+
+func TestQueryMessagesByDomain_ScopedOrderedDesc(t *testing.T) {
+	st := newTestStore(t)
+	createTestMailbox(t, st, "user@example.com")
+
+	now := time.Date(2025, 1, 1, 0, 0, 0, 0, time.UTC)
+	seedMessage(t, st, "m1", "user@example.com", "a@foo.com", "", "foo.com", "", now)
+	seedMessage(t, st, "m2", "user@example.com", "b@foo.com", "", "foo.com", "", now)
+	seedMessage(t, st, "m3", "user@example.com", "c@bar.com", "", "bar.com", "", now)
+
+	rows, err := st.QueryMessagesByDomain(context.Background(), "user@example.com", 10)
+	if err != nil {
+		t.Fatalf("QueryMessagesByDomain: %v", err)
+	}
+	if len(rows) != 2 {
+		t.Fatalf("expected 2 rows, got %d", len(rows))
+	}
+	if rows[0].Domain != "foo.com" || rows[0].Count != 2 {
+		t.Errorf("first row: got %+v, want {foo.com 2}", rows[0])
+	}
+	if rows[1].Domain != "bar.com" || rows[1].Count != 1 {
+		t.Errorf("second row: got %+v, want {bar.com 1}", rows[1])
+	}
+}
+
+func TestQueryMessagesByDomain_EmptyMailboxID_AllMailboxes(t *testing.T) {
+	st := newTestStore(t)
+	createTestMailbox(t, st, "user1@example.com")
+	createTestMailbox(t, st, "user2@example.com")
+
+	now := time.Date(2025, 1, 1, 0, 0, 0, 0, time.UTC)
+	seedMessage(t, st, "m1", "user1@example.com", "a@foo.com", "", "foo.com", "", now)
+	seedMessage(t, st, "m2", "user2@example.com", "b@foo.com", "", "foo.com", "", now)
+	seedMessage(t, st, "m3", "user2@example.com", "c@bar.com", "", "bar.com", "", now)
+
+	rows, err := st.QueryMessagesByDomain(context.Background(), "", 10)
+	if err != nil {
+		t.Fatalf("QueryMessagesByDomain (all): %v", err)
+	}
+	if len(rows) != 2 {
+		t.Fatalf("expected 2 rows, got %d", len(rows))
+	}
+	if rows[0].Domain != "foo.com" || rows[0].Count != 2 {
+		t.Errorf("first row: got %+v", rows[0])
+	}
+}
+
+func TestQueryMessagesByDomain_EmptyDomainExcluded(t *testing.T) {
+	st := newTestStore(t)
+	createTestMailbox(t, st, "user@example.com")
+
+	now := time.Date(2025, 1, 1, 0, 0, 0, 0, time.UTC)
+	seedMessage(t, st, "m1", "user@example.com", "a@foo.com", "", "foo.com", "", now)
+	seedMessage(t, st, "m2", "user@example.com", "b@nodom.com", "", "", "", now) // empty domain
+
+	rows, err := st.QueryMessagesByDomain(context.Background(), "user@example.com", 10)
+	if err != nil {
+		t.Fatalf("QueryMessagesByDomain: %v", err)
+	}
+	if len(rows) != 1 {
+		t.Fatalf("expected 1 row (empty domain excluded), got %d", len(rows))
+	}
+}
+
+func TestQueryMessagesByDomain_NoMessages(t *testing.T) {
+	st := newTestStore(t)
+	createTestMailbox(t, st, "user@example.com")
+
+	rows, err := st.QueryMessagesByDomain(context.Background(), "user@example.com", 10)
+	if err != nil {
+		t.Fatalf("QueryMessagesByDomain: %v", err)
+	}
+	if len(rows) != 0 {
+		t.Errorf("expected 0 rows, got %d", len(rows))
+	}
+}
+
+// --- QueryMessagesBySender ---
+
+func TestQueryMessagesBySender_ScopedOrderedDesc(t *testing.T) {
+	st := newTestStore(t)
+	createTestMailbox(t, st, "user@example.com")
+
+	now := time.Date(2025, 1, 1, 0, 0, 0, 0, time.UTC)
+	seedMessage(t, st, "m1", "user@example.com", "alice@foo.com", "Alice", "foo.com", "", now)
+	seedMessage(t, st, "m2", "user@example.com", "alice@foo.com", "Alice", "foo.com", "", now.Add(time.Hour))
+	seedMessage(t, st, "m3", "user@example.com", "bob@bar.com", "Bob", "bar.com", "", now)
+
+	rows, err := st.QueryMessagesBySender(context.Background(), "user@example.com", 10)
+	if err != nil {
+		t.Fatalf("QueryMessagesBySender: %v", err)
+	}
+	if len(rows) != 2 {
+		t.Fatalf("expected 2 rows, got %d", len(rows))
+	}
+	if rows[0].Email != "alice@foo.com" || rows[0].Count != 2 {
+		t.Errorf("first row: got %+v", rows[0])
+	}
+	if rows[0].Name != "Alice" {
+		t.Errorf("expected Name=Alice, got %q", rows[0].Name)
+	}
+}
+
+func TestQueryMessagesBySender_EmptyMailboxID_AllMailboxes(t *testing.T) {
+	st := newTestStore(t)
+	createTestMailbox(t, st, "user1@example.com")
+	createTestMailbox(t, st, "user2@example.com")
+
+	now := time.Date(2025, 1, 1, 0, 0, 0, 0, time.UTC)
+	seedMessage(t, st, "m1", "user1@example.com", "alice@foo.com", "Alice", "foo.com", "", now)
+	seedMessage(t, st, "m2", "user2@example.com", "alice@foo.com", "Alice", "foo.com", "", now.Add(time.Hour))
+
+	rows, err := st.QueryMessagesBySender(context.Background(), "", 10)
+	if err != nil {
+		t.Fatalf("QueryMessagesBySender (all): %v", err)
+	}
+	if len(rows) != 1 || rows[0].Count != 2 {
+		t.Errorf("expected 1 row with count=2, got %+v", rows)
+	}
+}
+
+func TestQueryMessagesBySender_EmptyEmailExcluded(t *testing.T) {
+	st := newTestStore(t)
+	createTestMailbox(t, st, "user@example.com")
+
+	now := time.Date(2025, 1, 1, 0, 0, 0, 0, time.UTC)
+	seedMessage(t, st, "m1", "user@example.com", "alice@foo.com", "Alice", "foo.com", "", now)
+	seedMessage(t, st, "m2", "user@example.com", "", "", "", "", now) // empty email
+
+	rows, err := st.QueryMessagesBySender(context.Background(), "user@example.com", 10)
+	if err != nil {
+		t.Fatalf("QueryMessagesBySender: %v", err)
+	}
+	if len(rows) != 1 {
+		t.Fatalf("expected 1 row (empty email excluded), got %d", len(rows))
+	}
+}
+
+func TestQueryMessagesBySender_NoMessages(t *testing.T) {
+	st := newTestStore(t)
+	createTestMailbox(t, st, "user@example.com")
+
+	rows, err := st.QueryMessagesBySender(context.Background(), "user@example.com", 10)
+	if err != nil {
+		t.Fatalf("QueryMessagesBySender: %v", err)
+	}
+	if len(rows) != 0 {
+		t.Errorf("expected 0 rows, got %d", len(rows))
+	}
+}
+
+// --- QueryMessagesByVolume ---
+
+func TestQueryMessagesByVolume_ScopedOrderedAsc(t *testing.T) {
+	st := newTestStore(t)
+	createTestMailbox(t, st, "user@example.com")
+
+	seedMessage(t, st, "m1", "user@example.com", "a@x.com", "", "x.com", "", time.Date(2025, 1, 15, 0, 0, 0, 0, time.UTC))
+	seedMessage(t, st, "m2", "user@example.com", "b@x.com", "", "x.com", "", time.Date(2025, 1, 20, 0, 0, 0, 0, time.UTC))
+	seedMessage(t, st, "m3", "user@example.com", "c@x.com", "", "x.com", "", time.Date(2025, 2, 5, 0, 0, 0, 0, time.UTC))
+
+	rows, err := st.QueryMessagesByVolume(context.Background(), "user@example.com")
+	if err != nil {
+		t.Fatalf("QueryMessagesByVolume: %v", err)
+	}
+	if len(rows) != 2 {
+		t.Fatalf("expected 2 rows, got %d", len(rows))
+	}
+	if rows[0].Period != "2025-01" || rows[0].Count != 2 {
+		t.Errorf("first row: got %+v", rows[0])
+	}
+	if rows[1].Period != "2025-02" || rows[1].Count != 1 {
+		t.Errorf("second row: got %+v", rows[1])
+	}
+}
+
+func TestQueryMessagesByVolume_EmptyMailboxID_AllMailboxes(t *testing.T) {
+	st := newTestStore(t)
+	createTestMailbox(t, st, "user1@example.com")
+	createTestMailbox(t, st, "user2@example.com")
+
+	jan := time.Date(2025, 1, 1, 0, 0, 0, 0, time.UTC)
+	seedMessage(t, st, "m1", "user1@example.com", "a@x.com", "", "x.com", "", jan)
+	seedMessage(t, st, "m2", "user2@example.com", "b@x.com", "", "x.com", "", jan.Add(24*time.Hour))
+
+	rows, err := st.QueryMessagesByVolume(context.Background(), "")
+	if err != nil {
+		t.Fatalf("QueryMessagesByVolume (all): %v", err)
+	}
+	if len(rows) != 1 || rows[0].Count != 2 {
+		t.Errorf("expected 1 row with count=2, got %+v", rows)
+	}
+}
+
+func TestQueryMessagesByVolume_NoMessages(t *testing.T) {
+	st := newTestStore(t)
+	createTestMailbox(t, st, "user@example.com")
+
+	rows, err := st.QueryMessagesByVolume(context.Background(), "user@example.com")
+	if err != nil {
+		t.Fatalf("QueryMessagesByVolume: %v", err)
+	}
+	if len(rows) != 0 {
+		t.Errorf("expected 0 rows, got %d", len(rows))
+	}
+}
+
+// --- QuerySubjects ---
+
+func TestQuerySubjects_ReturnNonEmpty(t *testing.T) {
+	st := newTestStore(t)
+	createTestMailbox(t, st, "user@example.com")
+
+	now := time.Date(2025, 1, 1, 0, 0, 0, 0, time.UTC)
+	seedMessage(t, st, "m1", "user@example.com", "a@x.com", "", "x.com", "Hello World", now)
+	seedMessage(t, st, "m2", "user@example.com", "b@x.com", "", "x.com", "", now.Add(time.Hour)) // empty subject
+
+	subjects, err := st.QuerySubjects(context.Background(), "user@example.com")
+	if err != nil {
+		t.Fatalf("QuerySubjects: %v", err)
+	}
+	if len(subjects) != 1 || subjects[0] != "Hello World" {
+		t.Errorf("expected [Hello World], got %v", subjects)
+	}
+}
+
+func TestQuerySubjects_EmptyMailboxID_AllMailboxes(t *testing.T) {
+	st := newTestStore(t)
+	createTestMailbox(t, st, "user1@example.com")
+	createTestMailbox(t, st, "user2@example.com")
+
+	now := time.Date(2025, 1, 1, 0, 0, 0, 0, time.UTC)
+	seedMessage(t, st, "m1", "user1@example.com", "a@x.com", "", "x.com", "Foo", now)
+	seedMessage(t, st, "m2", "user2@example.com", "b@x.com", "", "x.com", "Bar", now.Add(time.Hour))
+
+	subjects, err := st.QuerySubjects(context.Background(), "")
+	if err != nil {
+		t.Fatalf("QuerySubjects (all): %v", err)
+	}
+	if len(subjects) != 2 {
+		t.Errorf("expected 2 subjects, got %v", subjects)
+	}
+}
+
+func TestQuerySubjects_NoMessages(t *testing.T) {
+	st := newTestStore(t)
+	createTestMailbox(t, st, "user@example.com")
+
+	subjects, err := st.QuerySubjects(context.Background(), "user@example.com")
+	if err != nil {
+		t.Fatalf("QuerySubjects: %v", err)
+	}
+	if len(subjects) != 0 {
+		t.Errorf("expected 0 subjects, got %v", subjects)
+	}
+}

@@ -281,6 +281,167 @@ type SyncCheckpoint struct {
 	UpdatedAt      time.Time
 }
 
+// DomainCount is a single domain aggregate row returned by QueryMessagesByDomain.
+type DomainCount struct {
+	Domain string
+	Count  int
+}
+
+// SenderCount is a single sender aggregate row returned by QueryMessagesBySender.
+type SenderCount struct {
+	Email  string
+	Name   string
+	Domain string
+	Count  int
+}
+
+// VolumeCount is a single monthly volume row returned by QueryMessagesByVolume.
+type VolumeCount struct {
+	Period string // "YYYY-MM"
+	Count  int
+}
+
+// QueryMessagesByDomain returns domain aggregate counts sorted by count desc.
+// When mailboxID is empty, results aggregate across all mailboxes.
+func (s *Store) QueryMessagesByDomain(ctx context.Context, mailboxID string, limit int) ([]DomainCount, error) {
+	var rows *sql.Rows
+	var err error
+	if mailboxID != "" {
+		rows, err = s.db.QueryContext(ctx,
+			`SELECT domain, COUNT(*) FROM messages
+			 WHERE mailbox_id = ? AND domain != ''
+			 GROUP BY domain ORDER BY COUNT(*) DESC LIMIT ?`,
+			mailboxID, limit,
+		)
+	} else {
+		rows, err = s.db.QueryContext(ctx,
+			`SELECT domain, COUNT(*) FROM messages
+			 WHERE domain != ''
+			 GROUP BY domain ORDER BY COUNT(*) DESC LIMIT ?`,
+			limit,
+		)
+	}
+	if err != nil {
+		return nil, fmt.Errorf("query domains: %w", err)
+	}
+	defer func() { _ = rows.Close() }()
+
+	var out []DomainCount
+	for rows.Next() {
+		var dc DomainCount
+		if err := rows.Scan(&dc.Domain, &dc.Count); err != nil {
+			return nil, fmt.Errorf("scan domain row: %w", err)
+		}
+		out = append(out, dc)
+	}
+	return out, rows.Err()
+}
+
+// QueryMessagesBySender returns sender aggregate counts sorted by count desc.
+// When mailboxID is empty, results aggregate across all mailboxes.
+func (s *Store) QueryMessagesBySender(ctx context.Context, mailboxID string, limit int) ([]SenderCount, error) {
+	var rows *sql.Rows
+	var err error
+	if mailboxID != "" {
+		rows, err = s.db.QueryContext(ctx,
+			`SELECT from_email, from_name, domain, COUNT(*) FROM messages
+			 WHERE mailbox_id = ? AND from_email != ''
+			 GROUP BY from_email ORDER BY COUNT(*) DESC LIMIT ?`,
+			mailboxID, limit,
+		)
+	} else {
+		rows, err = s.db.QueryContext(ctx,
+			`SELECT from_email, from_name, domain, COUNT(*) FROM messages
+			 WHERE from_email != ''
+			 GROUP BY from_email ORDER BY COUNT(*) DESC LIMIT ?`,
+			limit,
+		)
+	}
+	if err != nil {
+		return nil, fmt.Errorf("query senders: %w", err)
+	}
+	defer func() { _ = rows.Close() }()
+
+	var out []SenderCount
+	for rows.Next() {
+		var sc SenderCount
+		var fromName sql.NullString
+		if err := rows.Scan(&sc.Email, &fromName, &sc.Domain, &sc.Count); err != nil {
+			return nil, fmt.Errorf("scan sender row: %w", err)
+		}
+		if fromName.Valid {
+			sc.Name = fromName.String
+		}
+		out = append(out, sc)
+	}
+	return out, rows.Err()
+}
+
+// QueryMessagesByVolume returns monthly message counts sorted by period asc.
+// When mailboxID is empty, results aggregate across all mailboxes.
+func (s *Store) QueryMessagesByVolume(ctx context.Context, mailboxID string) ([]VolumeCount, error) {
+	var rows *sql.Rows
+	var err error
+	if mailboxID != "" {
+		rows, err = s.db.QueryContext(ctx,
+			`SELECT strftime('%Y-%m', received_at), COUNT(*) FROM messages
+			 WHERE mailbox_id = ?
+			 GROUP BY 1 ORDER BY 1 ASC`,
+			mailboxID,
+		)
+	} else {
+		rows, err = s.db.QueryContext(ctx,
+			`SELECT strftime('%Y-%m', received_at), COUNT(*) FROM messages
+			 GROUP BY 1 ORDER BY 1 ASC`,
+		)
+	}
+	if err != nil {
+		return nil, fmt.Errorf("query volume: %w", err)
+	}
+	defer func() { _ = rows.Close() }()
+
+	var out []VolumeCount
+	for rows.Next() {
+		var vc VolumeCount
+		if err := rows.Scan(&vc.Period, &vc.Count); err != nil {
+			return nil, fmt.Errorf("scan volume row: %w", err)
+		}
+		out = append(out, vc)
+	}
+	return out, rows.Err()
+}
+
+// QuerySubjects returns all non-empty subject strings for the given mailbox.
+// When mailboxID is empty, subjects are returned across all mailboxes.
+func (s *Store) QuerySubjects(ctx context.Context, mailboxID string) ([]string, error) {
+	var rows *sql.Rows
+	var err error
+	if mailboxID != "" {
+		rows, err = s.db.QueryContext(ctx,
+			`SELECT subject FROM messages WHERE mailbox_id = ? AND subject != ''`,
+			mailboxID,
+		)
+	} else {
+		rows, err = s.db.QueryContext(ctx,
+			`SELECT subject FROM messages WHERE subject != ''`,
+		)
+	}
+	if err != nil {
+		return nil, fmt.Errorf("query subjects: %w", err)
+	}
+	defer func() { _ = rows.Close() }()
+
+	var out []string
+	for rows.Next() {
+		var subject string
+		if err := rows.Scan(&subject); err != nil {
+			return nil, fmt.Errorf("scan subject: %w", err)
+		}
+		out = append(out, subject)
+	}
+	return out, rows.Err()
+}
+
 // UpsertMessage inserts msg into the messages table. Duplicate inserts (same
 // provider_id + mailbox_id) are silently ignored — re-syncing is idempotent.
 func (s *Store) UpsertMessage(ctx context.Context, msg models.MessageMeta) error {
