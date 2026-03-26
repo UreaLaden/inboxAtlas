@@ -100,6 +100,30 @@ CREATE TABLE IF NOT EXISTS subject_term_stats (
     message_count INTEGER NOT NULL DEFAULT 0,
     PRIMARY KEY (mailbox_id, term)
 );
+
+CREATE TABLE IF NOT EXISTS classification_seeds (
+    id            INTEGER PRIMARY KEY AUTOINCREMENT,
+    mailbox_id    TEXT,
+    pattern_type  TEXT NOT NULL,
+    pattern_value TEXT NOT NULL,
+    category      TEXT NOT NULL,
+    source        TEXT NOT NULL DEFAULT 'seed',
+    priority      INTEGER NOT NULL DEFAULT 100,
+    created_at    TEXT NOT NULL
+);
+
+CREATE UNIQUE INDEX IF NOT EXISTS uix_classification_seeds
+    ON classification_seeds (COALESCE(mailbox_id, ''), pattern_type, pattern_value);
+
+CREATE TABLE IF NOT EXISTS message_classifications (
+    message_id    TEXT NOT NULL REFERENCES messages(id),
+    mailbox_id    TEXT NOT NULL REFERENCES mailboxes(id),
+    category      TEXT NOT NULL,
+    matched_rule  TEXT,
+    source        TEXT NOT NULL,
+    classified_at TEXT NOT NULL,
+    PRIMARY KEY (message_id, mailbox_id)
+);
 `
 
 func (s *Store) migrate() error {
@@ -299,6 +323,29 @@ type SenderCount struct {
 type VolumeCount struct {
 	Period string // "YYYY-MM"
 	Count  int
+}
+
+// ClassificationSeed is a single rule stored in the classification_seeds table.
+// MailboxID is empty for global seeds (apply to all mailboxes).
+type ClassificationSeed struct {
+	ID           int64
+	MailboxID    string // empty = global
+	PatternType  string // "domain", "sender_email", "sender_prefix", "subject_term"
+	PatternValue string
+	Category     string
+	Source       string // "seed", "operator", "ai"
+	Priority     int    // lower = evaluated first; default 100
+	CreatedAt    time.Time
+}
+
+// Classification is a single row in the message_classifications table.
+type Classification struct {
+	MessageID    string
+	MailboxID    string
+	Category     string
+	MatchedRule  string
+	Source       string
+	ClassifiedAt time.Time
 }
 
 // QueryMessagesByDomain returns domain aggregate counts sorted by count desc.
@@ -549,4 +596,188 @@ func scanCheckpoint(s scanner) (*SyncCheckpoint, error) {
 		return nil, fmt.Errorf("parse checkpoint updated_at %q: %w", updatedAt, err)
 	}
 	return &cp, nil
+}
+
+// InsertSeed inserts a classification seed. Duplicate (mailbox_id, pattern_type,
+// pattern_value) tuples are silently ignored (INSERT OR IGNORE).
+func (s *Store) InsertSeed(ctx context.Context, seed ClassificationSeed) error {
+	_, err := s.db.ExecContext(ctx,
+		`INSERT OR IGNORE INTO classification_seeds
+		 (mailbox_id, pattern_type, pattern_value, category, source, priority, created_at)
+		 VALUES (?, ?, ?, ?, ?, ?, ?)`,
+		nullableString(seed.MailboxID),
+		seed.PatternType,
+		seed.PatternValue,
+		seed.Category,
+		seed.Source,
+		seed.Priority,
+		time.Now().UTC().Format(time.RFC3339),
+	)
+	if err != nil {
+		return fmt.Errorf("insert seed: %w", err)
+	}
+	return nil
+}
+
+// ListSeeds returns all seeds that apply to the given mailboxID: global seeds
+// (mailbox_id IS NULL) plus mailbox-specific seeds (mailbox_id = mailboxID).
+// When mailboxID is empty, only global seeds are returned.
+// Results are ordered by priority ASC, then id ASC.
+func (s *Store) ListSeeds(ctx context.Context, mailboxID string) ([]ClassificationSeed, error) {
+	var rows *sql.Rows
+	var err error
+	if mailboxID != "" {
+		rows, err = s.db.QueryContext(ctx,
+			`SELECT id, mailbox_id, pattern_type, pattern_value, category, source, priority, created_at
+			 FROM classification_seeds
+			 WHERE mailbox_id IS NULL OR mailbox_id = ?
+			 ORDER BY priority ASC, id ASC`,
+			mailboxID,
+		)
+	} else {
+		rows, err = s.db.QueryContext(ctx,
+			`SELECT id, mailbox_id, pattern_type, pattern_value, category, source, priority, created_at
+			 FROM classification_seeds
+			 WHERE mailbox_id IS NULL
+			 ORDER BY priority ASC, id ASC`,
+		)
+	}
+	if err != nil {
+		return nil, fmt.Errorf("list seeds: %w", err)
+	}
+	defer func() { _ = rows.Close() }()
+
+	var out []ClassificationSeed
+	for rows.Next() {
+		seed, err := scanSeed(rows)
+		if err != nil {
+			return nil, err
+		}
+		out = append(out, *seed)
+	}
+	return out, rows.Err()
+}
+
+// DeleteSeed removes the seed with the given ID.
+func (s *Store) DeleteSeed(ctx context.Context, id int64) error {
+	_, err := s.db.ExecContext(ctx, `DELETE FROM classification_seeds WHERE id = ?`, id)
+	if err != nil {
+		return fmt.Errorf("delete seed: %w", err)
+	}
+	return nil
+}
+
+// SaveClassification inserts or replaces a message classification.
+func (s *Store) SaveClassification(ctx context.Context, c Classification) error {
+	_, err := s.db.ExecContext(ctx,
+		`INSERT OR REPLACE INTO message_classifications
+		 (message_id, mailbox_id, category, matched_rule, source, classified_at)
+		 VALUES (?, ?, ?, ?, ?, ?)`,
+		c.MessageID,
+		c.MailboxID,
+		c.Category,
+		c.MatchedRule,
+		c.Source,
+		c.ClassifiedAt.UTC().Format(time.RFC3339),
+	)
+	if err != nil {
+		return fmt.Errorf("save classification: %w", err)
+	}
+	return nil
+}
+
+// BulkSaveClassifications saves multiple classifications in a single transaction.
+func (s *Store) BulkSaveClassifications(ctx context.Context, classifications []Classification) error {
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return fmt.Errorf("begin tx: %w", err)
+	}
+	defer func() { _ = tx.Rollback() }()
+
+	stmt, err := tx.PrepareContext(ctx,
+		`INSERT OR REPLACE INTO message_classifications
+		 (message_id, mailbox_id, category, matched_rule, source, classified_at)
+		 VALUES (?, ?, ?, ?, ?, ?)`,
+	)
+	if err != nil {
+		return fmt.Errorf("prepare bulk save: %w", err)
+	}
+	defer func() { _ = stmt.Close() }()
+
+	for _, c := range classifications {
+		if _, err := stmt.ExecContext(ctx,
+			c.MessageID,
+			c.MailboxID,
+			c.Category,
+			c.MatchedRule,
+			c.Source,
+			c.ClassifiedAt.UTC().Format(time.RFC3339),
+		); err != nil {
+			return fmt.Errorf("bulk save classification: %w", err)
+		}
+	}
+	if err := tx.Commit(); err != nil {
+		return fmt.Errorf("commit bulk save: %w", err)
+	}
+	return nil
+}
+
+// GetClassification returns the classification for the given message and mailbox.
+// Returns (nil, nil) when no classification exists.
+func (s *Store) GetClassification(ctx context.Context, messageID, mailboxID string) (*Classification, error) {
+	row := s.db.QueryRowContext(ctx,
+		`SELECT message_id, mailbox_id, category, matched_rule, source, classified_at
+		 FROM message_classifications
+		 WHERE message_id = ? AND mailbox_id = ?`,
+		messageID, mailboxID,
+	)
+	return scanClassification(row)
+}
+
+// scanSeed reads one classification_seeds row from s.
+func scanSeed(s scanner) (*ClassificationSeed, error) {
+	var seed ClassificationSeed
+	var mailboxID sql.NullString
+	var createdAt string
+
+	err := s.Scan(
+		&seed.ID, &mailboxID, &seed.PatternType, &seed.PatternValue,
+		&seed.Category, &seed.Source, &seed.Priority, &createdAt,
+	)
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, fmt.Errorf("scan seed: %w", err)
+	}
+	if mailboxID.Valid {
+		seed.MailboxID = mailboxID.String
+	}
+	seed.CreatedAt, err = time.Parse(time.RFC3339, createdAt)
+	if err != nil {
+		return nil, fmt.Errorf("parse seed created_at %q: %w", createdAt, err)
+	}
+	return &seed, nil
+}
+
+// scanClassification reads one message_classifications row from s.
+// Returns (nil, nil) on sql.ErrNoRows.
+func scanClassification(s scanner) (*Classification, error) {
+	var c Classification
+	var classifiedAt string
+
+	err := s.Scan(
+		&c.MessageID, &c.MailboxID, &c.Category, &c.MatchedRule, &c.Source, &classifiedAt,
+	)
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, fmt.Errorf("scan classification: %w", err)
+	}
+	c.ClassifiedAt, err = time.Parse(time.RFC3339, classifiedAt)
+	if err != nil {
+		return nil, fmt.Errorf("parse classification classified_at %q: %w", classifiedAt, err)
+	}
+	return &c, nil
 }
