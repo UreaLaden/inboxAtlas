@@ -58,7 +58,7 @@ var stopWords = map[string]bool{
 	"the": true, "a": true, "an": true, "re": true, "fw": true, "fwd": true,
 	"is": true, "in": true, "of": true, "to": true, "and": true, "for": true,
 	"on": true, "at": true, "with": true, "be": true, "as": true, "by": true,
-	"or": true,
+	"or": true, "external": true,
 }
 
 // QueryDomains returns domain aggregate rows for the given mailbox, sorted by

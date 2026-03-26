@@ -33,6 +33,25 @@ func TestOpen(t *testing.T) {
 	}
 }
 
+func TestOpen_EnablesForeignKeys(t *testing.T) {
+	st := newTestStore(t)
+
+	var enabled int
+	if err := st.db.QueryRow(`PRAGMA foreign_keys`).Scan(&enabled); err != nil {
+		t.Fatalf("PRAGMA foreign_keys: %v", err)
+	}
+	if enabled != 1 {
+		t.Fatalf("foreign key enforcement: got %d, want 1", enabled)
+	}
+}
+
+func TestOpen_InvalidPath(t *testing.T) {
+	_, err := Open("/dev/null/inboxatlas.db")
+	if err == nil {
+		t.Fatal("expected error for invalid database path")
+	}
+}
+
 func TestCreateAndGetMailbox_ByEmail(t *testing.T) {
 	st := newTestStore(t)
 	ctx := context.Background()
@@ -48,6 +67,7 @@ func TestCreateAndGetMailbox_ByEmail(t *testing.T) {
 	}
 	if got == nil {
 		t.Fatal("expected mailbox, got nil")
+		return
 	}
 	if got.ID != "user@company.com" {
 		t.Errorf("ID: got %q, want %q", got.ID, "user@company.com")
@@ -81,6 +101,7 @@ func TestCreateAndGetMailbox_ByAlias(t *testing.T) {
 	}
 	if got == nil {
 		t.Fatal("expected mailbox, got nil")
+		return
 	}
 	if got.ID != "user@company.com" {
 		t.Errorf("ID: got %q, want %q", got.ID, "user@company.com")
@@ -419,7 +440,7 @@ func TestSchema_AllTablesPresent(t *testing.T) {
 	st := newTestStore(t)
 	ctx := context.Background()
 
-	want := []string{"mailboxes", "messages", "sync_checkpoint", "sender_stats", "domain_stats", "subject_term_stats"}
+	want := []string{"mailboxes", "messages", "sync_checkpoint", "sender_stats", "domain_stats", "subject_term_stats", "classification_seeds", "message_classifications"}
 	for _, table := range want {
 		var name string
 		err := st.db.QueryRowContext(ctx,
@@ -476,6 +497,7 @@ func TestSchema_SyncCheckpointHasMailboxForeignKey(t *testing.T) {
 func TestUpsertMessage_Insert(t *testing.T) {
 	st := newTestStore(t)
 	ctx := context.Background()
+	createTestMailbox(t, st, "user@example.com")
 
 	msg := models.MessageMeta{
 		ProviderID: "gm1",
@@ -506,6 +528,7 @@ func TestUpsertMessage_Insert(t *testing.T) {
 func TestUpsertMessage_Idempotent(t *testing.T) {
 	st := newTestStore(t)
 	ctx := context.Background()
+	createTestMailbox(t, st, "user@example.com")
 
 	msg := models.MessageMeta{
 		ProviderID: "gm2",
@@ -532,6 +555,7 @@ func TestUpsertMessage_Idempotent(t *testing.T) {
 func TestUpsertMessage_NilLabels(t *testing.T) {
 	st := newTestStore(t)
 	ctx := context.Background()
+	createTestMailbox(t, st, "user@example.com")
 
 	msg := models.MessageMeta{
 		ProviderID: "gm3",
@@ -591,6 +615,7 @@ func TestSaveAndGetCheckpoint(t *testing.T) {
 	}
 	if got == nil {
 		t.Fatal("expected checkpoint, got nil")
+		return
 	}
 	if got.PageCursor != "token123" {
 		t.Errorf("PageCursor = %q, want %q", got.PageCursor, "token123")
@@ -665,6 +690,55 @@ func TestDeleteCheckpoint_NotFound(t *testing.T) {
 	}
 }
 
+func TestSaveCheckpoint_ClosedStore(t *testing.T) {
+	st := newTestStore(t)
+	_ = st.Close()
+
+	now := time.Now().UTC()
+	err := st.SaveCheckpoint(context.Background(), SyncCheckpoint{
+		MailboxID: "user@example.com",
+		Provider:  "gmail",
+		Status:    "running",
+		StartedAt: now,
+		UpdatedAt: now,
+	})
+	if err == nil {
+		t.Fatal("expected error from closed store")
+	}
+}
+
+func TestDeleteCheckpoint_ClosedStore(t *testing.T) {
+	st := newTestStore(t)
+	_ = st.Close()
+
+	err := st.DeleteCheckpoint(context.Background(), "user@example.com", "gmail")
+	if err == nil {
+		t.Fatal("expected error from closed store")
+	}
+}
+
+func TestGetCheckpoint_InvalidUpdatedAt(t *testing.T) {
+	st := newTestStore(t)
+	ctx := context.Background()
+	createTestMailbox(t, st, "user@example.com")
+
+	if _, err := st.db.ExecContext(ctx,
+		`INSERT INTO sync_checkpoint (mailbox_id, provider, page_cursor, messages_synced, status, started_at, updated_at)
+		 VALUES (?, ?, ?, ?, ?, ?, ?)`,
+		"user@example.com", "gmail", "", 1, "running", time.Now().UTC().Format(time.RFC3339), "not-valid-rfc3339",
+	); err != nil {
+		t.Fatal(err)
+	}
+
+	_, err := st.GetCheckpoint(ctx, "user@example.com", "gmail")
+	if err == nil {
+		t.Fatal("expected parse error for invalid updated_at")
+	}
+	if !strings.Contains(err.Error(), "parse checkpoint updated_at") {
+		t.Fatalf("expected parse checkpoint updated_at error, got %v", err)
+	}
+}
+
 func TestEmailCanonicalization(t *testing.T) {
 	st := newTestStore(t)
 	ctx := context.Background()
@@ -681,6 +755,7 @@ func TestEmailCanonicalization(t *testing.T) {
 	}
 	if got == nil {
 		t.Fatal("expected mailbox after canonicalization, got nil")
+		return
 	}
 	if got.ID != "user@company.com" {
 		t.Errorf("ID should be lowercase, got %q", got.ID)
@@ -962,5 +1037,447 @@ func TestQuerySubjects_NoMessages(t *testing.T) {
 	}
 	if len(subjects) != 0 {
 		t.Errorf("expected 0 subjects, got %v", subjects)
+	}
+}
+
+// --- ClassificationSeed CRUD ---
+
+func globalSeed(patternType, patternValue, category string) ClassificationSeed {
+	return ClassificationSeed{
+		PatternType:  patternType,
+		PatternValue: patternValue,
+		Category:     category,
+		Source:       "seed",
+		Priority:     100,
+	}
+}
+
+func TestInsertAndListSeeds_GlobalOnly(t *testing.T) {
+	st := newTestStore(t)
+	ctx := context.Background()
+
+	seed1 := globalSeed("domain", "example.com", "vendor")
+	seed2 := globalSeed("sender_prefix", "noreply", "system-generated")
+
+	if err := st.InsertSeed(ctx, seed1); err != nil {
+		t.Fatalf("InsertSeed 1: %v", err)
+	}
+	if err := st.InsertSeed(ctx, seed2); err != nil {
+		t.Fatalf("InsertSeed 2: %v", err)
+	}
+
+	// ListSeeds("") returns only global seeds
+	seeds, err := st.ListSeeds(ctx, "")
+	if err != nil {
+		t.Fatalf("ListSeeds: %v", err)
+	}
+	if len(seeds) != 2 {
+		t.Fatalf("expected 2 seeds, got %d", len(seeds))
+	}
+	if seeds[0].MailboxID != "" {
+		t.Errorf("expected empty MailboxID for global seed, got %q", seeds[0].MailboxID)
+	}
+	if seeds[0].CreatedAt.IsZero() {
+		t.Error("CreatedAt must be set")
+	}
+}
+
+func TestInsertAndListSeeds_GlobalReturnedForMailbox(t *testing.T) {
+	st := newTestStore(t)
+	ctx := context.Background()
+	createTestMailbox(t, st, "user@example.com")
+
+	if err := st.InsertSeed(ctx, globalSeed("domain", "example.com", "vendor")); err != nil {
+		t.Fatal(err)
+	}
+
+	// Global seed should appear when listing for a specific mailbox
+	seeds, err := st.ListSeeds(ctx, "user@example.com")
+	if err != nil {
+		t.Fatalf("ListSeeds: %v", err)
+	}
+	if len(seeds) != 1 {
+		t.Fatalf("expected 1 seed, got %d", len(seeds))
+	}
+}
+
+func TestListSeedsMailboxScoping(t *testing.T) {
+	st := newTestStore(t)
+	ctx := context.Background()
+	createTestMailbox(t, st, "mbA@example.com")
+	createTestMailbox(t, st, "mbB@example.com")
+
+	// Insert a global seed
+	if err := st.InsertSeed(ctx, globalSeed("domain", "global.com", "vendor")); err != nil {
+		t.Fatal(err)
+	}
+	// Insert a mailbox-A-specific seed
+	if err := st.InsertSeed(ctx, ClassificationSeed{
+		MailboxID:    "mbA@example.com",
+		PatternType:  "domain",
+		PatternValue: "mba-only.com",
+		Category:     "client",
+		Source:       "operator",
+		Priority:     50,
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	seedsA, err := st.ListSeeds(ctx, "mbA@example.com")
+	if err != nil {
+		t.Fatalf("ListSeeds(mbA): %v", err)
+	}
+	if len(seedsA) != 2 {
+		t.Fatalf("mbA: expected 2 seeds (global + scoped), got %d", len(seedsA))
+	}
+
+	seedsB, err := st.ListSeeds(ctx, "mbB@example.com")
+	if err != nil {
+		t.Fatalf("ListSeeds(mbB): %v", err)
+	}
+	if len(seedsB) != 1 {
+		t.Fatalf("mbB: expected 1 seed (global only), got %d", len(seedsB))
+	}
+	if seedsB[0].PatternValue != "global.com" {
+		t.Errorf("mbB seed: expected global.com, got %q", seedsB[0].PatternValue)
+	}
+}
+
+func TestListSeeds_OrderedByPriorityThenID(t *testing.T) {
+	st := newTestStore(t)
+	ctx := context.Background()
+
+	// Insert seeds in reverse priority order
+	high := ClassificationSeed{PatternType: "domain", PatternValue: "high.com", Category: "vendor", Source: "seed", Priority: 50}
+	low := ClassificationSeed{PatternType: "domain", PatternValue: "low.com", Category: "vendor", Source: "seed", Priority: 150}
+	med := ClassificationSeed{PatternType: "domain", PatternValue: "med.com", Category: "vendor", Source: "seed", Priority: 100}
+
+	for _, s := range []ClassificationSeed{low, high, med} {
+		if err := st.InsertSeed(ctx, s); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	seeds, err := st.ListSeeds(ctx, "")
+	if err != nil {
+		t.Fatalf("ListSeeds: %v", err)
+	}
+	if len(seeds) != 3 {
+		t.Fatalf("expected 3 seeds, got %d", len(seeds))
+	}
+	if seeds[0].Priority != 50 {
+		t.Errorf("first seed priority: got %d, want 50", seeds[0].Priority)
+	}
+	if seeds[1].Priority != 100 {
+		t.Errorf("second seed priority: got %d, want 100", seeds[1].Priority)
+	}
+	if seeds[2].Priority != 150 {
+		t.Errorf("third seed priority: got %d, want 150", seeds[2].Priority)
+	}
+}
+
+func TestSeedUniqueConstraint(t *testing.T) {
+	st := newTestStore(t)
+	ctx := context.Background()
+
+	seed := globalSeed("domain", "example.com", "vendor")
+	if err := st.InsertSeed(ctx, seed); err != nil {
+		t.Fatalf("InsertSeed first: %v", err)
+	}
+	// Duplicate insert should be silently ignored (INSERT OR IGNORE)
+	if err := st.InsertSeed(ctx, seed); err != nil {
+		t.Fatalf("InsertSeed duplicate: expected no error, got %v", err)
+	}
+
+	seeds, err := st.ListSeeds(ctx, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(seeds) != 1 {
+		t.Errorf("expected 1 seed after duplicate insert, got %d", len(seeds))
+	}
+}
+
+func TestDeleteSeed(t *testing.T) {
+	st := newTestStore(t)
+	ctx := context.Background()
+
+	if err := st.InsertSeed(ctx, globalSeed("domain", "example.com", "vendor")); err != nil {
+		t.Fatal(err)
+	}
+	seeds, err := st.ListSeeds(ctx, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(seeds) != 1 {
+		t.Fatalf("expected 1 seed before delete")
+	}
+
+	if err := st.DeleteSeed(ctx, seeds[0].ID); err != nil {
+		t.Fatalf("DeleteSeed: %v", err)
+	}
+
+	after, err := st.ListSeeds(ctx, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(after) != 0 {
+		t.Errorf("expected 0 seeds after delete, got %d", len(after))
+	}
+}
+
+func TestInsertSeed_ClosedStore(t *testing.T) {
+	st := newTestStore(t)
+	_ = st.Close()
+
+	err := st.InsertSeed(context.Background(), globalSeed("domain", "example.com", "vendor"))
+	if err == nil {
+		t.Fatal("expected error from closed store")
+	}
+}
+
+func TestListSeeds_ClosedStore(t *testing.T) {
+	st := newTestStore(t)
+	_ = st.Close()
+
+	_, err := st.ListSeeds(context.Background(), "")
+	if err == nil {
+		t.Fatal("expected error from closed store")
+	}
+}
+
+func TestDeleteSeed_ClosedStore(t *testing.T) {
+	st := newTestStore(t)
+	_ = st.Close()
+
+	err := st.DeleteSeed(context.Background(), 1)
+	if err == nil {
+		t.Fatal("expected error from closed store")
+	}
+}
+
+func TestListSeeds_InvalidCreatedAt(t *testing.T) {
+	st := newTestStore(t)
+	ctx := context.Background()
+
+	if _, err := st.db.ExecContext(ctx,
+		`INSERT INTO classification_seeds (mailbox_id, pattern_type, pattern_value, category, source, priority, created_at)
+		 VALUES (?, ?, ?, ?, ?, ?, ?)`,
+		nil, "domain", "example.com", "vendor", "seed", 100, "not-valid-rfc3339",
+	); err != nil {
+		t.Fatal(err)
+	}
+
+	_, err := st.ListSeeds(ctx, "")
+	if err == nil {
+		t.Fatal("expected parse error for invalid seed created_at")
+	}
+	if !strings.Contains(err.Error(), "parse seed created_at") {
+		t.Fatalf("expected parse seed created_at error, got %v", err)
+	}
+}
+
+// --- Classification save/get ---
+
+func TestSaveAndGetClassification(t *testing.T) {
+	st := newTestStore(t)
+	ctx := context.Background()
+	createTestMailbox(t, st, "user@example.com")
+	seedMessage(t, st, "msg1", "user@example.com", "a@x.com", "", "x.com", "", time.Now())
+
+	now := time.Now().UTC().Truncate(time.Second)
+	c := Classification{
+		MessageID:    "msg1",
+		MailboxID:    "user@example.com",
+		Category:     "vendor",
+		MatchedRule:  "domain:x.com",
+		Source:       "seed",
+		ClassifiedAt: now,
+	}
+	if err := st.SaveClassification(ctx, c); err != nil {
+		t.Fatalf("SaveClassification: %v", err)
+	}
+
+	got, err := st.GetClassification(ctx, "msg1", "user@example.com")
+	if err != nil {
+		t.Fatalf("GetClassification: %v", err)
+	}
+	if got == nil {
+		t.Fatal("expected classification, got nil")
+		return
+	}
+	if got.Category != "vendor" {
+		t.Errorf("Category: got %q, want %q", got.Category, "vendor")
+	}
+	if got.MatchedRule != "domain:x.com" {
+		t.Errorf("MatchedRule: got %q, want %q", got.MatchedRule, "domain:x.com")
+	}
+	if !got.ClassifiedAt.Equal(now) {
+		t.Errorf("ClassifiedAt: got %v, want %v", got.ClassifiedAt, now)
+	}
+}
+
+func TestSaveClassification_ReplaceSemantics(t *testing.T) {
+	st := newTestStore(t)
+	ctx := context.Background()
+	createTestMailbox(t, st, "user@example.com")
+	seedMessage(t, st, "msg1", "user@example.com", "a@x.com", "", "x.com", "", time.Now())
+
+	now := time.Now().UTC().Truncate(time.Second)
+	c := Classification{MessageID: "msg1", MailboxID: "user@example.com", Category: "vendor", Source: "seed", ClassifiedAt: now}
+	if err := st.SaveClassification(ctx, c); err != nil {
+		t.Fatal(err)
+	}
+	// Re-save with different category (INSERT OR REPLACE)
+	c.Category = "client"
+	if err := st.SaveClassification(ctx, c); err != nil {
+		t.Fatal(err)
+	}
+
+	got, err := st.GetClassification(ctx, "msg1", "user@example.com")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.Category != "client" {
+		t.Errorf("Category after replace: got %q, want %q", got.Category, "client")
+	}
+}
+
+func TestGetClassification_NotFound(t *testing.T) {
+	st := newTestStore(t)
+	ctx := context.Background()
+	createTestMailbox(t, st, "user@example.com")
+
+	got, err := st.GetClassification(ctx, "nosuch", "user@example.com")
+	if err != nil {
+		t.Fatalf("GetClassification: %v", err)
+	}
+	if got != nil {
+		t.Errorf("expected nil for missing classification, got %+v", got)
+	}
+}
+
+func TestSaveClassification_ClosedStore(t *testing.T) {
+	st := newTestStore(t)
+	_ = st.Close()
+
+	err := st.SaveClassification(context.Background(), Classification{
+		MessageID:    "msg1",
+		MailboxID:    "user@example.com",
+		Category:     "vendor",
+		Source:       "seed",
+		ClassifiedAt: time.Now(),
+	})
+	if err == nil {
+		t.Fatal("expected error from closed store")
+	}
+}
+
+func TestGetClassification_ClosedStore(t *testing.T) {
+	st := newTestStore(t)
+	_ = st.Close()
+
+	_, err := st.GetClassification(context.Background(), "msg1", "user@example.com")
+	if err == nil {
+		t.Fatal("expected error from closed store")
+	}
+}
+
+func TestGetClassification_InvalidClassifiedAt(t *testing.T) {
+	st := newTestStore(t)
+	ctx := context.Background()
+	createTestMailbox(t, st, "user@example.com")
+	seedMessage(t, st, "msg1", "user@example.com", "a@x.com", "", "x.com", "", time.Now())
+
+	if _, err := st.db.ExecContext(ctx,
+		`INSERT INTO message_classifications (message_id, mailbox_id, category, matched_rule, source, classified_at)
+		 VALUES (?, ?, ?, ?, ?, ?)`,
+		"msg1", "user@example.com", "vendor", "domain:x.com", "seed", "not-valid-rfc3339",
+	); err != nil {
+		t.Fatal(err)
+	}
+
+	_, err := st.GetClassification(ctx, "msg1", "user@example.com")
+	if err == nil {
+		t.Fatal("expected parse error for invalid classified_at")
+	}
+	if !strings.Contains(err.Error(), "parse classification classified_at") {
+		t.Fatalf("expected parse classification classified_at error, got %v", err)
+	}
+}
+
+func TestBulkSaveClassifications(t *testing.T) {
+	st := newTestStore(t)
+	ctx := context.Background()
+	createTestMailbox(t, st, "user@example.com")
+	now := time.Now()
+
+	// Seed multiple messages
+	for _, id := range []string{"m1", "m2", "m3"} {
+		seedMessage(t, st, id, "user@example.com", "a@x.com", "", "x.com", "", now)
+	}
+
+	classifications := []Classification{
+		{MessageID: "m1", MailboxID: "user@example.com", Category: "vendor", Source: "seed", ClassifiedAt: now},
+		{MessageID: "m2", MailboxID: "user@example.com", Category: "client", Source: "seed", ClassifiedAt: now},
+		{MessageID: "m3", MailboxID: "user@example.com", Category: "social", Source: "seed", ClassifiedAt: now},
+	}
+	if err := st.BulkSaveClassifications(ctx, classifications); err != nil {
+		t.Fatalf("BulkSaveClassifications: %v", err)
+	}
+
+	for _, c := range classifications {
+		got, err := st.GetClassification(ctx, c.MessageID, c.MailboxID)
+		if err != nil {
+			t.Fatalf("GetClassification(%q): %v", c.MessageID, err)
+		}
+		if got == nil {
+			t.Fatalf("expected classification for %q, got nil", c.MessageID)
+			return
+		}
+		if got.Category != c.Category {
+			t.Errorf("%q: Category: got %q, want %q", c.MessageID, got.Category, c.Category)
+		}
+	}
+}
+
+func TestBulkSaveClassifications_AtomicRollbackOnError(t *testing.T) {
+	st := newTestStore(t)
+	ctx := context.Background()
+	createTestMailbox(t, st, "user@example.com")
+	now := time.Now()
+	seedMessage(t, st, "m1", "user@example.com", "a@x.com", "", "x.com", "", now)
+
+	classifications := []Classification{
+		{MessageID: "m1", MailboxID: "user@example.com", Category: "vendor", Source: "seed", ClassifiedAt: now},
+		{MessageID: "nonexistent", MailboxID: "user@example.com", Category: "client", Source: "seed", ClassifiedAt: now},
+	}
+
+	err := st.BulkSaveClassifications(ctx, classifications)
+	if err == nil {
+		t.Fatal("expected foreign key failure from invalid message_id")
+	}
+	if !strings.Contains(strings.ToLower(err.Error()), "foreign key") {
+		t.Fatalf("expected foreign key error, got %v", err)
+	}
+
+	got, err := st.GetClassification(ctx, "m1", "user@example.com")
+	if err != nil {
+		t.Fatalf("GetClassification after rollback: %v", err)
+	}
+	if got != nil {
+		t.Fatal("expected rollback: valid row should not be persisted after FK failure")
+	}
+}
+
+func TestBulkSaveClassifications_ClosedStore(t *testing.T) {
+	st := newTestStore(t)
+	_ = st.Close()
+
+	err := st.BulkSaveClassifications(context.Background(), []Classification{
+		{MessageID: "m1", MailboxID: "user@example.com", Category: "vendor", Source: "seed", ClassifiedAt: time.Now()},
+	})
+	if err == nil {
+		t.Fatal("expected error from closed store")
 	}
 }
