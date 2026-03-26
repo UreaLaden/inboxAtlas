@@ -1502,6 +1502,46 @@ func TestBuildReportDomainsCmd_RunE_NoAccount(t *testing.T) {
 	}
 }
 
+func TestBuildReportDomainsCmd_RunE_OutputFile(t *testing.T) {
+	dir := t.TempDir()
+	cfg := config.Default()
+	cfg.StoragePath = filepath.Join(dir, "test.db")
+	seedReportData(t, cfg.StoragePath)
+
+	outputPath := filepath.Join(dir, "domains.txt")
+	cmd := buildReportDomainsCmd(cfg)
+	cmd.SetArgs([]string{"--account", "user@example.com", "--output", outputPath})
+	var stdout bytes.Buffer
+	cmd.SetOut(&stdout)
+	if err := cmd.Execute(); err != nil {
+		t.Fatalf("Execute: %v", err)
+	}
+	if stdout.Len() != 0 {
+		t.Fatalf("expected stdout to remain empty when --output is set, got %q", stdout.String())
+	}
+	data, err := os.ReadFile(outputPath)
+	if err != nil {
+		t.Fatalf("ReadFile: %v", err)
+	}
+	if !strings.Contains(string(data), "foo.com") {
+		t.Fatalf("expected file output to contain report data, got %q", string(data))
+	}
+}
+
+func TestBuildReportDomainsCmd_RunE_OutputFileError(t *testing.T) {
+	dir := t.TempDir()
+	cfg := config.Default()
+	cfg.StoragePath = filepath.Join(dir, "test.db")
+	seedReportData(t, cfg.StoragePath)
+
+	outputPath := filepath.Join(dir, "missing", "domains.txt")
+	cmd := buildReportDomainsCmd(cfg)
+	cmd.SetArgs([]string{"--account", "user@example.com", "--output", outputPath})
+	if err := cmd.Execute(); err == nil {
+		t.Fatal("expected file output error")
+	}
+}
+
 func TestBuildReportVolumeCmd_RunE_NoAccount(t *testing.T) {
 	dir := t.TempDir()
 	cfg := config.Default()
@@ -1511,5 +1551,83 @@ func TestBuildReportVolumeCmd_RunE_NoAccount(t *testing.T) {
 	cmd.SetArgs([]string{})
 	if err := cmd.Execute(); err == nil {
 		t.Error("expected error when no account or --all-accounts given")
+	}
+}
+
+func TestBuildReportSendersCmd_RunE_OutputFile(t *testing.T) {
+	dir := t.TempDir()
+	cfg := config.Default()
+	cfg.StoragePath = filepath.Join(dir, "test.db")
+	seedReportData(t, cfg.StoragePath)
+
+	outputPath := filepath.Join(dir, "senders.txt")
+	cmd := buildReportSendersCmd(cfg)
+	cmd.SetArgs([]string{"--account", "user@example.com", "--output", outputPath})
+	var stdout bytes.Buffer
+	cmd.SetOut(&stdout)
+	if err := cmd.Execute(); err != nil {
+		t.Fatalf("Execute: %v", err)
+	}
+	if stdout.Len() != 0 {
+		t.Fatalf("expected stdout to remain empty when --output is set, got %q", stdout.String())
+	}
+	data, err := os.ReadFile(outputPath)
+	if err != nil {
+		t.Fatalf("ReadFile: %v", err)
+	}
+	if !strings.Contains(string(data), "alice@foo.com") {
+		t.Fatalf("expected file output to contain sender data, got %q", string(data))
+	}
+}
+
+func TestBuildReportSubjectsCmd_RunE_OutputFile(t *testing.T) {
+	dir := t.TempDir()
+	cfg := config.Default()
+	cfg.StoragePath = filepath.Join(dir, "test.db")
+	seedReportData(t, cfg.StoragePath)
+
+	outputPath := filepath.Join(dir, "subjects.txt")
+	cmd := buildReportSubjectsCmd(cfg)
+	cmd.SetArgs([]string{"--account", "user@example.com", "--output", outputPath})
+	var stdout bytes.Buffer
+	cmd.SetOut(&stdout)
+	if err := cmd.Execute(); err != nil {
+		t.Fatalf("Execute: %v", err)
+	}
+	if stdout.Len() != 0 {
+		t.Fatalf("expected stdout to remain empty when --output is set, got %q", stdout.String())
+	}
+	data, err := os.ReadFile(outputPath)
+	if err != nil {
+		t.Fatalf("ReadFile: %v", err)
+	}
+	if !strings.Contains(string(data), "meeting") {
+		t.Fatalf("expected file output to contain subject data, got %q", string(data))
+	}
+}
+
+func TestBuildReportVolumeCmd_RunE_OutputFile(t *testing.T) {
+	dir := t.TempDir()
+	cfg := config.Default()
+	cfg.StoragePath = filepath.Join(dir, "test.db")
+	seedReportData(t, cfg.StoragePath)
+
+	outputPath := filepath.Join(dir, "volume.txt")
+	cmd := buildReportVolumeCmd(cfg)
+	cmd.SetArgs([]string{"--account", "user@example.com", "--output", outputPath})
+	var stdout bytes.Buffer
+	cmd.SetOut(&stdout)
+	if err := cmd.Execute(); err != nil {
+		t.Fatalf("Execute: %v", err)
+	}
+	if stdout.Len() != 0 {
+		t.Fatalf("expected stdout to remain empty when --output is set, got %q", stdout.String())
+	}
+	data, err := os.ReadFile(outputPath)
+	if err != nil {
+		t.Fatalf("ReadFile: %v", err)
+	}
+	if !strings.Contains(string(data), "2025-01") {
+		t.Fatalf("expected file output to contain volume data, got %q", string(data))
 	}
 }

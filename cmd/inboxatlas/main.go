@@ -564,18 +564,22 @@ func buildReportDomainsCmd(cfg config.Config) *cobra.Command {
 	var allAccounts bool
 	var format string
 	var limit int
+	var output string
 
 	cmd := &cobra.Command{
 		Use:   "domains",
 		Short: "Report top sending domains",
 		RunE: func(cmd *cobra.Command, _ []string) error {
-			return runReportDomains(cmd.Context(), cmd.OutOrStdout(), cfg, account, allAccounts, format, limit)
+			return runReportCommand(cmd.OutOrStdout(), output, func(w io.Writer) error {
+				return runReportDomains(cmd.Context(), w, cfg, account, allAccounts, format, limit)
+			})
 		},
 	}
 	cmd.Flags().StringVar(&account, "account", "", "mailbox email or alias")
 	cmd.Flags().BoolVar(&allAccounts, "all-accounts", false, "aggregate across all registered mailboxes")
 	cmd.Flags().StringVar(&format, "format", "table", "output format: table, csv, json")
 	cmd.Flags().IntVar(&limit, "limit", 25, "maximum number of rows to return")
+	cmd.Flags().StringVar(&output, "output", "", "write rendered report output to a file")
 	return cmd
 }
 
@@ -585,18 +589,22 @@ func buildReportSendersCmd(cfg config.Config) *cobra.Command {
 	var allAccounts bool
 	var format string
 	var limit int
+	var output string
 
 	cmd := &cobra.Command{
 		Use:   "senders",
 		Short: "Report top message senders",
 		RunE: func(cmd *cobra.Command, _ []string) error {
-			return runReportSenders(cmd.Context(), cmd.OutOrStdout(), cfg, account, allAccounts, format, limit)
+			return runReportCommand(cmd.OutOrStdout(), output, func(w io.Writer) error {
+				return runReportSenders(cmd.Context(), w, cfg, account, allAccounts, format, limit)
+			})
 		},
 	}
 	cmd.Flags().StringVar(&account, "account", "", "mailbox email or alias")
 	cmd.Flags().BoolVar(&allAccounts, "all-accounts", false, "aggregate across all registered mailboxes")
 	cmd.Flags().StringVar(&format, "format", "table", "output format: table, csv, json")
 	cmd.Flags().IntVar(&limit, "limit", 25, "maximum number of rows to return")
+	cmd.Flags().StringVar(&output, "output", "", "write rendered report output to a file")
 	return cmd
 }
 
@@ -606,18 +614,22 @@ func buildReportSubjectsCmd(cfg config.Config) *cobra.Command {
 	var allAccounts bool
 	var format string
 	var limit int
+	var output string
 
 	cmd := &cobra.Command{
 		Use:   "subjects",
 		Short: "Report top subject line terms",
 		RunE: func(cmd *cobra.Command, _ []string) error {
-			return runReportSubjects(cmd.Context(), cmd.OutOrStdout(), cfg, account, allAccounts, format, limit)
+			return runReportCommand(cmd.OutOrStdout(), output, func(w io.Writer) error {
+				return runReportSubjects(cmd.Context(), w, cfg, account, allAccounts, format, limit)
+			})
 		},
 	}
 	cmd.Flags().StringVar(&account, "account", "", "mailbox email or alias")
 	cmd.Flags().BoolVar(&allAccounts, "all-accounts", false, "aggregate across all registered mailboxes")
 	cmd.Flags().StringVar(&format, "format", "table", "output format: table, csv, json")
 	cmd.Flags().IntVar(&limit, "limit", 25, "maximum number of rows to return")
+	cmd.Flags().StringVar(&output, "output", "", "write rendered report output to a file")
 	return cmd
 }
 
@@ -626,18 +638,39 @@ func buildReportVolumeCmd(cfg config.Config) *cobra.Command {
 	var account string
 	var allAccounts bool
 	var format string
+	var output string
 
 	cmd := &cobra.Command{
 		Use:   "volume",
 		Short: "Report monthly message volume",
 		RunE: func(cmd *cobra.Command, _ []string) error {
-			return runReportVolume(cmd.Context(), cmd.OutOrStdout(), cfg, account, allAccounts, format)
+			return runReportCommand(cmd.OutOrStdout(), output, func(w io.Writer) error {
+				return runReportVolume(cmd.Context(), w, cfg, account, allAccounts, format)
+			})
 		},
 	}
 	cmd.Flags().StringVar(&account, "account", "", "mailbox email or alias")
 	cmd.Flags().BoolVar(&allAccounts, "all-accounts", false, "aggregate across all registered mailboxes")
 	cmd.Flags().StringVar(&format, "format", "table", "output format: table, csv, json")
+	cmd.Flags().StringVar(&output, "output", "", "write rendered report output to a file")
 	return cmd
+}
+
+// runReportCommand selects the report output destination and executes run
+// against it. When outputPath is empty, defaultWriter is used.
+func runReportCommand(defaultWriter io.Writer, outputPath string, run func(io.Writer) error) error {
+	writer := defaultWriter
+	var file *os.File
+	var err error
+	if outputPath != "" {
+		file, err = os.Create(outputPath)
+		if err != nil {
+			return fmt.Errorf("open output file: %w", err)
+		}
+		defer func() { _ = file.Close() }()
+		writer = file
+	}
+	return run(writer)
 }
 
 // resolveReportMailboxID validates the account/all-accounts flags and returns
