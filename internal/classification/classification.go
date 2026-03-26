@@ -64,7 +64,7 @@ type ClassificationResult struct {
 	Category string
 	// MatchedRule is a human-readable description of the rule that produced this result
 	// (§4.5 explainability). Non-empty on every non-unknown result.
-	// Format: "<pattern_type>:<pattern_value> -> <category>".
+	// Format: "<pattern_type>:<pattern_value>".
 	MatchedRule string
 	// Source identifies which classification system produced this result.
 	Source string
@@ -148,7 +148,7 @@ func (c *SeedRuleClassifier) Classify(_ context.Context, msg models.MessageMeta)
 		if c.matches(seed, msg) {
 			return ClassificationResult{
 				Category:    seed.Category,
-				MatchedRule: seed.PatternType + ":" + seed.PatternValue + " -> " + seed.Category,
+				MatchedRule: seed.PatternType + ":" + seed.PatternValue,
 				Source:      seed.Source,
 			}, nil
 		}

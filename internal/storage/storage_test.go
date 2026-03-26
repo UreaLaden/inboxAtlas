@@ -33,6 +33,18 @@ func TestOpen(t *testing.T) {
 	}
 }
 
+func TestOpen_EnablesForeignKeys(t *testing.T) {
+	st := newTestStore(t)
+
+	var enabled int
+	if err := st.db.QueryRow(`PRAGMA foreign_keys`).Scan(&enabled); err != nil {
+		t.Fatalf("PRAGMA foreign_keys: %v", err)
+	}
+	if enabled != 1 {
+		t.Fatalf("foreign key enforcement: got %d, want 1", enabled)
+	}
+}
+
 func TestOpen_InvalidPath(t *testing.T) {
 	_, err := Open("/dev/null/inboxatlas.db")
 	if err == nil {
@@ -55,6 +67,7 @@ func TestCreateAndGetMailbox_ByEmail(t *testing.T) {
 	}
 	if got == nil {
 		t.Fatal("expected mailbox, got nil")
+		return
 	}
 	if got.ID != "user@company.com" {
 		t.Errorf("ID: got %q, want %q", got.ID, "user@company.com")
@@ -88,6 +101,7 @@ func TestCreateAndGetMailbox_ByAlias(t *testing.T) {
 	}
 	if got == nil {
 		t.Fatal("expected mailbox, got nil")
+		return
 	}
 	if got.ID != "user@company.com" {
 		t.Errorf("ID: got %q, want %q", got.ID, "user@company.com")
@@ -483,6 +497,7 @@ func TestSchema_SyncCheckpointHasMailboxForeignKey(t *testing.T) {
 func TestUpsertMessage_Insert(t *testing.T) {
 	st := newTestStore(t)
 	ctx := context.Background()
+	createTestMailbox(t, st, "user@example.com")
 
 	msg := models.MessageMeta{
 		ProviderID: "gm1",
@@ -513,6 +528,7 @@ func TestUpsertMessage_Insert(t *testing.T) {
 func TestUpsertMessage_Idempotent(t *testing.T) {
 	st := newTestStore(t)
 	ctx := context.Background()
+	createTestMailbox(t, st, "user@example.com")
 
 	msg := models.MessageMeta{
 		ProviderID: "gm2",
@@ -539,6 +555,7 @@ func TestUpsertMessage_Idempotent(t *testing.T) {
 func TestUpsertMessage_NilLabels(t *testing.T) {
 	st := newTestStore(t)
 	ctx := context.Background()
+	createTestMailbox(t, st, "user@example.com")
 
 	msg := models.MessageMeta{
 		ProviderID: "gm3",
@@ -598,6 +615,7 @@ func TestSaveAndGetCheckpoint(t *testing.T) {
 	}
 	if got == nil {
 		t.Fatal("expected checkpoint, got nil")
+		return
 	}
 	if got.PageCursor != "token123" {
 		t.Errorf("PageCursor = %q, want %q", got.PageCursor, "token123")
@@ -737,6 +755,7 @@ func TestEmailCanonicalization(t *testing.T) {
 	}
 	if got == nil {
 		t.Fatal("expected mailbox after canonicalization, got nil")
+		return
 	}
 	if got.ID != "user@company.com" {
 		t.Errorf("ID should be lowercase, got %q", got.ID)
@@ -1285,6 +1304,7 @@ func TestSaveAndGetClassification(t *testing.T) {
 	}
 	if got == nil {
 		t.Fatal("expected classification, got nil")
+		return
 	}
 	if got.Category != "vendor" {
 		t.Errorf("Category: got %q, want %q", got.Category, "vendor")
@@ -1413,6 +1433,7 @@ func TestBulkSaveClassifications(t *testing.T) {
 		}
 		if got == nil {
 			t.Fatalf("expected classification for %q, got nil", c.MessageID)
+			return
 		}
 		if got.Category != c.Category {
 			t.Errorf("%q: Category: got %q, want %q", c.MessageID, got.Category, c.Category)
@@ -1422,38 +1443,30 @@ func TestBulkSaveClassifications(t *testing.T) {
 
 func TestBulkSaveClassifications_AtomicRollbackOnError(t *testing.T) {
 	st := newTestStore(t)
+	ctx := context.Background()
 	createTestMailbox(t, st, "user@example.com")
 	now := time.Now()
 	seedMessage(t, st, "m1", "user@example.com", "a@x.com", "", "x.com", "", now)
 
-	// Include a classification referencing a non-existent message_id to trigger FK violation
 	classifications := []Classification{
 		{MessageID: "m1", MailboxID: "user@example.com", Category: "vendor", Source: "seed", ClassifiedAt: now},
 		{MessageID: "nonexistent", MailboxID: "user@example.com", Category: "client", Source: "seed", ClassifiedAt: now},
 	}
 
-	// SQLite FK constraints are not enforced by default unless PRAGMA foreign_keys = ON.
-	// The atomicity guarantee is tested by verifying that BulkSaveClassifications uses
-	// a transaction: an error mid-batch rolls back all rows including prior saves.
-	// We simulate a mid-transaction failure by passing a cancelled context.
-	ctx2, cancel := context.WithCancel(context.Background())
-	cancel() // immediately cancelled
-
-	err := st.BulkSaveClassifications(ctx2, classifications)
-	// A cancelled context should cause the transaction to fail
+	err := st.BulkSaveClassifications(ctx, classifications)
 	if err == nil {
-		// If the driver proceeds despite cancellation, skip this assertion —
-		// the important invariant is that BulkSaveClassifications is transactional.
-		t.Log("context cancellation not enforced by driver — skipping rollback assertion")
-		return
+		t.Fatal("expected foreign key failure from invalid message_id")
 	}
-	// If it failed, m1 must not be saved (transaction rolled back)
-	got, getErr := st.GetClassification(context.Background(), "m1", "user@example.com")
-	if getErr != nil {
-		t.Fatalf("GetClassification after rollback: %v", getErr)
+	if !strings.Contains(strings.ToLower(err.Error()), "foreign key") {
+		t.Fatalf("expected foreign key error, got %v", err)
+	}
+
+	got, err := st.GetClassification(ctx, "m1", "user@example.com")
+	if err != nil {
+		t.Fatalf("GetClassification after rollback: %v", err)
 	}
 	if got != nil {
-		t.Error("expected rollback: m1 should not be saved after transaction failure")
+		t.Fatal("expected rollback: valid row should not be persisted after FK failure")
 	}
 }
 

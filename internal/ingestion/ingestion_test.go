@@ -461,6 +461,7 @@ func TestRun_PageCheckpointFailure_SavesInterrupted(t *testing.T) {
 	}
 	if cp == nil {
 		t.Fatal("expected checkpoint to exist")
+		return
 	}
 	if cp.Status != "interrupted" {
 		t.Fatalf("Status = %q, want interrupted", cp.Status)
@@ -529,6 +530,7 @@ func TestRun_UpdateLastSyncedFailure_SavesInterrupted(t *testing.T) {
 	}
 	if cp == nil {
 		t.Fatal("expected checkpoint to exist")
+		return
 	}
 	if cp.Status != "interrupted" {
 		t.Fatalf("Status = %q, want interrupted", cp.Status)
@@ -546,6 +548,7 @@ func TestRun_UpdateLastSyncedFailure_SavesInterrupted(t *testing.T) {
 	}
 	if mb == nil {
 		t.Fatal("expected mailbox to exist")
+		return
 	}
 	if mb.LastSyncedAt != nil {
 		t.Fatalf("expected LastSyncedAt to remain nil, got %v", *mb.LastSyncedAt)
@@ -580,6 +583,7 @@ func TestRun_SaveCompletedCheckpointFailure_SavesInterrupted(t *testing.T) {
 	}
 	if cp == nil {
 		t.Fatal("expected checkpoint to exist")
+		return
 	}
 	if cp.Status != "interrupted" {
 		t.Fatalf("Status = %q, want interrupted", cp.Status)

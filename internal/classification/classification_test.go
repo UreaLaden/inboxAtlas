@@ -29,8 +29,8 @@ func TestSeedRuleClassifier_DomainMatch(t *testing.T) {
 	if result.Category != CategorySocial {
 		t.Errorf("Category: got %q, want %q", result.Category, CategorySocial)
 	}
-	if result.MatchedRule != "domain:facebookmail.com -> social" {
-		t.Errorf("MatchedRule: got %q, want %q", result.MatchedRule, "domain:facebookmail.com -> social")
+	if result.MatchedRule != "domain:facebookmail.com" {
+		t.Errorf("MatchedRule: got %q, want %q", result.MatchedRule, "domain:facebookmail.com")
 	}
 }
 
@@ -62,8 +62,8 @@ func TestSeedRuleClassifier_SenderEmailMatch(t *testing.T) {
 	if result.Category != CategoryVendor {
 		t.Errorf("Category: got %q, want %q", result.Category, CategoryVendor)
 	}
-	if result.MatchedRule != "sender_email:acr@acrbookkeepingplus.com -> vendor" {
-		t.Errorf("MatchedRule: got %q, want %q", result.MatchedRule, "sender_email:acr@acrbookkeepingplus.com -> vendor")
+	if result.MatchedRule != "sender_email:acr@acrbookkeepingplus.com" {
+		t.Errorf("MatchedRule: got %q, want %q", result.MatchedRule, "sender_email:acr@acrbookkeepingplus.com")
 	}
 }
 
@@ -79,8 +79,8 @@ func TestSeedRuleClassifier_SenderPrefixMatch(t *testing.T) {
 	if result.Category != CategorySystemGenerated {
 		t.Errorf("Category: got %q, want %q", result.Category, CategorySystemGenerated)
 	}
-	if result.MatchedRule != "sender_prefix:noreply -> system-generated" {
-		t.Errorf("MatchedRule: got %q, want %q", result.MatchedRule, "sender_prefix:noreply -> system-generated")
+	if result.MatchedRule != "sender_prefix:noreply" {
+		t.Errorf("MatchedRule: got %q, want %q", result.MatchedRule, "sender_prefix:noreply")
 	}
 }
 
@@ -157,6 +157,20 @@ func TestSeedRuleClassifier_MatchedRuleNonEmpty(t *testing.T) {
 				t.Errorf("MatchedRule must be non-empty for non-unknown result; email=%q", tt.email)
 			}
 		})
+	}
+}
+
+func TestSeedRuleClassifier_MatchedRuleFormat(t *testing.T) {
+	seeds := []ClassificationSeed{
+		{ID: 1, PatternType: PatternDomain, PatternValue: "facebookmail.com", Category: CategorySocial, Source: SourceSeed, Priority: 100},
+	}
+	c := NewSeedRuleClassifier(seeds)
+	result, err := c.Classify(context.Background(), makeMsg("user@facebookmail.com", "facebookmail.com", ""))
+	if err != nil {
+		t.Fatalf("Classify: %v", err)
+	}
+	if result.MatchedRule != "domain:facebookmail.com" {
+		t.Fatalf("MatchedRule: got %q, want %q", result.MatchedRule, "domain:facebookmail.com")
 	}
 }
 
