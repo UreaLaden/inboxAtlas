@@ -16,6 +16,7 @@ import (
 	"github.com/spf13/cobra"
 	"golang.org/x/oauth2"
 
+	"github.com/UreaLaden/inboxatlas/internal/analysis"
 	"github.com/UreaLaden/inboxatlas/internal/auth"
 	"github.com/UreaLaden/inboxatlas/internal/config"
 	"github.com/UreaLaden/inboxatlas/internal/ingestion"
@@ -91,6 +92,7 @@ func buildRoot(cfg config.Config) *cobra.Command {
 	root.AddCommand(buildMailboxCmd(cfg))
 	root.AddCommand(buildAuthCmd(cfg))
 	root.AddCommand(buildSyncCmd(cfg))
+	root.AddCommand(buildReportCmd(cfg))
 
 	return root
 }
@@ -541,4 +543,221 @@ func runMailboxRemove(w io.Writer, r io.Reader, st *storage.Store, account strin
 	}
 	_, _ = fmt.Fprintln(w, "Mailbox removed.")
 	return nil
+}
+
+// buildReportCmd returns the "report" subcommand group.
+func buildReportCmd(cfg config.Config) *cobra.Command {
+	cmd := &cobra.Command{
+		Use:   "report",
+		Short: "Generate discovery reports from synced mailbox data",
+	}
+	cmd.AddCommand(buildReportDomainsCmd(cfg))
+	cmd.AddCommand(buildReportSendersCmd(cfg))
+	cmd.AddCommand(buildReportSubjectsCmd(cfg))
+	cmd.AddCommand(buildReportVolumeCmd(cfg))
+	return cmd
+}
+
+// buildReportDomainsCmd returns the "report domains" subcommand.
+func buildReportDomainsCmd(cfg config.Config) *cobra.Command {
+	var account string
+	var allAccounts bool
+	var format string
+	var limit int
+
+	cmd := &cobra.Command{
+		Use:   "domains",
+		Short: "Report top sending domains",
+		RunE: func(cmd *cobra.Command, _ []string) error {
+			return runReportDomains(cmd.Context(), cmd.OutOrStdout(), cfg, account, allAccounts, format, limit)
+		},
+	}
+	cmd.Flags().StringVar(&account, "account", "", "mailbox email or alias")
+	cmd.Flags().BoolVar(&allAccounts, "all-accounts", false, "aggregate across all registered mailboxes")
+	cmd.Flags().StringVar(&format, "format", "table", "output format: table, csv, json")
+	cmd.Flags().IntVar(&limit, "limit", 25, "maximum number of rows to return")
+	return cmd
+}
+
+// buildReportSendersCmd returns the "report senders" subcommand.
+func buildReportSendersCmd(cfg config.Config) *cobra.Command {
+	var account string
+	var allAccounts bool
+	var format string
+	var limit int
+
+	cmd := &cobra.Command{
+		Use:   "senders",
+		Short: "Report top message senders",
+		RunE: func(cmd *cobra.Command, _ []string) error {
+			return runReportSenders(cmd.Context(), cmd.OutOrStdout(), cfg, account, allAccounts, format, limit)
+		},
+	}
+	cmd.Flags().StringVar(&account, "account", "", "mailbox email or alias")
+	cmd.Flags().BoolVar(&allAccounts, "all-accounts", false, "aggregate across all registered mailboxes")
+	cmd.Flags().StringVar(&format, "format", "table", "output format: table, csv, json")
+	cmd.Flags().IntVar(&limit, "limit", 25, "maximum number of rows to return")
+	return cmd
+}
+
+// buildReportSubjectsCmd returns the "report subjects" subcommand.
+func buildReportSubjectsCmd(cfg config.Config) *cobra.Command {
+	var account string
+	var allAccounts bool
+	var format string
+	var limit int
+
+	cmd := &cobra.Command{
+		Use:   "subjects",
+		Short: "Report top subject line terms",
+		RunE: func(cmd *cobra.Command, _ []string) error {
+			return runReportSubjects(cmd.Context(), cmd.OutOrStdout(), cfg, account, allAccounts, format, limit)
+		},
+	}
+	cmd.Flags().StringVar(&account, "account", "", "mailbox email or alias")
+	cmd.Flags().BoolVar(&allAccounts, "all-accounts", false, "aggregate across all registered mailboxes")
+	cmd.Flags().StringVar(&format, "format", "table", "output format: table, csv, json")
+	cmd.Flags().IntVar(&limit, "limit", 25, "maximum number of rows to return")
+	return cmd
+}
+
+// buildReportVolumeCmd returns the "report volume" subcommand.
+func buildReportVolumeCmd(cfg config.Config) *cobra.Command {
+	var account string
+	var allAccounts bool
+	var format string
+
+	cmd := &cobra.Command{
+		Use:   "volume",
+		Short: "Report monthly message volume",
+		RunE: func(cmd *cobra.Command, _ []string) error {
+			return runReportVolume(cmd.Context(), cmd.OutOrStdout(), cfg, account, allAccounts, format)
+		},
+	}
+	cmd.Flags().StringVar(&account, "account", "", "mailbox email or alias")
+	cmd.Flags().BoolVar(&allAccounts, "all-accounts", false, "aggregate across all registered mailboxes")
+	cmd.Flags().StringVar(&format, "format", "table", "output format: table, csv, json")
+	return cmd
+}
+
+// resolveReportMailboxID validates the account/all-accounts flags and returns
+// the canonical mailbox ID to pass to query functions. Returns "" when
+// all-accounts is set. It is shared by all report run* functions.
+func resolveReportMailboxID(ctx context.Context, cfg config.Config, account string, allAccounts bool) (string, *storage.Store, error) {
+	if allAccounts && account != "" {
+		return "", nil, fmt.Errorf("--account and --all-accounts are mutually exclusive")
+	}
+	if !allAccounts && account == "" {
+		return "", nil, fmt.Errorf("--account is required (or use --all-accounts)")
+	}
+
+	st, err := storage.Open(cfg.StoragePath)
+	if err != nil {
+		return "", nil, fmt.Errorf("open storage: %w", err)
+	}
+
+	if allAccounts {
+		return "", st, nil
+	}
+
+	mb, err := storage.ResolveMailbox(ctx, st, account)
+	if err != nil {
+		_ = st.Close()
+		return "", nil, err
+	}
+	return mb.ID, st, nil
+}
+
+// validateFormat checks that f is a known Format value.
+func validateFormat(f string) (analysis.Format, error) {
+	switch analysis.Format(f) {
+	case analysis.FormatTable, analysis.FormatCSV, analysis.FormatJSON:
+		return analysis.Format(f), nil
+	default:
+		return "", fmt.Errorf("unknown format %q — valid values: table, csv, json", f)
+	}
+}
+
+// runReportDomains queries and renders the top sending domains for a mailbox.
+// It is separated from the Cobra handler for testability.
+func runReportDomains(ctx context.Context, w io.Writer, cfg config.Config, account string, allAccounts bool, format string, limit int) error {
+	mailboxID, st, err := resolveReportMailboxID(ctx, cfg, account, allAccounts)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = st.Close() }()
+
+	f, err := validateFormat(format)
+	if err != nil {
+		return err
+	}
+
+	rows, err := analysis.QueryDomains(ctx, st, mailboxID, limit)
+	if err != nil {
+		return err
+	}
+	return analysis.RenderDomains(w, rows, f)
+}
+
+// runReportSenders queries and renders the top message senders for a mailbox.
+// It is separated from the Cobra handler for testability.
+func runReportSenders(ctx context.Context, w io.Writer, cfg config.Config, account string, allAccounts bool, format string, limit int) error {
+	mailboxID, st, err := resolveReportMailboxID(ctx, cfg, account, allAccounts)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = st.Close() }()
+
+	f, err := validateFormat(format)
+	if err != nil {
+		return err
+	}
+
+	rows, err := analysis.QuerySenders(ctx, st, mailboxID, limit)
+	if err != nil {
+		return err
+	}
+	return analysis.RenderSenders(w, rows, f)
+}
+
+// runReportSubjects queries and renders the top subject line terms for a mailbox.
+// It is separated from the Cobra handler for testability.
+func runReportSubjects(ctx context.Context, w io.Writer, cfg config.Config, account string, allAccounts bool, format string, limit int) error {
+	mailboxID, st, err := resolveReportMailboxID(ctx, cfg, account, allAccounts)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = st.Close() }()
+
+	f, err := validateFormat(format)
+	if err != nil {
+		return err
+	}
+
+	terms, err := analysis.QuerySubjectTerms(ctx, st, mailboxID, limit)
+	if err != nil {
+		return err
+	}
+	return analysis.RenderSubjectTerms(w, terms, f)
+}
+
+// runReportVolume queries and renders monthly message volume for a mailbox.
+// It is separated from the Cobra handler for testability.
+func runReportVolume(ctx context.Context, w io.Writer, cfg config.Config, account string, allAccounts bool, format string) error {
+	mailboxID, st, err := resolveReportMailboxID(ctx, cfg, account, allAccounts)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = st.Close() }()
+
+	f, err := validateFormat(format)
+	if err != nil {
+		return err
+	}
+
+	rows, err := analysis.QueryVolume(ctx, st, mailboxID)
+	if err != nil {
+		return err
+	}
+	return analysis.RenderVolume(w, rows, f)
 }
