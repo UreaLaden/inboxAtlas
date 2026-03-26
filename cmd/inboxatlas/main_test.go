@@ -1126,3 +1126,390 @@ func (stubMailProvider) ListMessages(context.Context, string) ([]string, string,
 func (stubMailProvider) GetMessageMeta(context.Context, string) (*models.MessageMeta, error) {
 	return &models.MessageMeta{}, nil
 }
+
+// --- seedReportData seeds a mailbox and messages for report tests ---
+
+func seedReportData(t *testing.T, dbPath string) {
+	t.Helper()
+	st, err := storage.Open(dbPath)
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	defer func() { _ = st.Close() }()
+	ctx := context.Background()
+	if err := st.CreateMailbox(ctx, models.Mailbox{ID: "user@example.com", Provider: "gmail"}); err != nil {
+		t.Fatalf("CreateMailbox: %v", err)
+	}
+	msgs := []models.MessageMeta{
+		{ProviderID: "r1", MailboxID: "user@example.com", Provider: "gmail", FromEmail: "alice@foo.com", FromName: "Alice", Domain: "foo.com", Subject: "Meeting update", ReceivedAt: time.Date(2025, 1, 5, 0, 0, 0, 0, time.UTC)},
+		{ProviderID: "r2", MailboxID: "user@example.com", Provider: "gmail", FromEmail: "alice@foo.com", FromName: "Alice", Domain: "foo.com", Subject: "Meeting notes", ReceivedAt: time.Date(2025, 1, 6, 0, 0, 0, 0, time.UTC)},
+		{ProviderID: "r3", MailboxID: "user@example.com", Provider: "gmail", FromEmail: "bob@bar.com", FromName: "Bob", Domain: "bar.com", Subject: "Weekly report", ReceivedAt: time.Date(2025, 2, 3, 0, 0, 0, 0, time.UTC)},
+	}
+	for _, m := range msgs {
+		if err := st.UpsertMessage(ctx, m); err != nil {
+			t.Fatalf("UpsertMessage: %v", err)
+		}
+	}
+}
+
+// --- buildReportCmd ---
+
+func TestBuildReportCmd_HasSubcommands(t *testing.T) {
+	cmd := buildReportCmd(config.Default())
+	names := make(map[string]bool)
+	for _, sub := range cmd.Commands() {
+		names[sub.Name()] = true
+	}
+	for _, want := range []string{"domains", "senders", "subjects", "volume"} {
+		if !names[want] {
+			t.Errorf("expected subcommand %q under report", want)
+		}
+	}
+}
+
+func TestBuildRoot_HasReportCommand(t *testing.T) {
+	root := buildRoot(config.Default())
+	names := make(map[string]bool)
+	for _, cmd := range root.Commands() {
+		names[cmd.Name()] = true
+	}
+	if !names["report"] {
+		t.Error("expected 'report' subcommand on root")
+	}
+}
+
+// --- runReportDomains ---
+
+func TestRunReportDomains_HappyPath_Table(t *testing.T) {
+	dir := t.TempDir()
+	cfg := config.Default()
+	cfg.StoragePath = filepath.Join(dir, "test.db")
+	seedReportData(t, cfg.StoragePath)
+
+	var buf bytes.Buffer
+	if err := runReportDomains(context.Background(), &buf, cfg, "user@example.com", false, "table", 25); err != nil {
+		t.Fatalf("runReportDomains: %v", err)
+	}
+	out := buf.String()
+	if !strings.Contains(out, "DOMAIN") {
+		t.Errorf("expected DOMAIN header, got: %q", out)
+	}
+	if !strings.Contains(out, "foo.com") {
+		t.Errorf("expected foo.com in output: %q", out)
+	}
+}
+
+func TestRunReportDomains_CSV(t *testing.T) {
+	dir := t.TempDir()
+	cfg := config.Default()
+	cfg.StoragePath = filepath.Join(dir, "test.db")
+	seedReportData(t, cfg.StoragePath)
+
+	var buf bytes.Buffer
+	if err := runReportDomains(context.Background(), &buf, cfg, "user@example.com", false, "csv", 25); err != nil {
+		t.Fatalf("runReportDomains csv: %v", err)
+	}
+	if !strings.Contains(buf.String(), "domain") {
+		t.Errorf("expected csv header, got: %q", buf.String())
+	}
+}
+
+func TestRunReportDomains_JSON(t *testing.T) {
+	dir := t.TempDir()
+	cfg := config.Default()
+	cfg.StoragePath = filepath.Join(dir, "test.db")
+	seedReportData(t, cfg.StoragePath)
+
+	var buf bytes.Buffer
+	if err := runReportDomains(context.Background(), &buf, cfg, "user@example.com", false, "json", 25); err != nil {
+		t.Fatalf("runReportDomains json: %v", err)
+	}
+	if !strings.Contains(buf.String(), "[") {
+		t.Errorf("expected JSON array, got: %q", buf.String())
+	}
+}
+
+func TestRunReportDomains_UnknownFormat(t *testing.T) {
+	dir := t.TempDir()
+	cfg := config.Default()
+	cfg.StoragePath = filepath.Join(dir, "test.db")
+	seedReportData(t, cfg.StoragePath)
+
+	err := runReportDomains(context.Background(), io.Discard, cfg, "user@example.com", false, "xml", 25)
+	if err == nil {
+		t.Error("expected error for unknown format")
+	}
+}
+
+func TestRunReportDomains_MissingAccount(t *testing.T) {
+	dir := t.TempDir()
+	cfg := config.Default()
+	cfg.StoragePath = filepath.Join(dir, "test.db")
+
+	err := runReportDomains(context.Background(), io.Discard, cfg, "", false, "table", 25)
+	if err == nil {
+		t.Error("expected error for missing account")
+	}
+}
+
+func TestRunReportDomains_BothAccountAndAllAccounts(t *testing.T) {
+	dir := t.TempDir()
+	cfg := config.Default()
+	cfg.StoragePath = filepath.Join(dir, "test.db")
+	seedReportData(t, cfg.StoragePath)
+
+	err := runReportDomains(context.Background(), io.Discard, cfg, "user@example.com", true, "table", 25)
+	if err == nil {
+		t.Error("expected error when both --account and --all-accounts set")
+	}
+}
+
+func TestRunReportDomains_AllAccounts(t *testing.T) {
+	dir := t.TempDir()
+	cfg := config.Default()
+	cfg.StoragePath = filepath.Join(dir, "test.db")
+	seedReportData(t, cfg.StoragePath)
+
+	var buf bytes.Buffer
+	if err := runReportDomains(context.Background(), &buf, cfg, "", true, "table", 25); err != nil {
+		t.Fatalf("runReportDomains --all-accounts: %v", err)
+	}
+	if !strings.Contains(buf.String(), "foo.com") {
+		t.Errorf("expected foo.com in all-accounts output: %q", buf.String())
+	}
+}
+
+// --- runReportSenders ---
+
+func TestRunReportSenders_HappyPath_Table(t *testing.T) {
+	dir := t.TempDir()
+	cfg := config.Default()
+	cfg.StoragePath = filepath.Join(dir, "test.db")
+	seedReportData(t, cfg.StoragePath)
+
+	var buf bytes.Buffer
+	if err := runReportSenders(context.Background(), &buf, cfg, "user@example.com", false, "table", 25); err != nil {
+		t.Fatalf("runReportSenders: %v", err)
+	}
+	out := buf.String()
+	if !strings.Contains(out, "EMAIL") {
+		t.Errorf("expected EMAIL header, got: %q", out)
+	}
+	if !strings.Contains(out, "alice@foo.com") {
+		t.Errorf("expected alice@foo.com in output: %q", out)
+	}
+}
+
+func TestRunReportSenders_UnknownFormat(t *testing.T) {
+	dir := t.TempDir()
+	cfg := config.Default()
+	cfg.StoragePath = filepath.Join(dir, "test.db")
+	seedReportData(t, cfg.StoragePath)
+
+	if err := runReportSenders(context.Background(), io.Discard, cfg, "user@example.com", false, "xml", 25); err == nil {
+		t.Error("expected error for unknown format")
+	}
+}
+
+func TestRunReportSenders_MissingAccount(t *testing.T) {
+	dir := t.TempDir()
+	cfg := config.Default()
+	cfg.StoragePath = filepath.Join(dir, "test.db")
+
+	if err := runReportSenders(context.Background(), io.Discard, cfg, "", false, "table", 25); err == nil {
+		t.Error("expected error for missing account")
+	}
+}
+
+func TestRunReportSenders_AllAccounts(t *testing.T) {
+	dir := t.TempDir()
+	cfg := config.Default()
+	cfg.StoragePath = filepath.Join(dir, "test.db")
+	seedReportData(t, cfg.StoragePath)
+
+	var buf bytes.Buffer
+	if err := runReportSenders(context.Background(), &buf, cfg, "", true, "table", 25); err != nil {
+		t.Fatalf("runReportSenders --all-accounts: %v", err)
+	}
+	if !strings.Contains(buf.String(), "alice@foo.com") {
+		t.Errorf("expected alice@foo.com in all-accounts output: %q", buf.String())
+	}
+}
+
+// --- runReportSubjects ---
+
+func TestRunReportSubjects_HappyPath_Table(t *testing.T) {
+	dir := t.TempDir()
+	cfg := config.Default()
+	cfg.StoragePath = filepath.Join(dir, "test.db")
+	seedReportData(t, cfg.StoragePath)
+
+	var buf bytes.Buffer
+	if err := runReportSubjects(context.Background(), &buf, cfg, "user@example.com", false, "table", 25); err != nil {
+		t.Fatalf("runReportSubjects: %v", err)
+	}
+	out := buf.String()
+	if !strings.Contains(out, "TERM") {
+		t.Errorf("expected TERM header, got: %q", out)
+	}
+}
+
+func TestRunReportSubjects_UnknownFormat(t *testing.T) {
+	dir := t.TempDir()
+	cfg := config.Default()
+	cfg.StoragePath = filepath.Join(dir, "test.db")
+	seedReportData(t, cfg.StoragePath)
+
+	if err := runReportSubjects(context.Background(), io.Discard, cfg, "user@example.com", false, "xml", 25); err == nil {
+		t.Error("expected error for unknown format")
+	}
+}
+
+func TestRunReportSubjects_MissingAccount(t *testing.T) {
+	dir := t.TempDir()
+	cfg := config.Default()
+	cfg.StoragePath = filepath.Join(dir, "test.db")
+
+	if err := runReportSubjects(context.Background(), io.Discard, cfg, "", false, "table", 25); err == nil {
+		t.Error("expected error for missing account")
+	}
+}
+
+func TestRunReportSubjects_AllAccounts(t *testing.T) {
+	dir := t.TempDir()
+	cfg := config.Default()
+	cfg.StoragePath = filepath.Join(dir, "test.db")
+	seedReportData(t, cfg.StoragePath)
+
+	var buf bytes.Buffer
+	if err := runReportSubjects(context.Background(), &buf, cfg, "", true, "table", 25); err != nil {
+		t.Fatalf("runReportSubjects --all-accounts: %v", err)
+	}
+	if !strings.Contains(buf.String(), "TERM") {
+		t.Errorf("expected TERM header in all-accounts output: %q", buf.String())
+	}
+}
+
+// --- runReportVolume ---
+
+func TestRunReportVolume_HappyPath_Table(t *testing.T) {
+	dir := t.TempDir()
+	cfg := config.Default()
+	cfg.StoragePath = filepath.Join(dir, "test.db")
+	seedReportData(t, cfg.StoragePath)
+
+	var buf bytes.Buffer
+	if err := runReportVolume(context.Background(), &buf, cfg, "user@example.com", false, "table"); err != nil {
+		t.Fatalf("runReportVolume: %v", err)
+	}
+	out := buf.String()
+	if !strings.Contains(out, "PERIOD") {
+		t.Errorf("expected PERIOD header, got: %q", out)
+	}
+	if !strings.Contains(out, "2025-01") {
+		t.Errorf("expected 2025-01 in output: %q", out)
+	}
+}
+
+func TestRunReportVolume_CSV(t *testing.T) {
+	dir := t.TempDir()
+	cfg := config.Default()
+	cfg.StoragePath = filepath.Join(dir, "test.db")
+	seedReportData(t, cfg.StoragePath)
+
+	var buf bytes.Buffer
+	if err := runReportVolume(context.Background(), &buf, cfg, "user@example.com", false, "csv"); err != nil {
+		t.Fatalf("runReportVolume csv: %v", err)
+	}
+	if !strings.Contains(buf.String(), "period") {
+		t.Errorf("expected csv header, got: %q", buf.String())
+	}
+}
+
+func TestRunReportVolume_JSON(t *testing.T) {
+	dir := t.TempDir()
+	cfg := config.Default()
+	cfg.StoragePath = filepath.Join(dir, "test.db")
+	seedReportData(t, cfg.StoragePath)
+
+	var buf bytes.Buffer
+	if err := runReportVolume(context.Background(), &buf, cfg, "user@example.com", false, "json"); err != nil {
+		t.Fatalf("runReportVolume json: %v", err)
+	}
+	if !strings.Contains(buf.String(), "[") {
+		t.Errorf("expected JSON array, got: %q", buf.String())
+	}
+}
+
+func TestRunReportVolume_UnknownFormat(t *testing.T) {
+	dir := t.TempDir()
+	cfg := config.Default()
+	cfg.StoragePath = filepath.Join(dir, "test.db")
+	seedReportData(t, cfg.StoragePath)
+
+	if err := runReportVolume(context.Background(), io.Discard, cfg, "user@example.com", false, "xml"); err == nil {
+		t.Error("expected error for unknown format")
+	}
+}
+
+func TestRunReportVolume_MissingAccount(t *testing.T) {
+	dir := t.TempDir()
+	cfg := config.Default()
+	cfg.StoragePath = filepath.Join(dir, "test.db")
+
+	if err := runReportVolume(context.Background(), io.Discard, cfg, "", false, "table"); err == nil {
+		t.Error("expected error for missing account")
+	}
+}
+
+func TestRunReportVolume_AllAccounts(t *testing.T) {
+	dir := t.TempDir()
+	cfg := config.Default()
+	cfg.StoragePath = filepath.Join(dir, "test.db")
+	seedReportData(t, cfg.StoragePath)
+
+	var buf bytes.Buffer
+	if err := runReportVolume(context.Background(), &buf, cfg, "", true, "table"); err != nil {
+		t.Fatalf("runReportVolume --all-accounts: %v", err)
+	}
+	if !strings.Contains(buf.String(), "PERIOD") {
+		t.Errorf("expected PERIOD header in all-accounts output: %q", buf.String())
+	}
+}
+
+func TestRunReportVolume_BothAccountAndAllAccounts(t *testing.T) {
+	dir := t.TempDir()
+	cfg := config.Default()
+	cfg.StoragePath = filepath.Join(dir, "test.db")
+	seedReportData(t, cfg.StoragePath)
+
+	if err := runReportVolume(context.Background(), io.Discard, cfg, "user@example.com", true, "table"); err == nil {
+		t.Error("expected error when both --account and --all-accounts set")
+	}
+}
+
+// --- buildReportDomainsCmd RunE flags ---
+
+func TestBuildReportDomainsCmd_RunE_NoAccount(t *testing.T) {
+	dir := t.TempDir()
+	cfg := config.Default()
+	cfg.StoragePath = filepath.Join(dir, "test.db")
+
+	cmd := buildReportDomainsCmd(cfg)
+	cmd.SetArgs([]string{})
+	if err := cmd.Execute(); err == nil {
+		t.Error("expected error when no account or --all-accounts given")
+	}
+}
+
+func TestBuildReportVolumeCmd_RunE_NoAccount(t *testing.T) {
+	dir := t.TempDir()
+	cfg := config.Default()
+	cfg.StoragePath = filepath.Join(dir, "test.db")
+
+	cmd := buildReportVolumeCmd(cfg)
+	cmd.SetArgs([]string{})
+	if err := cmd.Execute(); err == nil {
+		t.Error("expected error when no account or --all-accounts given")
+	}
+}
