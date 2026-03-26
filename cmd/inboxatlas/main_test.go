@@ -868,6 +868,248 @@ func TestBuildSyncStatusCmd_RunE_UnknownMailbox(t *testing.T) {
 	}
 }
 
+// --- buildAuthCmd (with status subcommand) ---
+
+func TestBuildAuthCmd_HasStatusSubcommand(t *testing.T) {
+	cmd := buildAuthCmd(config.Default())
+	names := make(map[string]bool)
+	for _, sub := range cmd.Commands() {
+		names[sub.Name()] = true
+	}
+	if !names["status"] {
+		t.Error("expected 'status' subcommand under 'auth'")
+	}
+}
+
+// --- runAuthStatus ---
+
+func TestRunAuthStatus_NoMailboxes(t *testing.T) {
+	dir := t.TempDir()
+	cfg := config.Default()
+	cfg.StoragePath = filepath.Join(dir, "test.db")
+
+	var buf bytes.Buffer
+	if err := runAuthStatus(&buf, cfg); err != nil {
+		t.Fatalf("runAuthStatus: %v", err)
+	}
+	if !strings.Contains(buf.String(), "No mailboxes registered") {
+		t.Errorf("expected empty message, got: %q", buf.String())
+	}
+}
+
+func TestRunAuthStatus_OAuthAuthenticated(t *testing.T) {
+	dir := t.TempDir()
+	cfg := config.Default()
+	cfg.StoragePath = filepath.Join(dir, "test.db")
+	cfg.TokenDir = filepath.Join(dir, "tokens")
+	cfg.TokenStorage = "file"
+
+	// Write a minimal installed-app credentials file.
+	credPath := filepath.Join(dir, "credentials.json")
+	if err := os.WriteFile(credPath, []byte(`{"installed":{"client_id":"x","client_secret":"y","redirect_uris":["urn:ietf:wg:oauth:2.0:oob"]}}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	cfg.CredentialsPath = credPath
+
+	// Register mailbox and save a token.
+	st, err := storage.Open(cfg.StoragePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := st.CreateMailbox(context.Background(), models.Mailbox{ID: "user@example.com", Provider: "gmail"}); err != nil {
+		t.Fatal(err)
+	}
+	_ = st.Close()
+
+	ts := auth.NewTokenStorage(&cfg)
+	if err := ts.Save("gmail", "user@example.com", &oauth2.Token{AccessToken: "tok"}); err != nil {
+		t.Fatal(err)
+	}
+
+	var buf bytes.Buffer
+	if err := runAuthStatus(&buf, cfg); err != nil {
+		t.Fatalf("runAuthStatus: %v", err)
+	}
+	out := buf.String()
+	if !strings.Contains(out, "user@example.com") {
+		t.Errorf("expected email in output: %q", out)
+	}
+	if !strings.Contains(out, "oauth") {
+		t.Errorf("expected auth mode 'oauth' in output: %q", out)
+	}
+	if !strings.Contains(out, "authenticated") {
+		t.Errorf("expected status 'authenticated' in output: %q", out)
+	}
+}
+
+func TestRunAuthStatus_OAuthNotAuthenticated(t *testing.T) {
+	dir := t.TempDir()
+	cfg := config.Default()
+	cfg.StoragePath = filepath.Join(dir, "test.db")
+	cfg.TokenDir = filepath.Join(dir, "tokens")
+	cfg.TokenStorage = "file"
+
+	credPath := filepath.Join(dir, "credentials.json")
+	if err := os.WriteFile(credPath, []byte(`{"installed":{"client_id":"x","client_secret":"y","redirect_uris":[]}}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	cfg.CredentialsPath = credPath
+
+	st, err := storage.Open(cfg.StoragePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := st.CreateMailbox(context.Background(), models.Mailbox{ID: "user@example.com", Provider: "gmail"}); err != nil {
+		t.Fatal(err)
+	}
+	_ = st.Close()
+
+	// No token saved — should report not authenticated.
+	var buf bytes.Buffer
+	if err := runAuthStatus(&buf, cfg); err != nil {
+		t.Fatalf("runAuthStatus: %v", err)
+	}
+	if !strings.Contains(buf.String(), "not authenticated") {
+		t.Errorf("expected 'not authenticated', got: %q", buf.String())
+	}
+}
+
+func TestRunAuthStatus_DelegatedConfigured(t *testing.T) {
+	dir := t.TempDir()
+	cfg := config.Default()
+	cfg.StoragePath = filepath.Join(dir, "test.db")
+
+	credPath := filepath.Join(dir, "sa.json")
+	if err := os.WriteFile(credPath, []byte(`{"type":"service_account","client_email":"sa@proj.iam.gserviceaccount.com","private_key":"k","token_uri":"https://oauth2.googleapis.com/token"}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	cfg.CredentialsPath = credPath
+
+	st, err := storage.Open(cfg.StoragePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := st.CreateMailbox(context.Background(), models.Mailbox{ID: "admin@corp.com", Provider: "gmail"}); err != nil {
+		t.Fatal(err)
+	}
+	_ = st.Close()
+
+	var buf bytes.Buffer
+	if err := runAuthStatus(&buf, cfg); err != nil {
+		t.Fatalf("runAuthStatus: %v", err)
+	}
+	out := buf.String()
+	if !strings.Contains(out, "delegated") {
+		t.Errorf("expected 'delegated' mode in output: %q", out)
+	}
+	if !strings.Contains(out, "authenticated (delegated)") {
+		t.Errorf("expected 'authenticated (delegated)' status in output: %q", out)
+	}
+}
+
+func TestRunAuthStatus_NoCredentialsFile(t *testing.T) {
+	dir := t.TempDir()
+	cfg := config.Default()
+	cfg.StoragePath = filepath.Join(dir, "test.db")
+	cfg.CredentialsPath = filepath.Join(dir, "nonexistent.json")
+
+	st, err := storage.Open(cfg.StoragePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := st.CreateMailbox(context.Background(), models.Mailbox{ID: "user@example.com", Provider: "gmail"}); err != nil {
+		t.Fatal(err)
+	}
+	_ = st.Close()
+
+	var buf bytes.Buffer
+	if err := runAuthStatus(&buf, cfg); err != nil {
+		t.Fatalf("runAuthStatus: %v", err)
+	}
+	if !strings.Contains(buf.String(), "no credentials file") {
+		t.Errorf("expected 'no credentials file', got: %q", buf.String())
+	}
+}
+
+func TestRunAuthStatus_StorageOpenError(t *testing.T) {
+	cfg := config.Default()
+	cfg.StoragePath = filepath.Join(t.TempDir(), "nonexistent", "test.db")
+
+	var buf bytes.Buffer
+	if err := runAuthStatus(&buf, cfg); err == nil {
+		t.Error("expected error for bad storage path")
+	}
+}
+
+func TestRunAuthStatus_InvalidCredentialsFile(t *testing.T) {
+	dir := t.TempDir()
+	cfg := config.Default()
+	cfg.StoragePath = filepath.Join(dir, "test.db")
+
+	credPath := filepath.Join(dir, "credentials.json")
+	// Write a JSON file that is neither installed-app nor service-account.
+	if err := os.WriteFile(credPath, []byte(`{"other_key":"value"}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	cfg.CredentialsPath = credPath
+
+	st, err := storage.Open(cfg.StoragePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := st.CreateMailbox(context.Background(), models.Mailbox{ID: "user@example.com", Provider: "gmail"}); err != nil {
+		t.Fatal(err)
+	}
+	_ = st.Close()
+
+	var buf bytes.Buffer
+	if err := runAuthStatus(&buf, cfg); err != nil {
+		t.Fatalf("runAuthStatus: %v", err)
+	}
+	if !strings.Contains(buf.String(), "invalid credentials file") {
+		t.Errorf("expected 'invalid credentials file', got: %q", buf.String())
+	}
+}
+
+func TestRunAuthStatus_UnsupportedProvider(t *testing.T) {
+	dir := t.TempDir()
+	cfg := config.Default()
+	cfg.StoragePath = filepath.Join(dir, "test.db")
+
+	st, err := storage.Open(cfg.StoragePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := st.CreateMailbox(context.Background(), models.Mailbox{ID: "user@outlook.com", Provider: "outlook"}); err != nil {
+		t.Fatal(err)
+	}
+	_ = st.Close()
+
+	var buf bytes.Buffer
+	if err := runAuthStatus(&buf, cfg); err != nil {
+		t.Fatalf("runAuthStatus: %v", err)
+	}
+	if !strings.Contains(buf.String(), "unsupported provider") {
+		t.Errorf("expected 'unsupported provider', got: %q", buf.String())
+	}
+}
+
+func TestBuildAuthStatusCmd_RunE_Empty(t *testing.T) {
+	dir := t.TempDir()
+	cfg := config.Default()
+	cfg.StoragePath = filepath.Join(dir, "test.db")
+
+	cmd := buildAuthStatusCmd(cfg)
+	var buf bytes.Buffer
+	cmd.SetOut(&buf)
+	if err := cmd.Execute(); err != nil {
+		t.Fatalf("Execute: %v", err)
+	}
+	if !strings.Contains(buf.String(), "No mailboxes registered") {
+		t.Errorf("expected empty message, got: %q", buf.String())
+	}
+}
+
 // fixedTime returns a deterministic time for use in tests.
 func fixedTime() time.Time {
 	return time.Date(2026, 1, 1, 9, 0, 0, 0, time.UTC)
