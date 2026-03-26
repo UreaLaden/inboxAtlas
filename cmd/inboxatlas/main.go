@@ -219,7 +219,99 @@ func buildAuthCmd(cfg config.Config) *cobra.Command {
 		Short: "Authenticate with a mail provider",
 	}
 	cmd.AddCommand(buildAuthGmailCmd(cfg))
+	cmd.AddCommand(buildAuthStatusCmd(cfg))
 	return cmd
+}
+
+// buildAuthStatusCmd returns the "auth status" subcommand.
+func buildAuthStatusCmd(cfg config.Config) *cobra.Command {
+	return &cobra.Command{
+		Use:   "status",
+		Short: "Show authentication state for all registered mailboxes",
+		RunE: func(cmd *cobra.Command, _ []string) error {
+			return runAuthStatus(cmd.OutOrStdout(), cfg)
+		},
+	}
+}
+
+// authState describes the resolved authentication state for a single mailbox.
+type authState struct {
+	email    string
+	provider string
+	mode     string
+	status   string
+}
+
+// runAuthStatus enumerates all registered mailboxes and prints a table of auth
+// state for each. It is separated from the Cobra handler for testability.
+func runAuthStatus(w io.Writer, cfg config.Config) error {
+	st, err := storage.Open(cfg.StoragePath)
+	if err != nil {
+		return fmt.Errorf("open storage: %w", err)
+	}
+	defer func() { _ = st.Close() }()
+
+	mailboxes, err := st.ListMailboxes(context.Background())
+	if err != nil {
+		return err
+	}
+
+	if len(mailboxes) == 0 {
+		_, _ = fmt.Fprintln(w, "No mailboxes registered. Use 'inboxatlas auth gmail --account <email>' to add one.")
+		return nil
+	}
+
+	states := make([]authState, 0, len(mailboxes))
+	for _, mb := range mailboxes {
+		states = append(states, resolveAuthState(cfg, mb.ID, mb.Provider))
+	}
+
+	tw := tabwriter.NewWriter(w, 0, 0, 3, ' ', 0)
+	_, _ = fmt.Fprintln(tw, "MAILBOX\tPROVIDER\tAUTH MODE\tSTATUS")
+	for _, s := range states {
+		_, _ = fmt.Fprintf(tw, "%s\t%s\t%s\t%s\n", s.email, s.provider, s.mode, s.status)
+	}
+	return tw.Flush()
+}
+
+// resolveAuthState determines the auth mode and status for a single mailbox
+// without making any live API calls.
+func resolveAuthState(cfg config.Config, email, provider string) authState {
+	state := authState{email: email, provider: provider, mode: "unknown", status: "unknown"}
+
+	if provider != "gmail" {
+		state.status = "unsupported provider"
+		return state
+	}
+
+	// Try service-account credentials first. If they load, this is a delegated mailbox.
+	if _, err := auth.LoadServiceAccountJWTConfig(cfg.CredentialsPath); err == nil {
+		state.mode = "delegated"
+		state.status = "authenticated (delegated)"
+		return state
+	}
+
+	// Try installed-app (OAuth) credentials next.
+	if _, err := auth.LoadCredentials(cfg.CredentialsPath); err == nil {
+		state.mode = "oauth"
+		ts := auth.NewTokenStorage(&cfg)
+		if _, err := ts.Load("gmail", email); err != nil {
+			state.status = "not authenticated"
+		} else {
+			state.status = "authenticated"
+		}
+		return state
+	}
+
+	// Neither credential type loaded — file is missing or invalid.
+	if _, err := os.Stat(cfg.CredentialsPath); os.IsNotExist(err) {
+		state.mode = "—"
+		state.status = "no credentials file"
+	} else {
+		state.mode = "—"
+		state.status = "invalid credentials file"
+	}
+	return state
 }
 
 // buildAuthGmailCmd returns the "auth gmail" subcommand.
