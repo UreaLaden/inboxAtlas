@@ -27,6 +27,7 @@ produces the evidence needed to design reliable classification rules.
 - Gmail authentication via per-user OAuth 2.0 desktop flow or domain-wide delegation
 - Full mailbox metadata sync with checkpoint resume
 - Discovery reports: top domains, senders, subject terms, and monthly volume
+- Deterministic mailbox-scoped classification workflows: run, review suggestions, and promote reviewed seeds
 
 **InboxAtlas does not:**
 
@@ -38,20 +39,22 @@ produces the evidence needed to design reliable classification rules.
 
 ## Architecture
 
-InboxAtlas is structured in four layers:
+InboxAtlas is structured in five layers:
 
 ```
-CLI (cmd/inboxatlas) → analysis (internal/analysis) → storage (internal/storage) → provider (internal/providers/gmail)
+CLI (cmd/inboxatlas) → engine (internal/engine) → analysis/classification/storage → provider (internal/providers/gmail)
 ```
 
 | Package | Responsibility |
 |---|---|
 | `cmd/inboxatlas` | Cobra command tree, flag parsing, thin handler dispatch |
+| `internal/engine` | CLI-safe workflow orchestration for classify flows |
 | `internal/config` | TOML config loading, env var overrides, directory initialization |
 | `internal/auth` | OAuth 2.0 desktop flow, service-account delegation, token storage |
 | `internal/storage` | SQLite CRUD, mailbox registry, message upsert, checkpoint CRUD, report queries |
 | `internal/ingestion` | Synchronous page loop, exponential backoff, checkpoint save/resume |
 | `internal/analysis` | Report queries, subject tokenization, table/CSV/JSON rendering |
+| `internal/classification` | Deterministic classification rules, default baseline seeds, mailbox bootstrap suggestions |
 | `internal/normalization` | Message normalization: lowercase domain, parse From header, trim fields |
 | `internal/providers/gmail` | Gmail REST API adapter — metadata-only, implements `models.MailProvider` |
 | `pkg/models` | Shared data types: `Mailbox`, `MessageMeta`, `MailProvider` interface |
@@ -242,6 +245,42 @@ atlassian.com        45
 
 ---
 
+## Classification
+
+Classification is mailbox-scoped and operator-invoked. The initial workflow keeps
+global baseline defaults separate from mailbox bootstrap suggestions and requires
+explicit promotion before mailbox-specific suggestions become active seeds.
+
+```bash
+# Run deterministic classification for one mailbox
+inboxatlas classify run --account <id|alias>
+
+# Review mailbox bootstrap suggestions
+inboxatlas classify suggestions --account <id|alias> [--format table|json]
+
+# Promote one reviewed suggestion into the active mailbox-scoped seed set
+inboxatlas classify promote --account <id|alias> \
+  --pattern-type <domain|sender_email|sender_prefix|subject_term> \
+  --pattern-value <value> \
+  --category <category> \
+  [--priority 100]
+```
+
+| Command | Purpose |
+|---|---|
+| `classify run` | Loads synced message metadata for one mailbox and persists mailbox-scoped classifications |
+| `classify suggestions` | Shows read-only mailbox bootstrap suggestions derived from known mailbox-specific candidates |
+| `classify promote` | Validates one suggestion for the target mailbox and persists it as an active mailbox-scoped operator seed |
+
+Notes:
+
+- `--account` is required for all classify commands.
+- `classify run` does not trigger sync; it operates on messages already stored locally.
+- `classify suggestions` is read-only and does not activate any seed.
+- `classify promote` is idempotent for the same mailbox, pattern, category, and priority.
+
+---
+
 ## Development
 
 ```bash
@@ -269,8 +308,9 @@ enforced in CI — pull requests that drop total coverage below 90% will fail th
 | 3 — Gmail Authentication | Complete | Per-user OAuth flow and domain-wide delegation |
 | 4 — Metadata Sync | Complete | Ingestion pipeline, checkpoint resume, sync CLI |
 | 5 — Discovery Reports | Complete | Domain, sender, subject, and volume reports |
-| 6 — Classification Foundations | Not started | Data-dependent — requires real sync + report data |
+| 6 — Classification Foundations | Complete | Classification storage, rule engine, default baseline seeds |
+| 8 — Classification Onboarding and Operations | In progress | Seed generalization, per-inbox execution, and initial classify workflow |
 
-Epic 6 is gated on at least one full mailbox sync and one report run against real
-mailbox data. The classification categories, seed rules, and matching logic must
-be grounded in what the actual corpus reveals before any design work begins.
+Classification foundations and the first mailbox-scoped classify workflow are now
+implemented. Remaining classification work is focused on operational refinement:
+additional review flows, future automation hooks, and broader orchestration.
