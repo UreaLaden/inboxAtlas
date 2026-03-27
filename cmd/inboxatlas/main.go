@@ -10,6 +10,7 @@ import (
 	"log/slog"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 	"text/tabwriter"
 	"time"
@@ -21,6 +22,7 @@ import (
 	"github.com/UreaLaden/inboxatlas/internal/auth"
 	"github.com/UreaLaden/inboxatlas/internal/config"
 	"github.com/UreaLaden/inboxatlas/internal/engine"
+	exportpkg "github.com/UreaLaden/inboxatlas/internal/export"
 	"github.com/UreaLaden/inboxatlas/internal/ingestion"
 	gmailprovider "github.com/UreaLaden/inboxatlas/internal/providers/gmail"
 	"github.com/UreaLaden/inboxatlas/internal/storage"
@@ -34,6 +36,7 @@ var newGmailProvider = func(email string, tokenSourceFactory func(context.Contex
 	return gmailprovider.New(email, tokenSourceFactory)
 }
 var runIngestion = ingestion.Run
+var reportExportPDFRenderer exportpkg.PDFRenderer
 
 func main() {
 	cfg, err := config.Load()
@@ -698,10 +701,43 @@ func buildReportCmd(cfg config.Config) *cobra.Command {
 		Use:   "report",
 		Short: "Generate discovery reports from synced mailbox data",
 	}
+	cmd.AddCommand(buildReportExportCmd(cfg))
 	cmd.AddCommand(buildReportDomainsCmd(cfg))
 	cmd.AddCommand(buildReportSendersCmd(cfg))
 	cmd.AddCommand(buildReportSubjectsCmd(cfg))
 	cmd.AddCommand(buildReportVolumeCmd(cfg))
+	return cmd
+}
+
+type reportExportOptions struct {
+	reportsDir  string
+	outputDir   string
+	format      string
+	ownerEmail  string
+	ownerDomain string
+	summaryFile string
+}
+
+// buildReportExportCmd returns the "report export" subcommand.
+func buildReportExportCmd(cfg config.Config) *cobra.Command {
+	var opts reportExportOptions
+	_ = cfg
+
+	cmd := &cobra.Command{
+		Use:   "export",
+		Short: "Package workbook and snapshot exports from a reports directory",
+		RunE: func(cmd *cobra.Command, _ []string) error {
+			return runReportExport(cmd.Context(), cmd.OutOrStdout(), opts)
+		},
+	}
+	cmd.Flags().StringVar(&opts.reportsDir, "reports-dir", "", "directory containing report CSV inputs")
+	cmd.Flags().StringVar(&opts.outputDir, "output-dir", "", "directory to write exported artifacts into")
+	cmd.Flags().StringVar(&opts.format, "format", "excel", "export format: excel, html, pdf, all")
+	cmd.Flags().StringVar(&opts.ownerEmail, "owner-email", "", "owner email used for internal filtering and packaging")
+	cmd.Flags().StringVar(&opts.ownerDomain, "owner-domain", "", "owner domain used for internal filtering")
+	cmd.Flags().StringVar(&opts.summaryFile, "summary-file", "", "summary markdown file required for html/pdf exports")
+	_ = cmd.MarkFlagRequired("reports-dir")
+	_ = cmd.MarkFlagRequired("output-dir")
 	return cmd
 }
 
@@ -818,6 +854,145 @@ func runReportCommand(defaultWriter io.Writer, outputPath string, run func(io.Wr
 		writer = file
 	}
 	return run(writer)
+}
+
+func validateExportFormat(f string) (string, error) {
+	switch f {
+	case "excel", "html", "pdf", "all":
+		return f, nil
+	default:
+		return "", fmt.Errorf("unknown export format %q — valid values: excel, html, pdf, all", f)
+	}
+}
+
+func runReportExport(ctx context.Context, w io.Writer, opts reportExportOptions) error {
+	_ = ctx
+
+	format, err := validateExportFormat(opts.format)
+	if err != nil {
+		return err
+	}
+
+	model, err := exportpkg.ParseReportsDir(exportpkg.Options{
+		ReportsDir:  opts.reportsDir,
+		OwnerEmail:  opts.ownerEmail,
+		OwnerDomain: opts.ownerDomain,
+	})
+	if err != nil {
+		return err
+	}
+
+	var narrative exportpkg.SnapshotNarrative
+	if exportNeedsNarrative(format) {
+		if strings.TrimSpace(opts.summaryFile) == "" {
+			return fmt.Errorf("--summary-file is required for %s export", format)
+		}
+		narrative, err = exportpkg.LoadSnapshotNarrative(opts.summaryFile)
+		if err != nil {
+			return err
+		}
+	}
+
+	files := make(map[string][]byte)
+	baseName := exportBaseName(model)
+
+	if format == "excel" || format == "all" {
+		workbook, err := exportpkg.BuildWorkbook(model, exportpkg.WorkbookOptions{})
+		if err != nil {
+			return err
+		}
+		files[baseName+".xlsx"] = workbook
+	}
+
+	if format == "html" || format == "all" {
+		html, err := exportpkg.BuildSnapshotHTML(model, narrative, exportpkg.SnapshotOptions{})
+		if err != nil {
+			return err
+		}
+		files[baseName+".html"] = html
+	}
+
+	if format == "pdf" || format == "all" {
+		pdf, err := exportpkg.BuildSnapshotPDF(model, narrative, exportpkg.SnapshotOptions{}, reportExportPDFRenderer)
+		if err != nil {
+			return err
+		}
+		files[baseName+".pdf"] = pdf
+	}
+
+	if err := os.MkdirAll(opts.outputDir, 0o755); err != nil {
+		return fmt.Errorf("create output dir: %w", err)
+	}
+
+	names := make([]string, 0, len(files))
+	for name := range files {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+
+	for _, name := range names {
+		path := filepath.Join(opts.outputDir, name)
+		if err := os.WriteFile(path, files[name], 0o600); err != nil {
+			return fmt.Errorf("write export file: %w", err)
+		}
+		_, _ = fmt.Fprintf(w, "Wrote %s\n", path)
+	}
+	return nil
+}
+
+func exportNeedsNarrative(format string) bool {
+	return format == "html" || format == "pdf" || format == "all"
+}
+
+func exportBaseName(model *exportpkg.Model) string {
+	owner := model.Owner.Email
+	if owner == "" {
+		owner = model.Owner.Domain
+	}
+	if owner == "" {
+		owner = "all-mailboxes"
+	}
+
+	start := model.Summary.ReportingPeriodStart
+	end := model.Summary.ReportingPeriodEnd
+	period := "unknown-period"
+	if start != "" && end != "" {
+		if start == end {
+			period = start
+		} else {
+			period = start + "-to-" + end
+		}
+	}
+
+	return "inbox-report-" + sanitizeExportPart(owner) + "-" + sanitizeExportPart(period)
+}
+
+func sanitizeExportPart(value string) string {
+	value = strings.ToLower(strings.TrimSpace(value))
+	if value == "" {
+		return "unknown"
+	}
+
+	var out strings.Builder
+	lastDash := false
+	for _, r := range value {
+		isAlphaNum := (r >= 'a' && r <= 'z') || (r >= '0' && r <= '9')
+		if isAlphaNum {
+			out.WriteRune(r)
+			lastDash = false
+			continue
+		}
+		if !lastDash {
+			out.WriteByte('-')
+			lastDash = true
+		}
+	}
+
+	result := strings.Trim(out.String(), "-")
+	if result == "" {
+		return "unknown"
+	}
+	return result
 }
 
 // resolveReportMailboxID validates the account/all-accounts flags and returns

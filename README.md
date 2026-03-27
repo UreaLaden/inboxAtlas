@@ -54,6 +54,7 @@ CLI (cmd/inboxatlas) → engine (internal/engine) → analysis/classification/st
 | `internal/storage` | SQLite CRUD, mailbox registry, message upsert, checkpoint CRUD, report queries |
 | `internal/ingestion` | Synchronous page loop, exponential backoff, checkpoint save/resume |
 | `internal/analysis` | Report queries, subject tokenization, table/CSV/JSON rendering |
+| `internal/export` | Reports-directory parsing, normalized export model, owner filtering, workbook generation, snapshot HTML rendering, and PDF adapter contracts |
 | `internal/classification` | Deterministic classification rules, default baseline seeds, mailbox bootstrap suggestions |
 | `internal/normalization` | Message normalization: lowercase domain, parse From header, trim fields |
 | `internal/providers/gmail` | Gmail REST API adapter — metadata-only, implements `models.MailProvider` |
@@ -224,6 +225,8 @@ inboxatlas report domains  --account <id|alias> [--format table|csv|json] [--lim
 inboxatlas report senders  --account <id|alias> [--format table|csv|json] [--limit 25]
 inboxatlas report subjects --account <id|alias> [--format table|csv|json] [--limit 25]
 inboxatlas report volume   --account <id|alias> [--format table|csv|json]
+inboxatlas report export   --reports-dir <dir> --output-dir <dir> [--format excel|html|pdf|all]
+                           [--owner-email <email>] [--owner-domain <domain>] [--summary-file <path>]
 ```
 
 | Flag | Default | Description |
@@ -245,6 +248,14 @@ slack.com            73
 google.com           61
 atlassian.com        45
 ```
+
+`report export` packages artifacts from an existing reports directory rather
+than querying SQLite directly. `excel` needs only the report CSV inputs.
+`html`, `pdf`, and `all` also require `--summary-file` so snapshot rendering
+uses explicit narrative sections. Output filenames are deterministic and use the
+pattern `inbox-report-<owner>-<period>.<ext>` inside the selected output
+directory. PDF export currently depends on a renderer adapter and will fail
+explicitly until a concrete PDF engine is configured in a later feature.
 
 ---
 
