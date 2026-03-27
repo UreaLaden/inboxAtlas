@@ -6,11 +6,13 @@ package classification
 
 import (
 	"context"
+	"fmt"
 	"sort"
 	"strings"
 	"time"
 	"unicode"
 
+	"github.com/UreaLaden/inboxatlas/internal/storage"
 	"github.com/UreaLaden/inboxatlas/pkg/models"
 )
 
@@ -229,18 +231,77 @@ func (c *ChainClassifier) Classify(ctx context.Context, msg models.MessageMeta) 
 	}, nil
 }
 
-// DefaultSeeds returns the corpus-grounded built-in classification seeds.
-// These seeds cover the major sender/domain clusters observed in the corpus.
-// Only domain, sender_email, and sender_prefix patterns are included —
-// subject_term seeds are excluded due to ambiguity.
-// Operators can extend classification by inserting seeds with source = "operator".
+// RunMailboxClassification classifies the provided messages for mailboxID using
+// the active global plus mailbox-scoped seeds loaded from storage, then
+// persists the results through BulkSaveClassifications.
+func RunMailboxClassification(ctx context.Context, st *storage.Store, mailboxID string, messages []models.MessageMeta) error {
+	if mailboxID == "" {
+		return fmt.Errorf("mailboxID is required")
+	}
+
+	storedSeeds, err := st.ListSeeds(ctx, mailboxID)
+	if err != nil {
+		return fmt.Errorf("list seeds: %w", err)
+	}
+
+	seeds := make([]ClassificationSeed, len(storedSeeds))
+	for i, seed := range storedSeeds {
+		seeds[i] = ClassificationSeed{
+			ID:           seed.ID,
+			MailboxID:    seed.MailboxID,
+			PatternType:  seed.PatternType,
+			PatternValue: seed.PatternValue,
+			Category:     seed.Category,
+			Source:       seed.Source,
+			Priority:     seed.Priority,
+			CreatedAt:    seed.CreatedAt,
+		}
+	}
+
+	classifier := NewSeedRuleClassifier(seeds)
+	classifications := make([]storage.Classification, 0, len(messages))
+	classifiedAt := time.Now().UTC()
+
+	for _, msg := range messages {
+		if msg.MailboxID != mailboxID {
+			return fmt.Errorf("message %q belongs to mailbox %q, want %q", msg.ProviderID, msg.MailboxID, mailboxID)
+		}
+		if msg.ProviderID == "" {
+			return fmt.Errorf("message providerID is required for mailbox %q", mailboxID)
+		}
+
+		result, err := classifier.Classify(ctx, msg)
+		if err != nil {
+			return fmt.Errorf("classify message %q: %w", msg.ProviderID, err)
+		}
+
+		classifications = append(classifications, storage.Classification{
+			MessageID:    msg.ProviderID,
+			MailboxID:    mailboxID,
+			Category:     result.Category,
+			MatchedRule:  result.MatchedRule,
+			Source:       result.Source,
+			ClassifiedAt: classifiedAt,
+		})
+	}
+
+	if err := st.BulkSaveClassifications(ctx, classifications); err != nil {
+		return fmt.Errorf("persist classifications: %w", err)
+	}
+	return nil
+}
+
+// DefaultSeeds returns the inbox-agnostic built-in baseline classification
+// seeds. These defaults are safe to apply globally for any mailbox and exclude
+// tenant-specific sender or domain relationships. Only domain, sender_email,
+// and sender_prefix patterns are included; subject_term seeds are excluded due
+// to ambiguity.
 func DefaultSeeds() []ClassificationSeed {
 	return []ClassificationSeed{
-		// High-specificity sender_email seeds (priority 50)
+		// High-specificity baseline sender_email seeds (priority 50)
 		{PatternType: PatternSenderEmail, PatternValue: "calendar-notification@google.com", Category: CategorySystemGenerated, Source: SourceSeed, Priority: 50},
-		{PatternType: PatternSenderEmail, PatternValue: "acr@acrbookkeepingplus.com", Category: CategoryVendor, Source: SourceSeed, Priority: 50},
 
-		// Domain seeds (priority 100)
+		// Reusable platform and delivery domains (priority 100)
 		{PatternType: PatternDomain, PatternValue: "facebookmail.com", Category: CategorySocial, Source: SourceSeed, Priority: 100},
 		{PatternType: PatternDomain, PatternValue: "linkedin.com", Category: CategorySocial, Source: SourceSeed, Priority: 100},
 		{PatternType: PatternDomain, PatternValue: "service.govdelivery.com", Category: CategoryGovernment, Source: SourceSeed, Priority: 100},
@@ -251,6 +312,25 @@ func DefaultSeeds() []ClassificationSeed {
 		{PatternType: PatternDomain, PatternValue: "mail.zapier.com", Category: CategorySystemGenerated, Source: SourceSeed, Priority: 100},
 		{PatternType: PatternDomain, PatternValue: "joinhomebase.com", Category: CategorySystemGenerated, Source: SourceSeed, Priority: 100},
 		{PatternType: PatternDomain, PatternValue: "onesaas.com", Category: CategorySystemGenerated, Source: SourceSeed, Priority: 100},
+
+		// Sender prefix seeds (priority 150) — lower specificity than exact matches
+		{PatternType: PatternSenderPrefix, PatternValue: "noreply", Category: CategorySystemGenerated, Source: SourceSeed, Priority: 150},
+		{PatternType: PatternSenderPrefix, PatternValue: "no-reply", Category: CategorySystemGenerated, Source: SourceSeed, Priority: 150},
+		{PatternType: PatternSenderPrefix, PatternValue: "donotreply", Category: CategorySystemGenerated, Source: SourceSeed, Priority: 150},
+	}
+}
+
+// MailboxBootstrapSuggestions returns mailbox-scoped candidate seeds derived
+// from mailbox-local discovery. These suggestions are intentionally separate
+// from DefaultSeeds and from promoted active seeds; they require explicit
+// operator review before influencing runtime classification.
+func MailboxBootstrapSuggestions(mailboxID string) []ClassificationSeed {
+	if mailboxID == "" {
+		return nil
+	}
+
+	suggestions := []ClassificationSeed{
+		{PatternType: PatternSenderEmail, PatternValue: "acr@acrbookkeepingplus.com", Category: CategoryVendor, Source: SourceSeed, Priority: 50},
 		{PatternType: PatternDomain, PatternValue: "ealerts.bankofamerica.com", Category: CategoryVendor, Source: SourceSeed, Priority: 100},
 		{PatternType: PatternDomain, PatternValue: "citynational.com", Category: CategoryVendor, Source: SourceSeed, Priority: 100},
 		{PatternType: PatternDomain, PatternValue: "cardinalhealth.com", Category: CategoryVendor, Source: SourceSeed, Priority: 100},
@@ -262,10 +342,12 @@ func DefaultSeeds() []ClassificationSeed {
 		{PatternType: PatternDomain, PatternValue: "ktainstitute.com", Category: CategoryNewsletterMarketing, Source: SourceSeed, Priority: 100},
 		{PatternType: PatternDomain, PatternValue: "email.bradfordtaxinstitute.com", Category: CategoryNewsletterMarketing, Source: SourceSeed, Priority: 100},
 		{PatternType: PatternDomain, PatternValue: "woodard.com", Category: CategoryNewsletterMarketing, Source: SourceSeed, Priority: 100},
-
-		// Sender prefix seeds (priority 150) — lower specificity than exact matches
-		{PatternType: PatternSenderPrefix, PatternValue: "noreply", Category: CategorySystemGenerated, Source: SourceSeed, Priority: 150},
-		{PatternType: PatternSenderPrefix, PatternValue: "no-reply", Category: CategorySystemGenerated, Source: SourceSeed, Priority: 150},
-		{PatternType: PatternSenderPrefix, PatternValue: "donotreply", Category: CategorySystemGenerated, Source: SourceSeed, Priority: 150},
 	}
+
+	scoped := make([]ClassificationSeed, len(suggestions))
+	copy(scoped, suggestions)
+	for i := range scoped {
+		scoped[i].MailboxID = mailboxID
+	}
+	return scoped
 }

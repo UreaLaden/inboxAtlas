@@ -493,6 +493,82 @@ func (s *Store) QuerySubjects(ctx context.Context, mailboxID string) ([]string, 
 	return out, rows.Err()
 }
 
+// ListMessageMetaByMailbox returns all stored message metadata for mailboxID.
+// Results are ordered by received_at ASC, then provider_id ASC.
+func (s *Store) ListMessageMetaByMailbox(ctx context.Context, mailboxID string) ([]models.MessageMeta, error) {
+	rows, err := s.db.QueryContext(ctx,
+		`SELECT id, provider, mailbox_id, thread_id, from_email, from_name, domain, subject, snippet, received_at, labels, provider_id
+		 FROM messages
+		 WHERE mailbox_id = ?
+		 ORDER BY received_at ASC, provider_id ASC`,
+		mailboxID,
+	)
+	if err != nil {
+		return nil, fmt.Errorf("list message meta by mailbox: %w", err)
+	}
+	defer func() { _ = rows.Close() }()
+
+	var out []models.MessageMeta
+	for rows.Next() {
+		var msg models.MessageMeta
+		var threadID sql.NullString
+		var fromEmail sql.NullString
+		var fromName sql.NullString
+		var domain sql.NullString
+		var subject sql.NullString
+		var snippet sql.NullString
+		var receivedAt string
+		var labelsJSON string
+
+		if err := rows.Scan(
+			&msg.ID,
+			&msg.Provider,
+			&msg.MailboxID,
+			&threadID,
+			&fromEmail,
+			&fromName,
+			&domain,
+			&subject,
+			&snippet,
+			&receivedAt,
+			&labelsJSON,
+			&msg.ProviderID,
+		); err != nil {
+			return nil, fmt.Errorf("scan message meta row: %w", err)
+		}
+
+		if threadID.Valid {
+			msg.ThreadID = threadID.String
+		}
+		if fromEmail.Valid {
+			msg.FromEmail = fromEmail.String
+		}
+		if fromName.Valid {
+			msg.FromName = fromName.String
+		}
+		if domain.Valid {
+			msg.Domain = domain.String
+		}
+		if subject.Valid {
+			msg.Subject = subject.String
+		}
+		if snippet.Valid {
+			msg.Snippet = snippet.String
+		}
+
+		msg.ReceivedAt, err = time.Parse(time.RFC3339, receivedAt)
+		if err != nil {
+			return nil, fmt.Errorf("parse message received_at %q: %w", receivedAt, err)
+		}
+		if err := json.Unmarshal([]byte(labelsJSON), &msg.Labels); err != nil {
+			return nil, fmt.Errorf("unmarshal message labels: %w", err)
+		}
+
+		out = append(out, msg)
+	}
+	return out, rows.Err()
+}
+
 // UpsertMessage inserts msg into the messages table. Duplicate inserts (same
 // provider_id + mailbox_id) are silently ignored — re-syncing is idempotent.
 func (s *Store) UpsertMessage(ctx context.Context, msg models.MessageMeta) error {

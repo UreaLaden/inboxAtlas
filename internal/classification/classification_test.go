@@ -5,6 +5,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/UreaLaden/inboxatlas/internal/storage"
 	"github.com/UreaLaden/inboxatlas/pkg/models"
 )
 
@@ -141,7 +142,7 @@ func TestSeedRuleClassifier_MatchedRuleNonEmpty(t *testing.T) {
 		domain string
 	}{
 		{"domain match", "user@facebookmail.com", "facebookmail.com"},
-		{"sender_email match", "acr@acrbookkeepingplus.com", "acrbookkeepingplus.com"},
+		{"sender_email match", "calendar-notification@google.com", "google.com"},
 		{"prefix match", "noreply@example.com", "example.com"},
 	}
 	for _, tt := range tests {
@@ -287,8 +288,8 @@ func TestChainClassifier_PropagatesError(t *testing.T) {
 func TestDefaultSeeds_Integrity(t *testing.T) {
 	seeds := DefaultSeeds()
 
-	if len(seeds) <= 20 {
-		t.Errorf("DefaultSeeds() should return more than 20 seeds; got %d", len(seeds))
+	if len(seeds) < 10 {
+		t.Errorf("DefaultSeeds() should retain a meaningful reusable baseline; got %d seeds", len(seeds))
 	}
 
 	validCategories := map[string]bool{
@@ -322,6 +323,33 @@ func TestDefaultSeeds_Integrity(t *testing.T) {
 		}
 		if s.Source != SourceSeed {
 			t.Errorf("seed[%d]: Source: got %q, want %q", i, s.Source, SourceSeed)
+		}
+	}
+}
+
+func TestDefaultSeeds_DoNotContainTenantSpecificSeeds(t *testing.T) {
+	seeds := DefaultSeeds()
+	disallowed := map[string]struct{}{
+		"acr@acrbookkeepingplus.com":     {},
+		"acrbookkeepingplus.com":         {},
+		"healthymd.com":                  {},
+		"cardinalhealth.com":             {},
+		"citynational.com":               {},
+		"ealerts.bankofamerica.com":      {},
+		"law360.com":                     {},
+		"cpatrendlines.com":              {},
+		"mails.mycareers.net":            {},
+		"ktainstitute.com":               {},
+		"email.bradfordtaxinstitute.com": {},
+		"woodard.com":                    {},
+	}
+
+	for _, seed := range seeds {
+		if _, found := disallowed[seed.PatternValue]; found {
+			t.Fatalf("tenant-specific seed leaked into DefaultSeeds: %+v", seed)
+		}
+		if seed.MailboxID != "" {
+			t.Fatalf("DefaultSeeds must remain global; got mailbox-scoped seed %+v", seed)
 		}
 	}
 }
@@ -362,6 +390,283 @@ func TestDefaultSeeds_UnknownSender(t *testing.T) {
 	}
 }
 
+func TestDefaultSeeds_DoNotClassifyFormerTenantSpecificDomain(t *testing.T) {
+	seeds := DefaultSeeds()
+	c := NewSeedRuleClassifier(seeds)
+	result, err := c.Classify(context.Background(), makeMsg("owner@healthymd.com", "healthymd.com", ""))
+	if err != nil {
+		t.Fatalf("Classify: %v", err)
+	}
+	if result.Category != CategoryUnknown {
+		t.Fatalf("healthymd.com should not be classified by baseline defaults; got %q", result.Category)
+	}
+}
+
+func TestMailboxBootstrapSuggestions_AreMailboxScoped(t *testing.T) {
+	suggestions := MailboxBootstrapSuggestions("owner@example.com")
+	if len(suggestions) == 0 {
+		t.Fatal("expected mailbox bootstrap suggestions")
+	}
+
+	foundTenantSeed := false
+	for _, suggestion := range suggestions {
+		if suggestion.MailboxID != "owner@example.com" {
+			t.Fatalf("suggestion mailbox_id: got %q, want %q", suggestion.MailboxID, "owner@example.com")
+		}
+		if suggestion.PatternValue == "healthymd.com" {
+			foundTenantSeed = true
+		}
+	}
+	if !foundTenantSeed {
+		t.Fatal("expected healthymd.com in mailbox bootstrap suggestions")
+	}
+}
+
+func TestMailboxBootstrapSuggestions_EmptyMailboxID(t *testing.T) {
+	suggestions := MailboxBootstrapSuggestions("")
+	if len(suggestions) != 0 {
+		t.Fatalf("expected no suggestions for empty mailbox id; got %d", len(suggestions))
+	}
+}
+
+func TestRunMailboxClassification_LoadsGlobalAndMailboxScopedSeeds(t *testing.T) {
+	st := newClassificationStore(t)
+	ctx := context.Background()
+	createClassificationMailbox(t, st, "alpha@example.com")
+	createClassificationMailbox(t, st, "beta@example.com")
+
+	mustInsertSeed(t, st, storage.ClassificationSeed{
+		PatternType:  PatternDomain,
+		PatternValue: "example.com",
+		Category:     CategoryGovernment,
+		Source:       SourceSeed,
+		Priority:     100,
+	})
+	mustInsertSeed(t, st, storage.ClassificationSeed{
+		MailboxID:    "alpha@example.com",
+		PatternType:  PatternSenderEmail,
+		PatternValue: "owner@example.com",
+		Category:     CategoryClient,
+		Source:       SourceOperator,
+		Priority:     50,
+	})
+	mustInsertSeed(t, st, storage.ClassificationSeed{
+		MailboxID:    "beta@example.com",
+		PatternType:  PatternSenderEmail,
+		PatternValue: "owner@example.com",
+		Category:     CategoryVendor,
+		Source:       SourceOperator,
+		Priority:     50,
+	})
+
+	alphaMsg := mustStoreMessage(t, st, models.MessageMeta{
+		ProviderID: "alpha-msg",
+		MailboxID:  "alpha@example.com",
+		Provider:   "gmail",
+		FromEmail:  "owner@example.com",
+		Domain:     "example.com",
+		ReceivedAt: time.Now().UTC(),
+	})
+	betaMsg := mustStoreMessage(t, st, models.MessageMeta{
+		ProviderID: "beta-msg",
+		MailboxID:  "beta@example.com",
+		Provider:   "gmail",
+		FromEmail:  "owner@example.com",
+		Domain:     "example.com",
+		ReceivedAt: time.Now().UTC(),
+	})
+
+	if err := RunMailboxClassification(ctx, st, "alpha@example.com", []models.MessageMeta{alphaMsg}); err != nil {
+		t.Fatalf("RunMailboxClassification alpha: %v", err)
+	}
+	if err := RunMailboxClassification(ctx, st, "beta@example.com", []models.MessageMeta{betaMsg}); err != nil {
+		t.Fatalf("RunMailboxClassification beta: %v", err)
+	}
+
+	alphaClassification := mustGetClassification(t, st, "alpha-msg", "alpha@example.com")
+	if alphaClassification.Category != CategoryClient {
+		t.Fatalf("alpha category: got %q, want %q", alphaClassification.Category, CategoryClient)
+	}
+	if alphaClassification.MatchedRule != "sender_email:owner@example.com" {
+		t.Fatalf("alpha matched rule: got %q", alphaClassification.MatchedRule)
+	}
+
+	betaClassification := mustGetClassification(t, st, "beta-msg", "beta@example.com")
+	if betaClassification.Category != CategoryVendor {
+		t.Fatalf("beta category: got %q, want %q", betaClassification.Category, CategoryVendor)
+	}
+}
+
+func TestRunMailboxClassification_NewInboxGetsBaselineFromGlobalSeeds(t *testing.T) {
+	st := newClassificationStore(t)
+	ctx := context.Background()
+	createClassificationMailbox(t, st, "new@example.com")
+
+	mustInsertSeed(t, st, storage.ClassificationSeed{
+		PatternType:  PatternDomain,
+		PatternValue: "facebookmail.com",
+		Category:     CategorySocial,
+		Source:       SourceSeed,
+		Priority:     100,
+	})
+
+	msg := mustStoreMessage(t, st, models.MessageMeta{
+		ProviderID: "baseline-msg",
+		MailboxID:  "new@example.com",
+		Provider:   "gmail",
+		FromEmail:  "groupupdates@facebookmail.com",
+		Domain:     "facebookmail.com",
+		ReceivedAt: time.Now().UTC(),
+	})
+
+	if err := RunMailboxClassification(ctx, st, "new@example.com", []models.MessageMeta{msg}); err != nil {
+		t.Fatalf("RunMailboxClassification: %v", err)
+	}
+
+	classification := mustGetClassification(t, st, "baseline-msg", "new@example.com")
+	if classification.Category != CategorySocial {
+		t.Fatalf("category: got %q, want %q", classification.Category, CategorySocial)
+	}
+	if classification.MatchedRule != "domain:facebookmail.com" {
+		t.Fatalf("matched rule: got %q", classification.MatchedRule)
+	}
+}
+
+func TestRunMailboxClassification_RerunOverwritesPriorResults(t *testing.T) {
+	st := newClassificationStore(t)
+	ctx := context.Background()
+	createClassificationMailbox(t, st, "alpha@example.com")
+
+	mustInsertSeed(t, st, storage.ClassificationSeed{
+		PatternType:  PatternDomain,
+		PatternValue: "example.com",
+		Category:     CategoryVendor,
+		Source:       SourceSeed,
+		Priority:     100,
+	})
+
+	msg := mustStoreMessage(t, st, models.MessageMeta{
+		ProviderID: "rerun-msg",
+		MailboxID:  "alpha@example.com",
+		Provider:   "gmail",
+		FromEmail:  "person@example.com",
+		Domain:     "example.com",
+		ReceivedAt: time.Now().UTC(),
+	})
+
+	if err := RunMailboxClassification(ctx, st, "alpha@example.com", []models.MessageMeta{msg}); err != nil {
+		t.Fatalf("first RunMailboxClassification: %v", err)
+	}
+
+	mustInsertSeed(t, st, storage.ClassificationSeed{
+		MailboxID:    "alpha@example.com",
+		PatternType:  PatternSenderEmail,
+		PatternValue: "person@example.com",
+		Category:     CategoryClient,
+		Source:       SourceOperator,
+		Priority:     50,
+	})
+
+	if err := RunMailboxClassification(ctx, st, "alpha@example.com", []models.MessageMeta{msg}); err != nil {
+		t.Fatalf("second RunMailboxClassification: %v", err)
+	}
+
+	classification := mustGetClassification(t, st, "rerun-msg", "alpha@example.com")
+	if classification.Category != CategoryClient {
+		t.Fatalf("category after rerun: got %q, want %q", classification.Category, CategoryClient)
+	}
+	if classification.MatchedRule != "sender_email:person@example.com" {
+		t.Fatalf("matched rule after rerun: got %q", classification.MatchedRule)
+	}
+}
+
+func TestRunMailboxClassification_MessageIDScopedByMailbox(t *testing.T) {
+	st := newClassificationStore(t)
+	ctx := context.Background()
+	createClassificationMailbox(t, st, "alpha@example.com")
+	createClassificationMailbox(t, st, "beta@example.com")
+
+	mustInsertSeed(t, st, storage.ClassificationSeed{
+		MailboxID:    "alpha@example.com",
+		PatternType:  PatternSenderEmail,
+		PatternValue: "alpha@example.com",
+		Category:     CategoryClient,
+		Source:       SourceOperator,
+		Priority:     50,
+	})
+	mustInsertSeed(t, st, storage.ClassificationSeed{
+		MailboxID:    "beta@example.com",
+		PatternType:  PatternSenderEmail,
+		PatternValue: "beta@example.com",
+		Category:     CategoryVendor,
+		Source:       SourceOperator,
+		Priority:     50,
+	})
+
+	alphaMsg := mustStoreMessage(t, st, models.MessageMeta{
+		ProviderID: "shared-id",
+		MailboxID:  "alpha@example.com",
+		Provider:   "gmail",
+		FromEmail:  "alpha@example.com",
+		Domain:     "example.com",
+		ReceivedAt: time.Now().UTC(),
+	})
+	betaMsg := models.MessageMeta{
+		ProviderID: "shared-id",
+		MailboxID:  "beta@example.com",
+		Provider:   "gmail",
+		FromEmail:  "beta@example.com",
+		Domain:     "example.com",
+		ReceivedAt: time.Now().UTC(),
+	}
+
+	if err := RunMailboxClassification(ctx, st, "alpha@example.com", []models.MessageMeta{alphaMsg}); err != nil {
+		t.Fatalf("RunMailboxClassification alpha: %v", err)
+	}
+	if err := RunMailboxClassification(ctx, st, "beta@example.com", []models.MessageMeta{betaMsg}); err != nil {
+		t.Fatalf("RunMailboxClassification beta: %v", err)
+	}
+
+	alphaClassification := mustGetClassification(t, st, "shared-id", "alpha@example.com")
+	if alphaClassification.Category != CategoryClient {
+		t.Fatalf("alpha category: got %q, want %q", alphaClassification.Category, CategoryClient)
+	}
+
+	betaClassification := mustGetClassification(t, st, "shared-id", "beta@example.com")
+	if betaClassification.Category != CategoryVendor {
+		t.Fatalf("beta category: got %q, want %q", betaClassification.Category, CategoryVendor)
+	}
+}
+
+func TestRunMailboxClassification_RejectsCrossMailboxMessages(t *testing.T) {
+	st := newClassificationStore(t)
+	ctx := context.Background()
+	createClassificationMailbox(t, st, "alpha@example.com")
+	createClassificationMailbox(t, st, "beta@example.com")
+
+	msg := mustStoreMessage(t, st, models.MessageMeta{
+		ProviderID: "cross-mailbox",
+		MailboxID:  "beta@example.com",
+		Provider:   "gmail",
+		FromEmail:  "person@example.com",
+		Domain:     "example.com",
+		ReceivedAt: time.Now().UTC(),
+	})
+
+	err := RunMailboxClassification(ctx, st, "alpha@example.com", []models.MessageMeta{msg})
+	if err == nil {
+		t.Fatal("expected mailbox mismatch error")
+	}
+
+	got, getErr := st.GetClassification(ctx, "cross-mailbox", "alpha@example.com")
+	if getErr != nil {
+		t.Fatalf("GetClassification: %v", getErr)
+	}
+	if got != nil {
+		t.Fatal("expected no persisted classification on mailbox mismatch")
+	}
+}
+
 // stubClassifier is a test-only Classifier that always returns a fixed result.
 type stubClassifier struct {
 	result ClassificationResult
@@ -381,6 +686,50 @@ func (e *errorClassifier) Classify(_ context.Context, _ models.MessageMeta) (Cla
 type classifyError struct{ msg string }
 
 func (e *classifyError) Error() string { return e.msg }
+
+func newClassificationStore(t *testing.T) *storage.Store {
+	t.Helper()
+	st, err := storage.Open(":memory:")
+	if err != nil {
+		t.Fatalf("storage.Open: %v", err)
+	}
+	t.Cleanup(func() { _ = st.Close() })
+	return st
+}
+
+func createClassificationMailbox(t *testing.T, st *storage.Store, id string) {
+	t.Helper()
+	if err := st.CreateMailbox(context.Background(), models.Mailbox{ID: id, Provider: "gmail"}); err != nil {
+		t.Fatalf("CreateMailbox(%q): %v", id, err)
+	}
+}
+
+func mustInsertSeed(t *testing.T, st *storage.Store, seed storage.ClassificationSeed) {
+	t.Helper()
+	if err := st.InsertSeed(context.Background(), seed); err != nil {
+		t.Fatalf("InsertSeed(%q): %v", seed.PatternValue, err)
+	}
+}
+
+func mustStoreMessage(t *testing.T, st *storage.Store, msg models.MessageMeta) models.MessageMeta {
+	t.Helper()
+	if err := st.UpsertMessage(context.Background(), msg); err != nil {
+		t.Fatalf("UpsertMessage(%q): %v", msg.ProviderID, err)
+	}
+	return msg
+}
+
+func mustGetClassification(t *testing.T, st *storage.Store, messageID, mailboxID string) *storage.Classification {
+	t.Helper()
+	classification, err := st.GetClassification(context.Background(), messageID, mailboxID)
+	if err != nil {
+		t.Fatalf("GetClassification(%q, %q): %v", messageID, mailboxID, err)
+	}
+	if classification == nil {
+		t.Fatalf("expected classification for %q / %q", messageID, mailboxID)
+	}
+	return classification
+}
 
 // Ensure the package compiles with the correct time import.
 var _ = time.Now
