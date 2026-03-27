@@ -184,7 +184,7 @@ func TestRunMailboxRemove_Force(t *testing.T) {
 	if err := runMailboxRemove(&buf, nil, st, "work", true); err != nil {
 		t.Fatalf("runMailboxRemove --force: %v", err)
 	}
-	if !strings.Contains(buf.String(), "Mailbox removed.") {
+	if !strings.Contains(buf.String(), "Mailbox removed. InboxAtlas local data purged.") {
 		t.Errorf("expected removed message, got %q", buf.String())
 	}
 
@@ -205,7 +205,10 @@ func TestRunMailboxRemove_Confirm_Yes(t *testing.T) {
 	if err := runMailboxRemove(&buf, strings.NewReader("y\n"), st, "work", false); err != nil {
 		t.Fatalf("runMailboxRemove confirm y: %v", err)
 	}
-	if !strings.Contains(buf.String(), "Mailbox removed.") {
+	if !strings.Contains(buf.String(), "Permanently purge InboxAtlas local data for mailbox 'user@company.com'? [y/N] ") {
+		t.Errorf("expected purge confirmation prompt, got %q", buf.String())
+	}
+	if !strings.Contains(buf.String(), "Mailbox removed. InboxAtlas local data purged.") {
 		t.Errorf("expected removed message, got %q", buf.String())
 	}
 }
@@ -251,8 +254,49 @@ func TestRunMailboxRemove_ByEmail(t *testing.T) {
 	if err := runMailboxRemove(&buf, nil, st, "user@company.com", true); err != nil {
 		t.Fatalf("runMailboxRemove by email: %v", err)
 	}
-	if !strings.Contains(buf.String(), "Mailbox removed.") {
+	if !strings.Contains(buf.String(), "Mailbox removed. InboxAtlas local data purged.") {
 		t.Errorf("expected removed message, got %q", buf.String())
+	}
+}
+
+func TestRunMailboxRemove_ForcePurgesLocalData(t *testing.T) {
+	st := openMemStore(t)
+	ctx := context.Background()
+	if err := st.CreateMailbox(ctx, models.Mailbox{ID: "user@company.com", Alias: "work", Provider: "gmail"}); err != nil {
+		t.Fatal(err)
+	}
+	now := time.Date(2025, 1, 1, 12, 0, 0, 0, time.UTC)
+	if err := st.UpsertMessage(ctx, models.MessageMeta{
+		ProviderID: "msg1",
+		MailboxID:  "user@company.com",
+		Provider:   "gmail",
+		FromEmail:  "a@x.com",
+		Domain:     "x.com",
+		Subject:    "Hello",
+		ReceivedAt: now,
+	}); err != nil {
+		t.Fatalf("UpsertMessage: %v", err)
+	}
+
+	var buf bytes.Buffer
+	if err := runMailboxRemove(&buf, nil, st, "work", true); err != nil {
+		t.Fatalf("runMailboxRemove --force: %v", err)
+	}
+
+	mb, err := st.GetMailbox(ctx, "user@company.com")
+	if err != nil {
+		t.Fatalf("GetMailbox: %v", err)
+	}
+	if mb != nil {
+		t.Fatal("expected mailbox to be removed")
+	}
+
+	messages, err := st.ListMessageMetaByMailbox(ctx, "user@company.com")
+	if err != nil {
+		t.Fatalf("ListMessageMetaByMailbox: %v", err)
+	}
+	if len(messages) != 0 {
+		t.Fatalf("expected local messages to be purged, got %d", len(messages))
 	}
 }
 
@@ -331,7 +375,7 @@ func TestBuildMailboxRemoveCmd_RunE_Force(t *testing.T) {
 	if err := cmd.Execute(); err != nil {
 		t.Fatalf("Execute: %v", err)
 	}
-	if !strings.Contains(buf.String(), "Mailbox removed.") {
+	if !strings.Contains(buf.String(), "Mailbox removed. InboxAtlas local data purged.") {
 		t.Errorf("expected removed message, got: %q", buf.String())
 	}
 }

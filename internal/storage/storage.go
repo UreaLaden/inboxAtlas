@@ -192,29 +192,47 @@ func (s *Store) ListMailboxes(ctx context.Context) ([]models.Mailbox, error) {
 	return out, rows.Err()
 }
 
-// DeleteMailbox removes the mailbox identified by email address or alias.
+// DeleteMailbox removes the mailbox identified by email address or alias and
+// purges all local mailbox-scoped InboxAtlas data in a single transaction.
 // Returns an error if no matching mailbox is found.
 func (s *Store) DeleteMailbox(ctx context.Context, idOrAlias string) error {
-	var res sql.Result
-	var err error
-	if strings.Contains(idOrAlias, "@") {
-		res, err = s.db.ExecContext(ctx,
-			`DELETE FROM mailboxes WHERE id = ?`,
-			strings.ToLower(idOrAlias),
-		)
-	} else {
-		res, err = s.db.ExecContext(ctx,
-			`DELETE FROM mailboxes WHERE alias = ?`,
-			idOrAlias,
-		)
-	}
+	mb, err := s.GetMailbox(ctx, idOrAlias)
 	if err != nil {
 		return fmt.Errorf("delete mailbox: %w", err)
 	}
-	n, _ := res.RowsAffected()
-	if n == 0 {
+	if mb == nil {
 		return fmt.Errorf("mailbox %q not found", idOrAlias)
 	}
+
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return fmt.Errorf("delete mailbox begin tx: %w", err)
+	}
+	defer func() { _ = tx.Rollback() }()
+
+	for _, step := range []struct {
+		name  string
+		query string
+		arg   any
+	}{
+		{name: "delete classifications", query: `DELETE FROM message_classifications WHERE mailbox_id = ?`, arg: mb.ID},
+		{name: "delete mailbox seeds", query: `DELETE FROM classification_seeds WHERE mailbox_id = ?`, arg: mb.ID},
+		{name: "delete sender stats", query: `DELETE FROM sender_stats WHERE mailbox_id = ?`, arg: mb.ID},
+		{name: "delete domain stats", query: `DELETE FROM domain_stats WHERE mailbox_id = ?`, arg: mb.ID},
+		{name: "delete subject term stats", query: `DELETE FROM subject_term_stats WHERE mailbox_id = ?`, arg: mb.ID},
+		{name: "delete messages", query: `DELETE FROM messages WHERE mailbox_id = ?`, arg: mb.ID},
+		{name: "delete checkpoints", query: `DELETE FROM sync_checkpoint WHERE mailbox_id = ?`, arg: mb.ID},
+		{name: "delete mailbox", query: `DELETE FROM mailboxes WHERE id = ?`, arg: mb.ID},
+	} {
+		if _, err := tx.ExecContext(ctx, step.query, step.arg); err != nil {
+			return fmt.Errorf("%s: %w", step.name, err)
+		}
+	}
+
+	if err := tx.Commit(); err != nil {
+		return fmt.Errorf("delete mailbox commit: %w", err)
+	}
+
 	return nil
 }
 
@@ -228,6 +246,24 @@ func (s *Store) UpdateLastSynced(ctx context.Context, id string, t time.Time) er
 	)
 	if err != nil {
 		return fmt.Errorf("update last synced: %w", err)
+	}
+	n, _ := res.RowsAffected()
+	if n == 0 {
+		return fmt.Errorf("mailbox %q not found", id)
+	}
+	return nil
+}
+
+// UpdateMailboxAlias sets the alias for the mailbox with the given canonical
+// email ID.
+func (s *Store) UpdateMailboxAlias(ctx context.Context, id, alias string) error {
+	res, err := s.db.ExecContext(ctx,
+		`UPDATE mailboxes SET alias = ? WHERE id = ?`,
+		nullableString(alias),
+		strings.ToLower(id),
+	)
+	if err != nil {
+		return fmt.Errorf("update mailbox alias: %w", err)
 	}
 	n, _ := res.RowsAffected()
 	if n == 0 {

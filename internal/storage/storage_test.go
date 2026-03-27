@@ -243,6 +243,184 @@ func TestDeleteMailbox_ByAlias(t *testing.T) {
 	}
 }
 
+func TestDeleteMailbox_PurgesMailboxScopedStateAndPreservesGlobalSeeds(t *testing.T) {
+	st := newTestStore(t)
+	ctx := context.Background()
+
+	createTestMailbox(t, st, "user1@example.com")
+	createTestMailbox(t, st, "user2@example.com")
+	if err := st.UpdateMailboxAlias(ctx, "user1@example.com", "work"); err != nil {
+		t.Fatalf("UpdateMailboxAlias user1: %v", err)
+	}
+
+	now := time.Date(2025, 1, 1, 12, 0, 0, 0, time.UTC)
+	seedMessage(t, st, "m1", "user1@example.com", "a@x.com", "", "x.com", "Hello", now)
+	seedMessage(t, st, "m2", "user2@example.com", "b@y.com", "", "y.com", "Other", now)
+
+	if err := st.SaveCheckpoint(ctx, SyncCheckpoint{
+		MailboxID:      "user1@example.com",
+		Provider:       "gmail",
+		PageCursor:     "cursor-1",
+		MessagesSynced: 1,
+		Status:         "complete",
+		StartedAt:      now,
+		UpdatedAt:      now,
+	}); err != nil {
+		t.Fatalf("SaveCheckpoint user1: %v", err)
+	}
+	if err := st.SaveCheckpoint(ctx, SyncCheckpoint{
+		MailboxID:      "user2@example.com",
+		Provider:       "gmail",
+		PageCursor:     "cursor-2",
+		MessagesSynced: 1,
+		Status:         "complete",
+		StartedAt:      now,
+		UpdatedAt:      now,
+	}); err != nil {
+		t.Fatalf("SaveCheckpoint user2: %v", err)
+	}
+
+	if _, err := st.db.ExecContext(ctx,
+		`INSERT INTO sender_stats (mailbox_id, from_email, from_name, domain, message_count) VALUES (?, ?, ?, ?, ?)`,
+		"user1@example.com", "a@x.com", "Alice", "x.com", 1,
+	); err != nil {
+		t.Fatalf("insert sender_stats user1: %v", err)
+	}
+	if _, err := st.db.ExecContext(ctx,
+		`INSERT INTO sender_stats (mailbox_id, from_email, from_name, domain, message_count) VALUES (?, ?, ?, ?, ?)`,
+		"user2@example.com", "b@y.com", "Bob", "y.com", 1,
+	); err != nil {
+		t.Fatalf("insert sender_stats user2: %v", err)
+	}
+	if _, err := st.db.ExecContext(ctx,
+		`INSERT INTO domain_stats (mailbox_id, domain, message_count) VALUES (?, ?, ?)`,
+		"user1@example.com", "x.com", 1,
+	); err != nil {
+		t.Fatalf("insert domain_stats user1: %v", err)
+	}
+	if _, err := st.db.ExecContext(ctx,
+		`INSERT INTO domain_stats (mailbox_id, domain, message_count) VALUES (?, ?, ?)`,
+		"user2@example.com", "y.com", 1,
+	); err != nil {
+		t.Fatalf("insert domain_stats user2: %v", err)
+	}
+	if _, err := st.db.ExecContext(ctx,
+		`INSERT INTO subject_term_stats (mailbox_id, term, message_count) VALUES (?, ?, ?)`,
+		"user1@example.com", "hello", 1,
+	); err != nil {
+		t.Fatalf("insert subject_term_stats user1: %v", err)
+	}
+	if _, err := st.db.ExecContext(ctx,
+		`INSERT INTO subject_term_stats (mailbox_id, term, message_count) VALUES (?, ?, ?)`,
+		"user2@example.com", "other", 1,
+	); err != nil {
+		t.Fatalf("insert subject_term_stats user2: %v", err)
+	}
+
+	if err := st.InsertSeed(ctx, globalSeed("domain", "global.com", "vendor")); err != nil {
+		t.Fatalf("InsertSeed global: %v", err)
+	}
+	if err := st.InsertSeed(ctx, ClassificationSeed{
+		MailboxID:    "user1@example.com",
+		PatternType:  "domain",
+		PatternValue: "x.com",
+		Category:     "vendor",
+		Source:       "seed",
+		Priority:     100,
+	}); err != nil {
+		t.Fatalf("InsertSeed user1: %v", err)
+	}
+	if err := st.InsertSeed(ctx, ClassificationSeed{
+		MailboxID:    "user2@example.com",
+		PatternType:  "domain",
+		PatternValue: "y.com",
+		Category:     "vendor",
+		Source:       "seed",
+		Priority:     100,
+	}); err != nil {
+		t.Fatalf("InsertSeed user2: %v", err)
+	}
+
+	if err := st.SaveClassification(ctx, Classification{
+		MessageID:    "m1",
+		MailboxID:    "user1@example.com",
+		Category:     "vendor",
+		MatchedRule:  "domain:x.com",
+		Source:       "seed",
+		ClassifiedAt: now,
+	}); err != nil {
+		t.Fatalf("SaveClassification user1: %v", err)
+	}
+	if err := st.SaveClassification(ctx, Classification{
+		MessageID:    "m2",
+		MailboxID:    "user2@example.com",
+		Category:     "vendor",
+		MatchedRule:  "domain:y.com",
+		Source:       "seed",
+		ClassifiedAt: now,
+	}); err != nil {
+		t.Fatalf("SaveClassification user2: %v", err)
+	}
+
+	if err := st.DeleteMailbox(ctx, "work"); err != nil {
+		t.Fatalf("DeleteMailbox: %v", err)
+	}
+
+	got, err := st.GetMailbox(ctx, "user1@example.com")
+	if err != nil {
+		t.Fatalf("GetMailbox user1: %v", err)
+	}
+	if got != nil {
+		t.Fatal("expected user1 mailbox to be removed")
+	}
+
+	other, err := st.GetMailbox(ctx, "user2@example.com")
+	if err != nil {
+		t.Fatalf("GetMailbox user2: %v", err)
+	}
+	if other == nil {
+		t.Fatal("expected user2 mailbox to remain")
+	}
+
+	for _, tc := range []struct {
+		name  string
+		query string
+		arg   string
+		want  int
+	}{
+		{name: "user1 messages", query: `SELECT COUNT(*) FROM messages WHERE mailbox_id = ?`, arg: "user1@example.com", want: 0},
+		{name: "user2 messages", query: `SELECT COUNT(*) FROM messages WHERE mailbox_id = ?`, arg: "user2@example.com", want: 1},
+		{name: "user1 checkpoints", query: `SELECT COUNT(*) FROM sync_checkpoint WHERE mailbox_id = ?`, arg: "user1@example.com", want: 0},
+		{name: "user2 checkpoints", query: `SELECT COUNT(*) FROM sync_checkpoint WHERE mailbox_id = ?`, arg: "user2@example.com", want: 1},
+		{name: "user1 sender_stats", query: `SELECT COUNT(*) FROM sender_stats WHERE mailbox_id = ?`, arg: "user1@example.com", want: 0},
+		{name: "user2 sender_stats", query: `SELECT COUNT(*) FROM sender_stats WHERE mailbox_id = ?`, arg: "user2@example.com", want: 1},
+		{name: "user1 domain_stats", query: `SELECT COUNT(*) FROM domain_stats WHERE mailbox_id = ?`, arg: "user1@example.com", want: 0},
+		{name: "user2 domain_stats", query: `SELECT COUNT(*) FROM domain_stats WHERE mailbox_id = ?`, arg: "user2@example.com", want: 1},
+		{name: "user1 subject_term_stats", query: `SELECT COUNT(*) FROM subject_term_stats WHERE mailbox_id = ?`, arg: "user1@example.com", want: 0},
+		{name: "user2 subject_term_stats", query: `SELECT COUNT(*) FROM subject_term_stats WHERE mailbox_id = ?`, arg: "user2@example.com", want: 1},
+		{name: "user1 mailbox seeds", query: `SELECT COUNT(*) FROM classification_seeds WHERE mailbox_id = ?`, arg: "user1@example.com", want: 0},
+		{name: "user2 mailbox seeds", query: `SELECT COUNT(*) FROM classification_seeds WHERE mailbox_id = ?`, arg: "user2@example.com", want: 1},
+		{name: "user1 classifications", query: `SELECT COUNT(*) FROM message_classifications WHERE mailbox_id = ?`, arg: "user1@example.com", want: 0},
+		{name: "user2 classifications", query: `SELECT COUNT(*) FROM message_classifications WHERE mailbox_id = ?`, arg: "user2@example.com", want: 1},
+	} {
+		var count int
+		if err := st.db.QueryRowContext(ctx, tc.query, tc.arg).Scan(&count); err != nil {
+			t.Fatalf("%s count: %v", tc.name, err)
+		}
+		if count != tc.want {
+			t.Fatalf("%s: got %d, want %d", tc.name, count, tc.want)
+		}
+	}
+
+	var globalSeedCount int
+	if err := st.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM classification_seeds WHERE mailbox_id IS NULL`).Scan(&globalSeedCount); err != nil {
+		t.Fatalf("global seed count: %v", err)
+	}
+	if globalSeedCount != 1 {
+		t.Fatalf("global seeds: got %d, want 1", globalSeedCount)
+	}
+}
+
 func TestDeleteMailbox_NotFound(t *testing.T) {
 	st := newTestStore(t)
 	ctx := context.Background()

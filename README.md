@@ -182,7 +182,7 @@ a service account key, delegation mode is used automatically for all operations.
 # List all registered mailboxes
 inboxatlas mailbox list
 
-# Remove a mailbox (prompts for confirmation)
+# Remove a mailbox and purge its local InboxAtlas data (prompts for confirmation)
 inboxatlas mailbox remove --account user@example.com
 
 # Remove without confirmation prompt
@@ -190,7 +190,10 @@ inboxatlas mailbox remove --account user@example.com --force
 ```
 
 The `--account` flag accepts either a full email address or the alias assigned
-during authentication.
+during authentication. `mailbox remove` deletes the local InboxAtlas mailbox
+record together with synced messages, derived stats, checkpoints, mailbox-scoped
+classification seeds, and saved classifications for that mailbox only. It does
+not delete anything from the remote provider mailbox.
 
 ---
 

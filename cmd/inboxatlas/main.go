@@ -532,7 +532,7 @@ func runMailboxRemove(w io.Writer, r io.Reader, st *storage.Store, account strin
 	}
 
 	if !force {
-		_, _ = fmt.Fprintf(w, "Remove mailbox '%s'? [y/N] ", mb.ID)
+		_, _ = fmt.Fprintf(w, "Permanently purge InboxAtlas local data for mailbox '%s'? [y/N] ", mb.ID)
 		sc := bufio.NewScanner(r)
 		sc.Scan()
 		if strings.ToLower(strings.TrimSpace(sc.Text())) != "y" {
@@ -544,7 +544,7 @@ func runMailboxRemove(w io.Writer, r io.Reader, st *storage.Store, account strin
 	if err := st.DeleteMailbox(ctx, mb.ID); err != nil {
 		return err
 	}
-	_, _ = fmt.Fprintln(w, "Mailbox removed.")
+	_, _ = fmt.Fprintln(w, "Mailbox removed. InboxAtlas local data purged.")
 	return nil
 }
 
