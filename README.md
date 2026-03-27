@@ -6,6 +6,33 @@ Inbox discovery and classification platform for large mailboxes.
 
 ---
 
+## Docs
+
+- [Documentation Index](docs/index.md)
+- [Installation](docs/install.md)
+- [Usage](docs/usage.md)
+- [Troubleshooting](docs/troubleshooting.md)
+
+---
+
+## Table Of Contents
+
+- [Docs](#docs)
+- [Overview](#overview)
+- [Architecture](#architecture)
+- [Prerequisites](#prerequisites)
+- [Installation](#installation)
+- [Configuration](#configuration)
+- [Authentication](#authentication)
+- [Mailbox Management](#mailbox-management)
+- [Syncing](#syncing)
+- [Reports](#reports)
+- [Classification](#classification)
+- [Development](#development)
+- [Project Status](#project-status)
+
+---
+
 ## Overview
 
 InboxAtlas is a read-only metadata discovery system for Gmail. It analyzes large
