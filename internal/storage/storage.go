@@ -135,11 +135,21 @@ func (s *Store) migrate() error {
 	return err
 }
 
+func validateMailboxAlias(alias string) error {
+	if strings.Contains(alias, "@") {
+		return fmt.Errorf("invalid alias: contains '@'")
+	}
+	return nil
+}
+
 // CreateMailbox inserts mb into the mailboxes table. The ID is canonicalised
 // to lowercase before insertion. Returns an error if the ID or alias already
 // exists.
 func (s *Store) CreateMailbox(ctx context.Context, mb models.Mailbox) error {
 	mb.ID = strings.ToLower(mb.ID)
+	if err := validateMailboxAlias(mb.Alias); err != nil {
+		return err
+	}
 	_, err := s.db.ExecContext(ctx,
 		`INSERT INTO mailboxes (id, alias, provider, created_at) VALUES (?, ?, ?, ?)`,
 		mb.ID,
@@ -224,8 +234,15 @@ func (s *Store) DeleteMailbox(ctx context.Context, idOrAlias string) error {
 		{name: "delete checkpoints", query: `DELETE FROM sync_checkpoint WHERE mailbox_id = ?`, arg: mb.ID},
 		{name: "delete mailbox", query: `DELETE FROM mailboxes WHERE id = ?`, arg: mb.ID},
 	} {
-		if _, err := tx.ExecContext(ctx, step.query, step.arg); err != nil {
+		res, err := tx.ExecContext(ctx, step.query, step.arg)
+		if err != nil {
 			return fmt.Errorf("%s: %w", step.name, err)
+		}
+		if step.name == "delete mailbox" {
+			n, _ := res.RowsAffected()
+			if n == 0 {
+				return fmt.Errorf("delete mailbox: mailbox %q disappeared before final delete", mb.ID)
+			}
 		}
 	}
 
@@ -257,6 +274,9 @@ func (s *Store) UpdateLastSynced(ctx context.Context, id string, t time.Time) er
 // UpdateMailboxAlias sets the alias for the mailbox with the given canonical
 // email ID.
 func (s *Store) UpdateMailboxAlias(ctx context.Context, id, alias string) error {
+	if err := validateMailboxAlias(alias); err != nil {
+		return err
+	}
 	res, err := s.db.ExecContext(ctx,
 		`UPDATE mailboxes SET alias = ? WHERE id = ?`,
 		nullableString(alias),

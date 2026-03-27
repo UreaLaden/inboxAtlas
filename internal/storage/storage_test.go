@@ -149,6 +149,22 @@ func TestCreateMailbox_DuplicateAlias(t *testing.T) {
 	}
 }
 
+func TestCreateMailbox_InvalidAliasContainsAt(t *testing.T) {
+	st := newTestStore(t)
+
+	err := st.CreateMailbox(context.Background(), models.Mailbox{
+		ID:       "user@company.com",
+		Alias:    "work@alias",
+		Provider: "gmail",
+	})
+	if err == nil {
+		t.Fatal("expected invalid alias error, got nil")
+	}
+	if !strings.Contains(err.Error(), "invalid alias") {
+		t.Fatalf("expected invalid alias error, got %v", err)
+	}
+}
+
 func TestCreateMailbox_NoAlias(t *testing.T) {
 	st := newTestStore(t)
 	ctx := context.Background()
@@ -421,6 +437,33 @@ func TestDeleteMailbox_PurgesMailboxScopedStateAndPreservesGlobalSeeds(t *testin
 	}
 }
 
+func TestDeleteMailbox_FinalDeleteRowsAffectedCheck(t *testing.T) {
+	st := newTestStore(t)
+	ctx := context.Background()
+
+	if err := st.CreateMailbox(ctx, models.Mailbox{ID: "user@company.com", Provider: "gmail"}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := st.db.ExecContext(ctx, `
+		CREATE TRIGGER ignore_mailbox_delete
+		BEFORE DELETE ON mailboxes
+		BEGIN
+			DELETE FROM mailboxes WHERE id = OLD.id;
+			SELECT RAISE(IGNORE);
+		END;
+	`); err != nil {
+		t.Fatalf("create trigger: %v", err)
+	}
+
+	err := st.DeleteMailbox(ctx, "user@company.com")
+	if err == nil {
+		t.Fatal("expected final delete rows-affected error, got nil")
+	}
+	if !strings.Contains(err.Error(), "disappeared before final delete") {
+		t.Fatalf("expected final delete validation error, got %v", err)
+	}
+}
+
 func TestDeleteMailbox_NotFound(t *testing.T) {
 	st := newTestStore(t)
 	ctx := context.Background()
@@ -453,6 +496,23 @@ func TestUpdateLastSynced(t *testing.T) {
 	}
 	if !got.LastSyncedAt.Equal(now) {
 		t.Errorf("LastSyncedAt: got %v, want %v", got.LastSyncedAt, now)
+	}
+}
+
+func TestUpdateMailboxAlias_InvalidAliasContainsAt(t *testing.T) {
+	st := newTestStore(t)
+	ctx := context.Background()
+
+	if err := st.CreateMailbox(ctx, models.Mailbox{ID: "user@company.com", Provider: "gmail"}); err != nil {
+		t.Fatal(err)
+	}
+
+	err := st.UpdateMailboxAlias(ctx, "user@company.com", "work@alias")
+	if err == nil {
+		t.Fatal("expected invalid alias error, got nil")
+	}
+	if !strings.Contains(err.Error(), "invalid alias") {
+		t.Fatalf("expected invalid alias error, got %v", err)
 	}
 }
 
