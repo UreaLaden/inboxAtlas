@@ -4,6 +4,7 @@ package main
 import (
 	"bufio"
 	"context"
+	"encoding/json"
 	"fmt"
 	"io"
 	"log/slog"
@@ -19,6 +20,7 @@ import (
 	"github.com/UreaLaden/inboxatlas/internal/analysis"
 	"github.com/UreaLaden/inboxatlas/internal/auth"
 	"github.com/UreaLaden/inboxatlas/internal/config"
+	"github.com/UreaLaden/inboxatlas/internal/engine"
 	"github.com/UreaLaden/inboxatlas/internal/ingestion"
 	gmailprovider "github.com/UreaLaden/inboxatlas/internal/providers/gmail"
 	"github.com/UreaLaden/inboxatlas/internal/storage"
@@ -92,6 +94,7 @@ func buildRoot(cfg config.Config) *cobra.Command {
 	root.AddCommand(buildMailboxCmd(cfg))
 	root.AddCommand(buildAuthCmd(cfg))
 	root.AddCommand(buildSyncCmd(cfg))
+	root.AddCommand(buildClassifyCmd(cfg))
 	root.AddCommand(buildReportCmd(cfg))
 
 	return root
@@ -542,6 +545,150 @@ func runMailboxRemove(w io.Writer, r io.Reader, st *storage.Store, account strin
 		return err
 	}
 	_, _ = fmt.Fprintln(w, "Mailbox removed.")
+	return nil
+}
+
+// buildClassifyCmd returns the "classify" subcommand group.
+func buildClassifyCmd(cfg config.Config) *cobra.Command {
+	cmd := &cobra.Command{
+		Use:   "classify",
+		Short: "Run and manage mailbox classification workflows",
+	}
+	cmd.AddCommand(buildClassifyRunCmd(cfg))
+	cmd.AddCommand(buildClassifySuggestionsCmd(cfg))
+	cmd.AddCommand(buildClassifyPromoteCmd(cfg))
+	return cmd
+}
+
+// buildClassifyRunCmd returns the "classify run" subcommand.
+func buildClassifyRunCmd(cfg config.Config) *cobra.Command {
+	var account string
+	cmd := &cobra.Command{
+		Use:   "run",
+		Short: "Run mailbox-scoped classification for one mailbox",
+		RunE: func(cmd *cobra.Command, _ []string) error {
+			return runClassifyRun(cmd.Context(), cmd.OutOrStdout(), cfg, account)
+		},
+	}
+	cmd.Flags().StringVar(&account, "account", "", "mailbox email or alias")
+	_ = cmd.MarkFlagRequired("account")
+	return cmd
+}
+
+// buildClassifySuggestionsCmd returns the "classify suggestions" subcommand.
+func buildClassifySuggestionsCmd(cfg config.Config) *cobra.Command {
+	var account string
+	var format string
+	cmd := &cobra.Command{
+		Use:   "suggestions",
+		Short: "Show mailbox bootstrap classification suggestions",
+		RunE: func(cmd *cobra.Command, _ []string) error {
+			return runClassifySuggestions(cmd.Context(), cmd.OutOrStdout(), cfg, account, format)
+		},
+	}
+	cmd.Flags().StringVar(&account, "account", "", "mailbox email or alias")
+	cmd.Flags().StringVar(&format, "format", "table", "output format: table, json")
+	_ = cmd.MarkFlagRequired("account")
+	return cmd
+}
+
+// buildClassifyPromoteCmd returns the "classify promote" subcommand.
+func buildClassifyPromoteCmd(cfg config.Config) *cobra.Command {
+	var account string
+	var patternType string
+	var patternValue string
+	var category string
+	var priority int
+
+	cmd := &cobra.Command{
+		Use:   "promote",
+		Short: "Promote a mailbox bootstrap suggestion into active mailbox-scoped seeds",
+		RunE: func(cmd *cobra.Command, _ []string) error {
+			return runClassifyPromote(cmd.Context(), cmd.OutOrStdout(), cfg, account, engine.PromoteSuggestionRequest{
+				PatternType:  patternType,
+				PatternValue: patternValue,
+				Category:     category,
+				Priority:     priority,
+				HasPriority:  cmd.Flags().Changed("priority"),
+			})
+		},
+	}
+	cmd.Flags().StringVar(&account, "account", "", "mailbox email or alias")
+	cmd.Flags().StringVar(&patternType, "pattern-type", "", "suggestion pattern type")
+	cmd.Flags().StringVar(&patternValue, "pattern-value", "", "suggestion pattern value")
+	cmd.Flags().StringVar(&category, "category", "", "suggestion category")
+	cmd.Flags().IntVar(&priority, "priority", 0, "override promoted seed priority")
+	_ = cmd.MarkFlagRequired("account")
+	_ = cmd.MarkFlagRequired("pattern-type")
+	_ = cmd.MarkFlagRequired("pattern-value")
+	_ = cmd.MarkFlagRequired("category")
+	return cmd
+}
+
+func validateClassifyFormat(f string) (string, error) {
+	switch f {
+	case "table", "json":
+		return f, nil
+	default:
+		return "", fmt.Errorf("unknown format %q — valid values: table, json", f)
+	}
+}
+
+// runClassifyRun executes mailbox-scoped classification for one mailbox.
+func runClassifyRun(ctx context.Context, w io.Writer, cfg config.Config, account string) error {
+	result, err := engine.RunClassify(ctx, cfg, account)
+	if err != nil {
+		return err
+	}
+	_, _ = fmt.Fprintf(w, "Classified %d messages for %s.\n", result.MessagesProcessed, result.MailboxID)
+	return nil
+}
+
+// runClassifySuggestions renders mailbox bootstrap suggestions for one mailbox.
+func runClassifySuggestions(ctx context.Context, w io.Writer, cfg config.Config, account, format string) error {
+	f, err := validateClassifyFormat(format)
+	if err != nil {
+		return err
+	}
+
+	result, err := engine.ListClassifySuggestions(ctx, cfg, account)
+	if err != nil {
+		return err
+	}
+
+	if f == "json" {
+		enc := json.NewEncoder(w)
+		enc.SetIndent("", "  ")
+		return enc.Encode(result.Suggestions)
+	}
+
+	if len(result.Suggestions) == 0 {
+		_, _ = fmt.Fprintf(w, "No mailbox bootstrap suggestions for %s.\n", result.MailboxID)
+		return nil
+	}
+
+	tw := tabwriter.NewWriter(w, 0, 0, 3, ' ', 0)
+	_, _ = fmt.Fprintln(tw, "PATTERN TYPE\tPATTERN VALUE\tCATEGORY\tSOURCE\tPRIORITY")
+	for _, suggestion := range result.Suggestions {
+		_, _ = fmt.Fprintf(tw, "%s\t%s\t%s\t%s\t%d\n", suggestion.PatternType, suggestion.PatternValue, suggestion.Category, suggestion.Source, suggestion.Priority)
+	}
+	return tw.Flush()
+}
+
+// runClassifyPromote promotes a reviewed mailbox bootstrap suggestion into the
+// active mailbox-scoped seed set.
+func runClassifyPromote(ctx context.Context, w io.Writer, cfg config.Config, account string, req engine.PromoteSuggestionRequest) error {
+	result, err := engine.PromoteClassifySuggestion(ctx, cfg, account, req)
+	if err != nil {
+		return err
+	}
+
+	if result.Created {
+		_, _ = fmt.Fprintf(w, "Promoted suggestion for %s: %s:%s -> %s (priority %d).\n", result.MailboxID, result.PatternType, result.PatternValue, result.Category, result.Priority)
+		return nil
+	}
+
+	_, _ = fmt.Fprintf(w, "Suggestion already promoted for %s: %s:%s -> %s (priority %d).\n", result.MailboxID, result.PatternType, result.PatternValue, result.Category, result.Priority)
 	return nil
 }
 

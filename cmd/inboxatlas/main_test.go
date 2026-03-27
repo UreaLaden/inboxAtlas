@@ -15,6 +15,7 @@ import (
 
 	"github.com/UreaLaden/inboxatlas/internal/auth"
 	"github.com/UreaLaden/inboxatlas/internal/config"
+	"github.com/UreaLaden/inboxatlas/internal/engine"
 	"github.com/UreaLaden/inboxatlas/internal/ingestion"
 	"github.com/UreaLaden/inboxatlas/internal/storage"
 	"github.com/UreaLaden/inboxatlas/pkg/models"
@@ -55,6 +56,14 @@ func TestBuildRoot_HasSubcommands(t *testing.T) {
 		names[cmd.Name()] = true
 	}
 	for _, want := range []string{"version", "config", "mailbox", "auth", "sync"} {
+		if want == "" {
+			continue
+		}
+		if !names[want] {
+			t.Errorf("expected subcommand %q to be registered", want)
+		}
+	}
+	for _, want := range []string{"report", "classify"} {
 		if !names[want] {
 			t.Errorf("expected subcommand %q to be registered", want)
 		}
@@ -1152,6 +1161,29 @@ func seedReportData(t *testing.T, dbPath string) {
 	}
 }
 
+func seedClassifyData(t *testing.T, dbPath string) {
+	t.Helper()
+	st, err := storage.Open(dbPath)
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	defer func() { _ = st.Close() }()
+	ctx := context.Background()
+	if err := st.CreateMailbox(ctx, models.Mailbox{ID: "user@example.com", Provider: "gmail"}); err != nil {
+		t.Fatalf("CreateMailbox: %v", err)
+	}
+	if err := st.UpsertMessage(ctx, models.MessageMeta{
+		ProviderID: "c1",
+		MailboxID:  "user@example.com",
+		Provider:   "gmail",
+		FromEmail:  "groupupdates@facebookmail.com",
+		Domain:     "facebookmail.com",
+		ReceivedAt: time.Date(2025, 2, 4, 0, 0, 0, 0, time.UTC),
+	}); err != nil {
+		t.Fatalf("UpsertMessage: %v", err)
+	}
+}
+
 // --- buildReportCmd ---
 
 func TestBuildReportCmd_HasSubcommands(t *testing.T) {
@@ -1175,6 +1207,186 @@ func TestBuildRoot_HasReportCommand(t *testing.T) {
 	}
 	if !names["report"] {
 		t.Error("expected 'report' subcommand on root")
+	}
+	if !names["classify"] {
+		t.Error("expected 'classify' subcommand on root")
+	}
+}
+
+func TestBuildClassifyCmd_HasSubcommands(t *testing.T) {
+	cmd := buildClassifyCmd(config.Default())
+	names := make(map[string]bool)
+	for _, sub := range cmd.Commands() {
+		names[sub.Name()] = true
+	}
+	for _, want := range []string{"run", "suggestions", "promote"} {
+		if !names[want] {
+			t.Errorf("expected subcommand %q under classify", want)
+		}
+	}
+}
+
+func TestRunClassifyRun_EmptyMailbox(t *testing.T) {
+	dir := t.TempDir()
+	cfg := config.Default()
+	cfg.StoragePath = filepath.Join(dir, "test.db")
+
+	st, err := storage.Open(cfg.StoragePath)
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	if err := st.CreateMailbox(context.Background(), models.Mailbox{ID: "user@example.com", Provider: "gmail"}); err != nil {
+		t.Fatalf("CreateMailbox: %v", err)
+	}
+	_ = st.Close()
+
+	err = runClassifyRun(context.Background(), io.Discard, cfg, "user@example.com")
+	if err == nil {
+		t.Fatal("expected empty mailbox error")
+	}
+}
+
+func TestRunClassifyRun_Success(t *testing.T) {
+	dir := t.TempDir()
+	cfg := config.Default()
+	cfg.StoragePath = filepath.Join(dir, "test.db")
+	seedClassifyData(t, cfg.StoragePath)
+
+	var buf bytes.Buffer
+	if err := runClassifyRun(context.Background(), &buf, cfg, "user@example.com"); err != nil {
+		t.Fatalf("runClassifyRun: %v", err)
+	}
+	if !strings.Contains(buf.String(), "Classified 1 messages for user@example.com.") {
+		t.Fatalf("unexpected output: %q", buf.String())
+	}
+
+	st, err := storage.Open(cfg.StoragePath)
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	defer func() { _ = st.Close() }()
+
+	got, err := st.GetClassification(context.Background(), "c1", "user@example.com")
+	if err != nil {
+		t.Fatalf("GetClassification: %v", err)
+	}
+	if got == nil || got.Category != "social" {
+		t.Fatalf("expected social classification, got %+v", got)
+	}
+}
+
+func TestRunClassifySuggestions_Table(t *testing.T) {
+	dir := t.TempDir()
+	cfg := config.Default()
+	cfg.StoragePath = filepath.Join(dir, "test.db")
+
+	st, err := storage.Open(cfg.StoragePath)
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	if err := st.CreateMailbox(context.Background(), models.Mailbox{ID: "user@example.com", Provider: "gmail"}); err != nil {
+		t.Fatalf("CreateMailbox: %v", err)
+	}
+	_ = st.Close()
+
+	var buf bytes.Buffer
+	if err := runClassifySuggestions(context.Background(), &buf, cfg, "user@example.com", "table"); err != nil {
+		t.Fatalf("runClassifySuggestions: %v", err)
+	}
+	if !strings.Contains(buf.String(), "PATTERN TYPE") || !strings.Contains(buf.String(), "healthymd.com") {
+		t.Fatalf("unexpected table output: %q", buf.String())
+	}
+}
+
+func TestRunClassifySuggestions_JSON(t *testing.T) {
+	dir := t.TempDir()
+	cfg := config.Default()
+	cfg.StoragePath = filepath.Join(dir, "test.db")
+
+	st, err := storage.Open(cfg.StoragePath)
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	if err := st.CreateMailbox(context.Background(), models.Mailbox{ID: "user@example.com", Provider: "gmail"}); err != nil {
+		t.Fatalf("CreateMailbox: %v", err)
+	}
+	_ = st.Close()
+
+	var buf bytes.Buffer
+	if err := runClassifySuggestions(context.Background(), &buf, cfg, "user@example.com", "json"); err != nil {
+		t.Fatalf("runClassifySuggestions: %v", err)
+	}
+	if !strings.Contains(buf.String(), "\"pattern_value\": \"healthymd.com\"") {
+		t.Fatalf("unexpected json output: %q", buf.String())
+	}
+}
+
+func TestRunClassifyPromote_SuccessAndIdempotent(t *testing.T) {
+	dir := t.TempDir()
+	cfg := config.Default()
+	cfg.StoragePath = filepath.Join(dir, "test.db")
+
+	st, err := storage.Open(cfg.StoragePath)
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	if err := st.CreateMailbox(context.Background(), models.Mailbox{ID: "user@example.com", Provider: "gmail"}); err != nil {
+		t.Fatalf("CreateMailbox: %v", err)
+	}
+	_ = st.Close()
+
+	req := engine.PromoteSuggestionRequest{
+		PatternType:  "domain",
+		PatternValue: "healthymd.com",
+		Category:     "client",
+	}
+
+	var first bytes.Buffer
+	if err := runClassifyPromote(context.Background(), &first, cfg, "user@example.com", req); err != nil {
+		t.Fatalf("first runClassifyPromote: %v", err)
+	}
+	if !strings.Contains(first.String(), "Promoted suggestion") {
+		t.Fatalf("unexpected first output: %q", first.String())
+	}
+
+	var second bytes.Buffer
+	if err := runClassifyPromote(context.Background(), &second, cfg, "user@example.com", req); err != nil {
+		t.Fatalf("second runClassifyPromote: %v", err)
+	}
+	if !strings.Contains(second.String(), "already promoted") {
+		t.Fatalf("unexpected second output: %q", second.String())
+	}
+}
+
+func TestRunClassifyPromote_InvalidSuggestion(t *testing.T) {
+	dir := t.TempDir()
+	cfg := config.Default()
+	cfg.StoragePath = filepath.Join(dir, "test.db")
+
+	st, err := storage.Open(cfg.StoragePath)
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	if err := st.CreateMailbox(context.Background(), models.Mailbox{ID: "user@example.com", Provider: "gmail"}); err != nil {
+		t.Fatalf("CreateMailbox: %v", err)
+	}
+	_ = st.Close()
+
+	err = runClassifyPromote(context.Background(), io.Discard, cfg, "user@example.com", engine.PromoteSuggestionRequest{
+		PatternType:  "domain",
+		PatternValue: "not-a-suggestion.com",
+		Category:     "vendor",
+	})
+	if err == nil {
+		t.Fatal("expected invalid suggestion error")
+	}
+}
+
+func TestBuildClassifyPromoteCmd_RequiresFlags(t *testing.T) {
+	cmd := buildClassifyPromoteCmd(config.Default())
+	cmd.SetArgs([]string{"--account", "user@example.com"})
+	if err := cmd.Execute(); err == nil {
+		t.Fatal("expected missing flag error")
 	}
 }
 

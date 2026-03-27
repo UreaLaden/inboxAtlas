@@ -1040,6 +1040,44 @@ func TestQuerySubjects_NoMessages(t *testing.T) {
 	}
 }
 
+func TestListMessageMetaByMailbox_ScopedOrdered(t *testing.T) {
+	st := newTestStore(t)
+	createTestMailbox(t, st, "user1@example.com")
+	createTestMailbox(t, st, "user2@example.com")
+
+	now := time.Date(2025, 1, 1, 0, 0, 0, 0, time.UTC)
+	seedMessage(t, st, "m2", "user1@example.com", "b@example.com", "B", "example.com", "Second", now.Add(time.Hour))
+	seedMessage(t, st, "m1", "user1@example.com", "a@example.com", "A", "example.com", "First", now)
+	seedMessage(t, st, "m3", "user2@example.com", "c@example.com", "C", "example.com", "Other", now)
+
+	messages, err := st.ListMessageMetaByMailbox(context.Background(), "user1@example.com")
+	if err != nil {
+		t.Fatalf("ListMessageMetaByMailbox: %v", err)
+	}
+	if len(messages) != 2 {
+		t.Fatalf("expected 2 messages, got %d", len(messages))
+	}
+	if messages[0].ProviderID != "m1" || messages[1].ProviderID != "m2" {
+		t.Fatalf("unexpected message order: %+v", messages)
+	}
+	if messages[0].MailboxID != "user1@example.com" || messages[1].MailboxID != "user1@example.com" {
+		t.Fatalf("expected mailbox scoping, got %+v", messages)
+	}
+}
+
+func TestListMessageMetaByMailbox_NoMessages(t *testing.T) {
+	st := newTestStore(t)
+	createTestMailbox(t, st, "user@example.com")
+
+	messages, err := st.ListMessageMetaByMailbox(context.Background(), "user@example.com")
+	if err != nil {
+		t.Fatalf("ListMessageMetaByMailbox: %v", err)
+	}
+	if len(messages) != 0 {
+		t.Fatalf("expected 0 messages, got %d", len(messages))
+	}
+}
+
 // --- ClassificationSeed CRUD ---
 
 func globalSeed(patternType, patternValue, category string) ClassificationSeed {
