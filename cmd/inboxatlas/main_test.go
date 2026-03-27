@@ -1551,6 +1551,80 @@ func TestRunReportExport_AllWritesDeterministicArtifacts(t *testing.T) {
 	}
 }
 
+func TestRunReportExport_AllDoesNotLeavePartialOutputsWhenPDFFails(t *testing.T) {
+	outputDir := t.TempDir()
+	reportsDir := filepath.Join("..", "..", "internal", "export", "testdata", "valid")
+	summaryPath := filepath.Join(reportsDir, "summary.md")
+
+	previous := reportExportPDFRenderer
+	reportExportPDFRenderer = reportExportPDFStub{err: errors.New("renderer missing")}
+	t.Cleanup(func() { reportExportPDFRenderer = previous })
+
+	err := runReportExport(context.Background(), io.Discard, reportExportOptions{
+		reportsDir:  reportsDir,
+		outputDir:   outputDir,
+		format:      "all",
+		ownerEmail:  "owner@company.com",
+		summaryFile: summaryPath,
+	})
+	if err == nil {
+		t.Fatal("expected renderer failure")
+	}
+	entries, readErr := os.ReadDir(outputDir)
+	if readErr != nil {
+		t.Fatalf("ReadDir: %v", readErr)
+	}
+	if len(entries) != 0 {
+		t.Fatalf("expected no partial output files, found %d", len(entries))
+	}
+}
+
+func TestRunReportExport_InvalidReportsDirLeavesNoOutputs(t *testing.T) {
+	outputDir := t.TempDir()
+	err := runReportExport(context.Background(), io.Discard, reportExportOptions{
+		reportsDir: filepath.Join(outputDir, "missing"),
+		outputDir:  outputDir,
+		format:     "excel",
+	})
+	if err == nil {
+		t.Fatal("expected invalid reports dir error")
+	}
+	entries, readErr := os.ReadDir(outputDir)
+	if readErr != nil {
+		t.Fatalf("ReadDir: %v", readErr)
+	}
+	if len(entries) != 0 {
+		t.Fatalf("expected no output files, found %d", len(entries))
+	}
+}
+
+func TestRunReportExport_MalformedSummaryLeavesNoOutputs(t *testing.T) {
+	outputDir := t.TempDir()
+	reportsDir := filepath.Join("..", "..", "internal", "export", "testdata", "valid")
+	badSummary := filepath.Join(outputDir, "bad-summary.md")
+	if err := os.WriteFile(badSummary, []byte("# Inbox Snapshot\n\n## Key Takeaway\nOnly one section.\n"), 0o600); err != nil {
+		t.Fatalf("WriteFile: %v", err)
+	}
+
+	err := runReportExport(context.Background(), io.Discard, reportExportOptions{
+		reportsDir:  reportsDir,
+		outputDir:   outputDir,
+		format:      "html",
+		ownerEmail:  "owner@company.com",
+		summaryFile: badSummary,
+	})
+	if err == nil {
+		t.Fatal("expected malformed summary error")
+	}
+	entries, readErr := os.ReadDir(outputDir)
+	if readErr != nil {
+		t.Fatalf("ReadDir: %v", readErr)
+	}
+	if len(entries) != 1 || entries[0].Name() != "bad-summary.md" {
+		t.Fatalf("expected only fixture file to remain, found %+v", entries)
+	}
+}
+
 func TestBuildReportExportCmd_RunE_RequiresFlags(t *testing.T) {
 	cmd := buildReportExportCmd(config.Default())
 	cmd.SetArgs([]string{})
