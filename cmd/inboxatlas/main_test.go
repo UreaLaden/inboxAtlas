@@ -3,6 +3,7 @@ package main
 import (
 	"bytes"
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -16,6 +17,7 @@ import (
 	"github.com/UreaLaden/inboxatlas/internal/auth"
 	"github.com/UreaLaden/inboxatlas/internal/config"
 	"github.com/UreaLaden/inboxatlas/internal/engine"
+	exportpkg "github.com/UreaLaden/inboxatlas/internal/export"
 	"github.com/UreaLaden/inboxatlas/internal/ingestion"
 	"github.com/UreaLaden/inboxatlas/internal/storage"
 	"github.com/UreaLaden/inboxatlas/pkg/models"
@@ -1236,7 +1238,7 @@ func TestBuildReportCmd_HasSubcommands(t *testing.T) {
 	for _, sub := range cmd.Commands() {
 		names[sub.Name()] = true
 	}
-	for _, want := range []string{"domains", "senders", "subjects", "volume"} {
+	for _, want := range []string{"export", "domains", "senders", "subjects", "volume"} {
 		if !names[want] {
 			t.Errorf("expected subcommand %q under report", want)
 		}
@@ -1431,6 +1433,159 @@ func TestBuildClassifyPromoteCmd_RequiresFlags(t *testing.T) {
 	cmd.SetArgs([]string{"--account", "user@example.com"})
 	if err := cmd.Execute(); err == nil {
 		t.Fatal("expected missing flag error")
+	}
+}
+
+func TestRunReportExport_ExcelWritesDeterministicFilename(t *testing.T) {
+	outputDir := t.TempDir()
+	reportsDir := filepath.Join("..", "..", "internal", "export", "testdata", "valid")
+
+	var buf bytes.Buffer
+	if err := runReportExport(context.Background(), &buf, reportExportOptions{
+		reportsDir: reportsDir,
+		outputDir:  outputDir,
+		format:     "excel",
+		ownerEmail: "owner@company.com",
+	}); err != nil {
+		t.Fatalf("runReportExport: %v", err)
+	}
+
+	wantPath := filepath.Join(outputDir, "inbox-report-owner-company-com-2025-01-to-2025-03.xlsx")
+	data, err := os.ReadFile(wantPath)
+	if err != nil {
+		t.Fatalf("ReadFile: %v", err)
+	}
+	if len(data) == 0 {
+		t.Fatal("expected workbook bytes")
+	}
+	if !strings.Contains(buf.String(), wantPath) {
+		t.Fatalf("expected output to mention %s, got %q", wantPath, buf.String())
+	}
+}
+
+func TestRunReportExport_HTMLRequiresSummaryFile(t *testing.T) {
+	err := runReportExport(context.Background(), io.Discard, reportExportOptions{
+		reportsDir: filepath.Join("..", "..", "internal", "export", "testdata", "valid"),
+		outputDir:  t.TempDir(),
+		format:     "html",
+		ownerEmail: "owner@company.com",
+	})
+	if err == nil {
+		t.Fatal("expected summary file requirement error")
+	}
+	if !strings.Contains(err.Error(), "--summary-file is required") {
+		t.Fatalf("unexpected error: %v", err)
+	}
+}
+
+func TestRunReportExport_HTMLWritesSnapshot(t *testing.T) {
+	outputDir := t.TempDir()
+	reportsDir := filepath.Join("..", "..", "internal", "export", "testdata", "valid")
+	summaryPath := filepath.Join(reportsDir, "summary.md")
+
+	var buf bytes.Buffer
+	if err := runReportExport(context.Background(), &buf, reportExportOptions{
+		reportsDir:  reportsDir,
+		outputDir:   outputDir,
+		format:      "html",
+		ownerEmail:  "owner@company.com",
+		summaryFile: summaryPath,
+	}); err != nil {
+		t.Fatalf("runReportExport: %v", err)
+	}
+
+	wantPath := filepath.Join(outputDir, "inbox-report-owner-company-com-2025-01-to-2025-03.html")
+	data, err := os.ReadFile(wantPath)
+	if err != nil {
+		t.Fatalf("ReadFile: %v", err)
+	}
+	if !strings.Contains(string(data), "<h2>Bottom Line</h2>") {
+		t.Fatalf("expected snapshot html, got %q", string(data))
+	}
+}
+
+func TestRunReportExport_PDFUnavailable(t *testing.T) {
+	previous := reportExportPDFRenderer
+	reportExportPDFRenderer = nil
+	t.Cleanup(func() { reportExportPDFRenderer = previous })
+
+	err := runReportExport(context.Background(), io.Discard, reportExportOptions{
+		reportsDir:  filepath.Join("..", "..", "internal", "export", "testdata", "valid"),
+		outputDir:   t.TempDir(),
+		format:      "pdf",
+		ownerEmail:  "owner@company.com",
+		summaryFile: filepath.Join("..", "..", "internal", "export", "testdata", "valid", "summary.md"),
+	})
+	if err == nil {
+		t.Fatal("expected pdf unavailable error")
+	}
+	if !errors.Is(err, exportpkg.ErrPDFRendererUnavailable) {
+		t.Fatalf("expected ErrPDFRendererUnavailable, got %v", err)
+	}
+}
+
+func TestRunReportExport_AllWritesDeterministicArtifacts(t *testing.T) {
+	outputDir := t.TempDir()
+	reportsDir := filepath.Join("..", "..", "internal", "export", "testdata", "valid")
+	summaryPath := filepath.Join(reportsDir, "summary.md")
+
+	previous := reportExportPDFRenderer
+	reportExportPDFRenderer = reportExportPDFStub{returnBytes: []byte("%PDF-1.7")}
+	t.Cleanup(func() { reportExportPDFRenderer = previous })
+
+	if err := runReportExport(context.Background(), io.Discard, reportExportOptions{
+		reportsDir:  reportsDir,
+		outputDir:   outputDir,
+		format:      "all",
+		ownerEmail:  "owner@company.com",
+		summaryFile: summaryPath,
+	}); err != nil {
+		t.Fatalf("runReportExport: %v", err)
+	}
+
+	for _, suffix := range []string{".xlsx", ".html", ".pdf"} {
+		path := filepath.Join(outputDir, "inbox-report-owner-company-com-2025-01-to-2025-03"+suffix)
+		if _, err := os.Stat(path); err != nil {
+			t.Fatalf("expected %s to exist: %v", path, err)
+		}
+	}
+}
+
+func TestBuildReportExportCmd_RunE_RequiresFlags(t *testing.T) {
+	cmd := buildReportExportCmd(config.Default())
+	cmd.SetArgs([]string{})
+	if err := cmd.Execute(); err == nil {
+		t.Fatal("expected missing required flags error")
+	}
+}
+
+func TestValidateExportFormat(t *testing.T) {
+	for _, format := range []string{"excel", "html", "pdf", "all"} {
+		got, err := validateExportFormat(format)
+		if err != nil {
+			t.Fatalf("validateExportFormat(%q): %v", format, err)
+		}
+		if got != format {
+			t.Fatalf("validateExportFormat(%q): got %q", format, got)
+		}
+	}
+	if _, err := validateExportFormat("zip"); err == nil {
+		t.Fatal("expected invalid format error")
+	}
+}
+
+func TestExportBaseName_Fallbacks(t *testing.T) {
+	model := &exportpkg.Model{
+		Owner: exportpkg.Owner{Domain: "Example.COM"},
+	}
+	if got := exportBaseName(model); got != "inbox-report-example-com-unknown-period" {
+		t.Fatalf("exportBaseName fallback: got %q", got)
+	}
+	if got := sanitizeExportPart("  a+b@example.com "); got != "a-b-example-com" {
+		t.Fatalf("sanitizeExportPart: got %q", got)
+	}
+	if got := sanitizeExportPart("!!!"); got != "unknown" {
+		t.Fatalf("sanitizeExportPart unknown: got %q", got)
 	}
 }
 
@@ -1886,4 +2041,16 @@ func TestBuildReportVolumeCmd_RunE_OutputFile(t *testing.T) {
 	if !strings.Contains(string(data), "2025-01") {
 		t.Fatalf("expected file output to contain volume data, got %q", string(data))
 	}
+}
+
+type reportExportPDFStub struct {
+	returnBytes []byte
+	err         error
+}
+
+func (s reportExportPDFStub) RenderPDF(_ []byte) ([]byte, error) {
+	if s.err != nil {
+		return nil, s.err
+	}
+	return append([]byte(nil), s.returnBytes...), nil
 }

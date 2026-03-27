@@ -225,6 +225,8 @@ inboxatlas report domains  --account <id|alias> [--format table|csv|json] [--lim
 inboxatlas report senders  --account <id|alias> [--format table|csv|json] [--limit 25]
 inboxatlas report subjects --account <id|alias> [--format table|csv|json] [--limit 25]
 inboxatlas report volume   --account <id|alias> [--format table|csv|json]
+inboxatlas report export   --reports-dir <dir> --output-dir <dir> [--format excel|html|pdf|all]
+                           [--owner-email <email>] [--owner-domain <domain>] [--summary-file <path>]
 ```
 
 | Flag | Default | Description |
@@ -246,6 +248,14 @@ slack.com            73
 google.com           61
 atlassian.com        45
 ```
+
+`report export` packages artifacts from an existing reports directory rather
+than querying SQLite directly. `excel` needs only the report CSV inputs.
+`html`, `pdf`, and `all` also require `--summary-file` so snapshot rendering
+uses explicit narrative sections. Output filenames are deterministic and use the
+pattern `inbox-report-<owner>-<period>.<ext>` inside the selected output
+directory. PDF export currently depends on a renderer adapter and will fail
+explicitly until a concrete PDF engine is configured in a later feature.
 
 ---
 
