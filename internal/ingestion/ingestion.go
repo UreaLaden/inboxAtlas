@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"math"
 	"time"
 
 	"github.com/UreaLaden/inboxatlas/internal/normalization"
@@ -30,6 +31,7 @@ var updateLastSynced = func(ctx context.Context, st *storage.Store, mailboxID st
 
 // Options holds all parameters for a sync run.
 // RequestDelay 0 defaults to 100ms. MaxRetries 0 defaults to 5.
+// MessageLimit 0 means no limit.
 type Options struct {
 	MailboxID    string // canonical lowercased mailbox email
 	Provider     string // e.g. "gmail"
@@ -38,6 +40,7 @@ type Options struct {
 	Stdout       io.Writer     // progress output; must not be nil
 	RequestDelay time.Duration // per GetMessageMeta delay floor
 	MaxRetries   int           // max retries on retryable errors; 0 → 5
+	MessageLimit int           // stop after this many messages and complete; 0 = unlimited
 }
 
 // Run executes a full synchronous sync for the mailbox described by opts.
@@ -102,6 +105,7 @@ func Run(ctx context.Context, opts Options) error {
 		}
 
 		// Fetch, normalize, and store each message.
+		limitReached := false
 		for _, id := range ids {
 			meta, err := getMetaWithBackoff(ctx, opts.MailProvider, id, opts.MaxRetries)
 			if err != nil {
@@ -121,11 +125,21 @@ func Run(ctx context.Context, opts Options) error {
 			if err := sleepCtx(ctx, opts.RequestDelay); err != nil {
 				return failInterrupted(opts, pageCursor, messagesSynced, startedAt, "%w", err)
 			}
+
+			if opts.MessageLimit > 0 && messagesSynced >= opts.MessageLimit {
+				limitReached = true
+				break
+			}
 		}
 
 		// Progress output after each page.
 		_, _ = fmt.Fprintf(opts.Stdout, "Page %d: %d messages (total: %d)\n",
 			pageNum, len(ids), messagesSynced)
+
+		if limitReached {
+			_, _ = fmt.Fprintf(opts.Stdout, "Message limit reached (%d). Completing sync.\n", opts.MessageLimit)
+			break
+		}
 
 		// Advance the cursor and save checkpoint.
 		pageCursor = nextToken
@@ -156,6 +170,10 @@ func Run(ctx context.Context, opts Options) error {
 		return failInterrupted(opts, pageCursor, messagesSynced, startedAt, "update last synced: %w", err)
 	}
 
+	if err := rebuildStats(ctx, opts); err != nil {
+		return failInterrupted(opts, pageCursor, messagesSynced, startedAt, "rebuild stats: %w", err)
+	}
+
 	// Mark sync complete only after all success conditions have passed.
 	if err := saveCheckpoint(ctx, opts.Store, storage.SyncCheckpoint{
 		MailboxID:      opts.MailboxID,
@@ -170,6 +188,33 @@ func Run(ctx context.Context, opts Options) error {
 	}
 
 	_, _ = fmt.Fprintf(opts.Stdout, "Sync complete: %d messages synced.\n", messagesSynced)
+	return nil
+}
+
+// rebuildStats recomputes sender_stats and domain_stats for the mailbox from
+// the messages table and persists the results. It is called once after all
+// pages are fetched so the stats always reflect the final message set,
+// regardless of checkpoint resume state.
+func rebuildStats(ctx context.Context, opts Options) error {
+	senders, err := opts.Store.QueryMessagesBySender(ctx, opts.MailboxID, math.MaxInt)
+	if err != nil {
+		return fmt.Errorf("query senders: %w", err)
+	}
+	for _, s := range senders {
+		if err := opts.Store.UpsertSenderStat(ctx, opts.MailboxID, s.Email, s.Name, s.Domain, s.Count); err != nil {
+			return fmt.Errorf("upsert sender stat %s: %w", s.Email, err)
+		}
+	}
+
+	domains, err := opts.Store.QueryMessagesByDomain(ctx, opts.MailboxID, math.MaxInt)
+	if err != nil {
+		return fmt.Errorf("query domains: %w", err)
+	}
+	for _, d := range domains {
+		if err := opts.Store.UpsertDomainStat(ctx, opts.MailboxID, d.Domain, d.Count); err != nil {
+			return fmt.Errorf("upsert domain stat %s: %w", d.Domain, err)
+		}
+	}
 	return nil
 }
 

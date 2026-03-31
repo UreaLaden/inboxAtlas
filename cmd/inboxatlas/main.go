@@ -432,14 +432,16 @@ func buildSyncCmd(cfg config.Config) *cobra.Command {
 // buildSyncGmailCmd returns the "sync gmail" subcommand.
 func buildSyncGmailCmd(cfg config.Config) *cobra.Command {
 	var account string
+	var limit int
 	cmd := &cobra.Command{
 		Use:   "gmail",
 		Short: "Sync messages from Gmail",
 		RunE: func(cmd *cobra.Command, _ []string) error {
-			return runSyncGmail(cmd.Context(), cmd.OutOrStdout(), cfg, account)
+			return runSyncGmail(cmd.Context(), cmd.OutOrStdout(), cfg, account, limit)
 		},
 	}
 	cmd.Flags().StringVar(&account, "account", "", "mailbox email or alias to sync")
+	cmd.Flags().IntVar(&limit, "limit", 0, "stop after syncing this many messages and complete (0 = unlimited)")
 	_ = cmd.MarkFlagRequired("account")
 	return cmd
 }
@@ -462,7 +464,7 @@ func buildSyncStatusCmd(cfg config.Config) *cobra.Command {
 // runSyncGmail resolves the mailbox, resolves the auth mode, builds a Gmail provider,
 // and runs a full ingestion sync. It is separated from the Cobra handler for
 // testability.
-func runSyncGmail(ctx context.Context, w io.Writer, cfg config.Config, account string) error {
+func runSyncGmail(ctx context.Context, w io.Writer, cfg config.Config, account string, limit int) error {
 	st, err := storage.Open(cfg.StoragePath)
 	if err != nil {
 		return fmt.Errorf("open storage: %w", err)
@@ -492,6 +494,7 @@ func runSyncGmail(ctx context.Context, w io.Writer, cfg config.Config, account s
 		Stdout:       w,
 		RequestDelay: time.Duration(cfg.SyncDelayMS) * time.Millisecond,
 		MaxRetries:   5,
+		MessageLimit: limit,
 	})
 }
 

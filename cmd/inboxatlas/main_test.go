@@ -791,7 +791,7 @@ func TestRunSyncGmail_MissingCredentials(t *testing.T) {
 	cfg.CredentialsPath = filepath.Join(dir, "nonexistent.json")
 
 	var buf bytes.Buffer
-	err = runSyncGmail(context.Background(), &buf, cfg, "user@example.com")
+	err = runSyncGmail(context.Background(), &buf, cfg, "user@example.com", 0)
 	if err == nil {
 		t.Fatal("expected error for missing credentials")
 	}
@@ -806,7 +806,7 @@ func TestRunSyncGmail_UnknownMailbox(t *testing.T) {
 	cfg.StoragePath = filepath.Join(dir, "test.db")
 
 	var buf bytes.Buffer
-	err := runSyncGmail(context.Background(), &buf, cfg, "nobody@example.com")
+	err := runSyncGmail(context.Background(), &buf, cfg, "nobody@example.com", 0)
 	if err == nil {
 		t.Error("expected error for unregistered mailbox")
 	}
@@ -834,7 +834,7 @@ func TestRunSyncGmail_MalformedCredentials(t *testing.T) {
 	cfg.CredentialsPath = credPath
 
 	var buf bytes.Buffer
-	err = runSyncGmail(context.Background(), &buf, cfg, "user@example.com")
+	err = runSyncGmail(context.Background(), &buf, cfg, "user@example.com", 0)
 	if err == nil {
 		t.Fatal("expected error for malformed credentials")
 	}
@@ -887,7 +887,7 @@ func TestRunSyncGmail_UsesResolvedTokenSource(t *testing.T) {
 		return nil
 	}
 
-	if err := runSyncGmail(context.Background(), io.Discard, cfg, "user@example.com"); err != nil {
+	if err := runSyncGmail(context.Background(), io.Discard, cfg, "user@example.com", 0); err != nil {
 		t.Fatalf("runSyncGmail: %v", err)
 	}
 	if !resolveCalled || !providerCreated || !ingestionCalled {
