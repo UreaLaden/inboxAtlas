@@ -191,12 +191,12 @@ func TestValidateSummaryOutput_RejectsApproximatePercentageRestatement(t *testin
 func TestValidateSummaryOutput_AcceptsCommaSeparatedCounts(t *testing.T) {
 	input := validLargeSummaryInput(t)
 	err := ValidateSummaryOutput(input, SummaryOutput{
-		Headline:             "Total messages reached 30,075.",
-		SecondaryHeadline:    "groupupdates@facebookmail.com remained the top external sender with 1,726 messages.",
-		SnapshotBullets:      []string{"healthymd.com led external domain volume with 1,927 messages."},
-		WhatThisMeansBullets: []string{"Email volume increased from 1,189 in 2025-05 to 2,458 in 2026-03."},
-		OpportunitiesBullets: []string{"Review repeated traffic driving the 1,269-message absolute change."},
-		BottomLine:           "The inbox shows repeatable patterns across 30,075 messages.",
+		Headline:             "Total messages reached 1,103.",
+		SecondaryHeadline:    "calendar-notification@google.com remained the top external sender with 32 messages.",
+		SnapshotBullets:      []string{"healthymd.com led external domain volume with 79 messages."},
+		WhatThisMeansBullets: []string{"Email volume held at 1,103 in 2026-03."},
+		OpportunitiesBullets: []string{"Review repeated traffic across the 1,103-message inbox."},
+		BottomLine:           "The inbox shows repeatable patterns across 1,103 messages.",
 	})
 	if err != nil {
 		t.Fatalf("expected comma-separated counts to validate, got %v", err)

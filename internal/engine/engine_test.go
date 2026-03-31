@@ -92,6 +92,36 @@ func TestEnsureDefaultSeeds_UpdatesExistingSeed(t *testing.T) {
 	}
 }
 
+func TestEnsureDefaultSeeds_InsertsDefaults(t *testing.T) {
+	cfg := engineTestConfig(t)
+	st := engineTestStore(t, cfg)
+
+	if err := ensureDefaultSeeds(context.Background(), st); err != nil {
+		t.Fatalf("ensureDefaultSeeds: %v", err)
+	}
+
+	seeds, err := st.ListSeeds(context.Background(), "")
+	if err != nil {
+		t.Fatalf("ListSeeds: %v", err)
+	}
+	if len(seeds) != len(classification.DefaultSeeds()) {
+		t.Fatalf("default seed count: got %d, want %d", len(seeds), len(classification.DefaultSeeds()))
+	}
+}
+
+func TestEnsureDefaultSeeds_ClosedStore(t *testing.T) {
+	cfg := engineTestConfig(t)
+	st := engineTestStore(t, cfg)
+	_ = cfg
+	if err := st.Close(); err != nil {
+		t.Fatalf("Close: %v", err)
+	}
+
+	if err := ensureDefaultSeeds(context.Background(), st); err == nil {
+		t.Fatal("expected ensureDefaultSeeds to fail on closed store")
+	}
+}
+
 func TestRunClassify_EmptyMailbox(t *testing.T) {
 	cfg := engineTestConfig(t)
 	st := engineTestStore(t, cfg)
@@ -109,6 +139,40 @@ func TestRunClassify_MailboxNotFound(t *testing.T) {
 	_, err := RunClassify(context.Background(), cfg, "missing@example.com")
 	if err == nil {
 		t.Fatal("expected mailbox resolution error")
+	}
+}
+
+func TestRunClassify_OpenStorageError(t *testing.T) {
+	cfg := config.Default()
+	cfg.StoragePath = "/dev/null/inboxatlas.db"
+
+	_, err := RunClassify(context.Background(), cfg, "user@example.com")
+	if err == nil {
+		t.Fatal("expected open storage error")
+	}
+}
+
+func TestRunClassify_ResolvesAlias(t *testing.T) {
+	cfg := engineTestConfig(t)
+	st := engineTestStore(t, cfg)
+	if err := st.CreateMailbox(context.Background(), models.Mailbox{ID: "user@example.com", Alias: "work", Provider: "gmail"}); err != nil {
+		t.Fatalf("CreateMailbox: %v", err)
+	}
+	engineSeedMessage(t, st, models.MessageMeta{
+		ProviderID: "m1",
+		MailboxID:  "user@example.com",
+		Provider:   "gmail",
+		FromEmail:  "groupupdates@facebookmail.com",
+		Domain:     "facebookmail.com",
+		ReceivedAt: time.Now().UTC(),
+	})
+
+	result, err := RunClassify(context.Background(), cfg, "work")
+	if err != nil {
+		t.Fatalf("RunClassify by alias: %v", err)
+	}
+	if result.MailboxID != "user@example.com" {
+		t.Fatalf("MailboxID: got %q, want %q", result.MailboxID, "user@example.com")
 	}
 }
 
@@ -135,6 +199,31 @@ func TestListClassifySuggestions_MailboxNotFound(t *testing.T) {
 	_, err := ListClassifySuggestions(context.Background(), cfg, "missing@example.com")
 	if err == nil {
 		t.Fatal("expected mailbox resolution error")
+	}
+}
+
+func TestListClassifySuggestions_OpenStorageError(t *testing.T) {
+	cfg := config.Default()
+	cfg.StoragePath = "/dev/null/inboxatlas.db"
+
+	_, err := ListClassifySuggestions(context.Background(), cfg, "user@example.com")
+	if err == nil {
+		t.Fatal("expected open storage error")
+	}
+}
+
+func TestPromoteClassifySuggestion_SuggestionNotFound(t *testing.T) {
+	cfg := engineTestConfig(t)
+	st := engineTestStore(t, cfg)
+	createEngineMailbox(t, st, "user@example.com")
+
+	_, err := PromoteClassifySuggestion(context.Background(), cfg, "user@example.com", PromoteSuggestionRequest{
+		PatternType:  classification.PatternDomain,
+		PatternValue: "healthymd.com",
+		Category:     classification.CategoryVendor,
+	})
+	if err == nil {
+		t.Fatal("expected suggestion-not-found error")
 	}
 }
 
@@ -180,6 +269,44 @@ func TestPromoteClassifySuggestion_Idempotent(t *testing.T) {
 	}
 }
 
+func TestPromoteClassifySuggestion_IgnoresGlobalAndUnrelatedMailboxSeeds(t *testing.T) {
+	cfg := engineTestConfig(t)
+	st := engineTestStore(t, cfg)
+	createEngineMailbox(t, st, "user@example.com")
+
+	if err := st.InsertSeed(context.Background(), storage.ClassificationSeed{
+		PatternType:  classification.PatternDomain,
+		PatternValue: "healthymd.com",
+		Category:     classification.CategoryVendor,
+		Source:       classification.SourceSeed,
+		Priority:     100,
+	}); err != nil {
+		t.Fatalf("InsertSeed global: %v", err)
+	}
+	if err := st.InsertSeed(context.Background(), storage.ClassificationSeed{
+		MailboxID:    "user@example.com",
+		PatternType:  classification.PatternDomain,
+		PatternValue: "other.example.com",
+		Category:     classification.CategoryVendor,
+		Source:       classification.SourceOperator,
+		Priority:     100,
+	}); err != nil {
+		t.Fatalf("InsertSeed mailbox: %v", err)
+	}
+
+	result, err := PromoteClassifySuggestion(context.Background(), cfg, "user@example.com", PromoteSuggestionRequest{
+		PatternType:  classification.PatternDomain,
+		PatternValue: "healthymd.com",
+		Category:     classification.CategoryClient,
+	})
+	if err != nil {
+		t.Fatalf("PromoteClassifySuggestion: %v", err)
+	}
+	if !result.Created {
+		t.Fatal("expected promotion to create a mailbox-scoped seed")
+	}
+}
+
 func TestPromoteClassifySuggestion_RequiresFields(t *testing.T) {
 	cfg := engineTestConfig(t)
 	st := engineTestStore(t, cfg)
@@ -188,6 +315,20 @@ func TestPromoteClassifySuggestion_RequiresFields(t *testing.T) {
 	_, err := PromoteClassifySuggestion(context.Background(), cfg, "user@example.com", PromoteSuggestionRequest{})
 	if err == nil {
 		t.Fatal("expected validation error")
+	}
+}
+
+func TestPromoteClassifySuggestion_OpenStorageError(t *testing.T) {
+	cfg := config.Default()
+	cfg.StoragePath = "/dev/null/inboxatlas.db"
+
+	_, err := PromoteClassifySuggestion(context.Background(), cfg, "user@example.com", PromoteSuggestionRequest{
+		PatternType:  classification.PatternDomain,
+		PatternValue: "healthymd.com",
+		Category:     classification.CategoryClient,
+	})
+	if err == nil {
+		t.Fatal("expected open storage error")
 	}
 }
 
@@ -234,6 +375,80 @@ func TestPromoteClassifySuggestion_ConflictingExistingSeed(t *testing.T) {
 	})
 	if err == nil {
 		t.Fatal("expected conflicting seed error")
+	}
+}
+
+func TestToEngineSuggestions_MapsFields(t *testing.T) {
+	suggestions := toEngineSuggestions([]classification.ClassificationSeed{{
+		MailboxID:    "user@example.com",
+		PatternType:  classification.PatternDomain,
+		PatternValue: "example.com",
+		Category:     classification.CategoryVendor,
+		Source:       classification.SourceSeed,
+		Priority:     42,
+	}})
+
+	if len(suggestions) != 1 {
+		t.Fatalf("len(suggestions): got %d, want 1", len(suggestions))
+	}
+	if suggestions[0].MailboxID != "user@example.com" ||
+		suggestions[0].PatternType != classification.PatternDomain ||
+		suggestions[0].PatternValue != "example.com" ||
+		suggestions[0].Category != classification.CategoryVendor ||
+		suggestions[0].Source != classification.SourceSeed ||
+		suggestions[0].Priority != 42 {
+		t.Fatalf("unexpected mapped suggestion: %+v", suggestions[0])
+	}
+}
+
+func TestFindSuggestion(t *testing.T) {
+	got, ok := findSuggestion("user@example.com", classification.PatternDomain, "healthymd.com", classification.CategoryClient)
+	if !ok {
+		t.Fatal("expected suggestion to be found")
+	}
+	if got.MailboxID != "user@example.com" {
+		t.Fatalf("MailboxID: got %q, want %q", got.MailboxID, "user@example.com")
+	}
+
+	if _, ok := findSuggestion("user@example.com", classification.PatternDomain, "healthymd.com", classification.CategoryVendor); ok {
+		t.Fatal("expected mismatched-category suggestion lookup to fail")
+	}
+}
+
+func TestOpenResolvedStore_ByAlias(t *testing.T) {
+	cfg := engineTestConfig(t)
+	st := engineTestStore(t, cfg)
+	if err := st.CreateMailbox(context.Background(), models.Mailbox{ID: "user@example.com", Alias: "work", Provider: "gmail"}); err != nil {
+		t.Fatalf("CreateMailbox: %v", err)
+	}
+
+	opened, mb, err := openResolvedStore(context.Background(), cfg, "work")
+	if err != nil {
+		t.Fatalf("openResolvedStore: %v", err)
+	}
+	t.Cleanup(func() { _ = opened.Close() })
+
+	if mb.ID != "user@example.com" {
+		t.Fatalf("Mailbox ID: got %q, want %q", mb.ID, "user@example.com")
+	}
+}
+
+func TestOpenResolvedStore_OpenError(t *testing.T) {
+	cfg := config.Default()
+	cfg.StoragePath = "/dev/null/inboxatlas.db"
+
+	_, _, err := openResolvedStore(context.Background(), cfg, "user@example.com")
+	if err == nil {
+		t.Fatal("expected openResolvedStore to fail")
+	}
+}
+
+func TestOpenResolvedStore_MailboxNotFound(t *testing.T) {
+	cfg := engineTestConfig(t)
+
+	_, _, err := openResolvedStore(context.Background(), cfg, "missing@example.com")
+	if err == nil {
+		t.Fatal("expected mailbox resolution error")
 	}
 }
 
