@@ -2,7 +2,7 @@ package export
 
 import (
 	"errors"
-	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -272,15 +272,7 @@ func TestValidateSummaryOutput_RejectsEmptyBulletArrays(t *testing.T) {
 }
 
 func TestCommandSummaryProvider_GenerateSummary(t *testing.T) {
-	script := filepath.Join(t.TempDir(), "provider.sh")
-	writeExecutable(t, script, `#!/bin/sh
-cat >/dev/null
-cat <<'EOF'
-{"title":"Inbox Snapshot","subtitle":"owner@company.com","headline":"Volume rose from 5 to 8 messages across 2025-01 to 2025-03.","secondary_headline":"alerts@vendor.com remained the top external sender with 9 messages.","snapshot_bullets":["vendor.com led external domain volume with 9 messages."],"what_this_means_bullets":["A small number of external sources drive a large share of the 20 total messages."],"opportunities_bullets":["Review repeat notifications from alerts@vendor.com for rule-based handling."],"bottom_line":"The inbox shows stable, measurable patterns that are ready for structured automation review."}
-EOF
-`)
-
-	provider := CommandSummaryProvider{Command: script}
+	provider := testCommandSummaryProvider("valid")
 	output, err := provider.GenerateSummary(t.Context(), "prompt", validSummaryInput(t))
 	if err != nil {
 		t.Fatalf("GenerateSummary: %v", err)
@@ -291,13 +283,7 @@ EOF
 }
 
 func TestCommandSummaryProvider_InvalidJSON(t *testing.T) {
-	script := filepath.Join(t.TempDir(), "provider.sh")
-	writeExecutable(t, script, `#!/bin/sh
-cat >/dev/null
-printf 'not-json'
-`)
-
-	provider := CommandSummaryProvider{Command: script}
+	provider := testCommandSummaryProvider("invalid-json")
 	_, err := provider.GenerateSummary(t.Context(), "prompt", validSummaryInput(t))
 	if err == nil {
 		t.Fatal("expected invalid json error")
@@ -308,14 +294,7 @@ printf 'not-json'
 }
 
 func TestCommandSummaryProvider_ExitErrorIncludesStderr(t *testing.T) {
-	script := filepath.Join(t.TempDir(), "provider.sh")
-	writeExecutable(t, script, `#!/bin/sh
-cat >/dev/null
-printf 'debug trace\n' >&2
-exit 9
-`)
-
-	provider := CommandSummaryProvider{Command: script}
+	provider := testCommandSummaryProvider("stderr-exit")
 	_, err := provider.GenerateSummary(t.Context(), "prompt", validSummaryInput(t))
 	if err == nil {
 		t.Fatal("expected provider failure")
@@ -357,9 +336,44 @@ func validLargeSummaryInput(t *testing.T) SummaryInput {
 	return input
 }
 
-func writeExecutable(t *testing.T, path, content string) {
-	t.Helper()
-	if err := os.WriteFile(path, []byte(content), 0o700); err != nil {
-		t.Fatalf("WriteFile(%s): %v", path, err)
+func testCommandSummaryProvider(mode string) CommandSummaryProvider {
+	if _, err := exec.LookPath("sh"); err == nil {
+		return CommandSummaryProvider{
+			Command: "sh",
+			Args:    []string{"-c", unixProviderCommand(mode)},
+		}
+	}
+
+	return CommandSummaryProvider{
+		Command: "cmd",
+		Args:    []string{"/d", "/c", windowsProviderCommand(mode)},
+	}
+}
+
+func unixProviderCommand(mode string) string {
+	switch mode {
+	case "valid":
+		return `cat >/dev/null; cat <<'EOF'
+{"title":"Inbox Snapshot","subtitle":"owner@company.com","headline":"Volume rose from 5 to 8 messages across 2025-01 to 2025-03.","secondary_headline":"alerts@vendor.com remained the top external sender with 9 messages.","snapshot_bullets":["vendor.com led external domain volume with 9 messages."],"what_this_means_bullets":["A small number of external sources drive a large share of the 20 total messages."],"opportunities_bullets":["Review repeat notifications from alerts@vendor.com for rule-based handling."],"bottom_line":"The inbox shows stable, measurable patterns that are ready for structured automation review."}
+EOF`
+	case "invalid-json":
+		return `cat >/dev/null; printf 'not-json'`
+	case "stderr-exit":
+		return `cat >/dev/null; printf 'debug trace\n' >&2; exit 9`
+	default:
+		panic("unknown provider mode: " + mode)
+	}
+}
+
+func windowsProviderCommand(mode string) string {
+	switch mode {
+	case "valid":
+		return `more >nul & echo {"title":"Inbox Snapshot","subtitle":"owner@company.com","headline":"Volume rose from 5 to 8 messages across 2025-01 to 2025-03.","secondary_headline":"alerts@vendor.com remained the top external sender with 9 messages.","snapshot_bullets":["vendor.com led external domain volume with 9 messages."],"what_this_means_bullets":["A small number of external sources drive a large share of the 20 total messages."],"opportunities_bullets":["Review repeat notifications from alerts@vendor.com for rule-based handling."],"bottom_line":"The inbox shows stable, measurable patterns that are ready for structured automation review."}`
+	case "invalid-json":
+		return `more >nul & <nul set /p =not-json`
+	case "stderr-exit":
+		return `more >nul & >&2 echo debug trace & exit /b 9`
+	default:
+		panic("unknown provider mode: " + mode)
 	}
 }

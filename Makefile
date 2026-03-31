@@ -3,10 +3,18 @@
 BINARY  := inboxatlas
 CMD     := ./cmd/inboxatlas
 SUMMARY_PROVIDER := ./cmd/openai-summary-provider
+GO ?= go
+GO_TEST_ENV := env GOCACHE=/tmp/inboxatlas-gocache GOTMPDIR=/tmp/inboxatlas-gotmp
+GO_TEST_PREP := mkdir -p /tmp/inboxatlas-gocache /tmp/inboxatlas-gotmp
+GO_TEST_FLAGS :=
+
+ifeq ($(OS),Windows_NT)
+GO_TEST_FLAGS += -work
+endif
 
 # Format all Go source files.
 fmt:
-	go fmt ./...
+	$(GO) fmt ./...
 
 # Run the golangci-lint linter suite.
 lint: fmt
@@ -14,27 +22,32 @@ lint: fmt
 
 # Build the inboxatlas, ia, and openai-summary-provider binaries.
 build:
-	go build -o inboxatlas $(CMD)
-	go build -o ia $(CMD)
-	go build -o openai-summary-provider.exe $(SUMMARY_PROVIDER)
+	$(GO) build -o inboxatlas $(CMD)
+	$(GO) build -o ia $(CMD)
+	$(GO) build -o openai-summary-provider.exe $(SUMMARY_PROVIDER)
 
 # Run all tests.
 test:
-	go test ./...
+	@$(GO_TEST_PREP)
+	$(GO_TEST_ENV) $(GO) test $(GO_TEST_FLAGS) ./...
+
+test-verbose:
+	$(GO_TEST_ENV) $(GO) test ./... -v
 
 # Generate coverage profile (prerequisite for all coverage-* targets).
 coverage:
-	go test -coverprofile=coverage.out ./...
+	@$(GO_TEST_PREP)
+	$(GO_TEST_ENV) $(GO) test $(GO_TEST_FLAGS) -coverprofile=coverage.out ./...
 
 # Function-level breakdown (includes total line at the bottom).
 coverage-func: coverage
 	@echo ""
 	@echo "--- Function-level coverage ---"
-	go tool cover -func=coverage.out
+	$(GO) tool cover -func=coverage.out
 
 # Total repository coverage as a single summary line.
 coverage-total: coverage
-	@go tool cover -func=coverage.out | grep "^total:"
+	@$(GO) tool cover -func=coverage.out | grep "^total:"
 
 # Build and run the inboxatlas binary.
 run: build

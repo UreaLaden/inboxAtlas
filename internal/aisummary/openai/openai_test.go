@@ -16,6 +16,24 @@ import (
 	exportpkg "github.com/UreaLaden/inboxatlas/internal/export"
 )
 
+func newHTTPTestServer(t *testing.T, handler http.HandlerFunc) *httptest.Server {
+	t.Helper()
+
+	listener, err := net.Listen("tcp4", "127.0.0.1:0")
+	if err != nil {
+		if strings.Contains(err.Error(), "operation not permitted") {
+			t.Skipf("local TCP listeners unavailable in this environment: %v", err)
+		}
+		t.Fatalf("Listen: %v", err)
+	}
+
+	server := httptest.NewUnstartedServer(handler)
+	server.Listener = listener
+	server.Start()
+	t.Cleanup(server.Close)
+	return server
+}
+
 func TestNewConfigFromEnv_Defaults(t *testing.T) {
 	t.Setenv("OPENAI_API_KEY", "test-key")
 	t.Setenv("OPENAI_MODEL", "")
@@ -57,7 +75,7 @@ func TestNewConfigFromEnv_InvalidTimeout(t *testing.T) {
 
 func TestClientGenerateSummary_SendsSchemaConstrainedRequest(t *testing.T) {
 	var captured responsesRequest
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	server := newHTTPTestServer(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path != "/responses" {
 			t.Fatalf("unexpected path: %s", r.URL.Path)
 		}
@@ -69,7 +87,6 @@ func TestClientGenerateSummary_SendsSchemaConstrainedRequest(t *testing.T) {
 		}
 		_, _ = io.WriteString(w, `{"output_text":"{\"title\":\"Inbox Snapshot\",\"subtitle\":\"owner@company.com\",\"headline\":\"Email volume increased from 5 to 8 messages across 2025-01 to 2025-03.\",\"secondary_headline\":\"alerts@vendor.com remained the top external sender with 9 messages.\",\"snapshot_bullets\":[\"vendor.com is the most active external domain with 9 messages.\"],\"what_this_means_bullets\":[\"A small number of external sources shape most of the 20 messages in scope.\"],\"opportunities_bullets\":[\"Promote repeated alerts from alerts@vendor.com into a review workflow.\"],\"bottom_line\":\"The inbox shows stable patterns that are ready for structured automation review.\"}"}`)
 	}))
-	defer server.Close()
 
 	client := NewClient(Config{
 		APIKey:         "test-key",
@@ -107,7 +124,7 @@ func TestClientGenerateSummary_SendsSchemaConstrainedRequest(t *testing.T) {
 
 func TestClientGenerateSummary_RetriesTransientFailures(t *testing.T) {
 	attempts := 0
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	server := newHTTPTestServer(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		attempts++
 		if attempts < 3 {
 			http.Error(w, `{"error":"rate limited"}`, http.StatusTooManyRequests)
@@ -115,7 +132,6 @@ func TestClientGenerateSummary_RetriesTransientFailures(t *testing.T) {
 		}
 		_, _ = io.WriteString(w, `{"output_text":"{\"title\":\"Inbox Snapshot\",\"subtitle\":\"owner@company.com\",\"headline\":\"Email volume increased from 5 to 8 messages across 2025-01 to 2025-03.\",\"secondary_headline\":\"alerts@vendor.com remained the top external sender with 9 messages.\",\"snapshot_bullets\":[\"vendor.com is the most active external domain with 9 messages.\"],\"what_this_means_bullets\":[\"A small number of external sources shape most of the 20 messages in scope.\"],\"opportunities_bullets\":[\"Promote repeated alerts from alerts@vendor.com into a review workflow.\"],\"bottom_line\":\"The inbox shows stable patterns that are ready for structured automation review.\"}"}`)
 	}))
-	defer server.Close()
 
 	client := NewClient(Config{
 		APIKey:         "test-key",
@@ -137,11 +153,10 @@ func TestClientGenerateSummary_RetriesTransientFailures(t *testing.T) {
 
 func TestClientGenerateSummary_DoesNotRetryAuthFailure(t *testing.T) {
 	attempts := 0
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	server := newHTTPTestServer(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		attempts++
 		http.Error(w, `{"error":"unauthorized"}`, http.StatusUnauthorized)
 	}))
-	defer server.Close()
 
 	client := NewClient(Config{
 		APIKey:         "test-key",
@@ -163,10 +178,9 @@ func TestClientGenerateSummary_DoesNotRetryAuthFailure(t *testing.T) {
 }
 
 func TestClientGenerateSummary_InvalidModelOutput(t *testing.T) {
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	server := newHTTPTestServer(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		_, _ = io.WriteString(w, `{"output_text":"not-json"}`)
 	}))
-	defer server.Close()
 
 	client := NewClient(Config{
 		APIKey:         "test-key",
@@ -188,10 +202,9 @@ func TestClientGenerateSummary_InvalidModelOutput(t *testing.T) {
 
 func TestClientGenerateSummary_UsesNestedOutputTextAndDebugLogs(t *testing.T) {
 	var stderr strings.Builder
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	server := newHTTPTestServer(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		_, _ = io.WriteString(w, `{"output":[{"content":[{"type":"output_text","text":"{\"title\":\"Inbox Snapshot\",\"subtitle\":\"owner@company.com\",\"headline\":\"Email volume increased from 5 to 8 messages across 2025-01 to 2025-03.\",\"secondary_headline\":\"alerts@vendor.com remained the top external sender with 9 messages.\",\"snapshot_bullets\":[\"vendor.com is the most active external domain with 9 messages.\"],\"what_this_means_bullets\":[\"A small number of external sources shape most of the 20 messages in scope.\"],\"opportunities_bullets\":[\"Promote repeated alerts from alerts@vendor.com into a review workflow.\"],\"bottom_line\":\"The inbox shows stable patterns that are ready for structured automation review.\"}"}]}]}`)
 	}))
-	defer server.Close()
 
 	client := NewClient(Config{
 		APIKey:         "test-key",
