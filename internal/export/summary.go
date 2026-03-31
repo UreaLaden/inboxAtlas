@@ -327,6 +327,10 @@ func newAllowedFacts(input SummaryInput) allowedFacts {
 		addTextFacts(strconv.Itoa(value))
 	}
 	addPercent := func(value float64) {
+		addTextFacts(strconv.FormatFloat(value, 'f', -1, 64))
+		addTextFacts(strconv.FormatFloat(value, 'f', -1, 64) + "%")
+		addTextFacts(fmt.Sprintf("%.2f", value))
+		addTextFacts(fmt.Sprintf("%.2f%%", value))
 		addTextFacts(fmt.Sprintf("%.1f", value))
 		addTextFacts(fmt.Sprintf("%.1f%%", value))
 		addTextFacts(fmt.Sprintf("%.0f", value))

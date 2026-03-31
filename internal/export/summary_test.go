@@ -218,6 +218,43 @@ func TestValidateSummaryOutput_AcceptsEquivalentPercentFormatting(t *testing.T) 
 	}
 }
 
+func TestValidateSummaryOutput_AcceptsExactTwoDecimalPercentFact(t *testing.T) {
+	input := SummaryInput{
+		Owner: Owner{
+			Email:  "owner@company.com",
+			Domain: "company.com",
+		},
+		ReportingPeriod: SummaryReportingPeriod{
+			Start: "2026-02",
+			End:   "2026-03",
+			Label: "2026-02 to 2026-03",
+		},
+		TotalMessages: 1103,
+		VolumeHighlights: SummaryVolumeHighlights{
+			FirstPeriod:    "2026-02",
+			FirstCount:     900,
+			LastPeriod:     "2026-03",
+			LastCount:      1103,
+			AbsoluteChange: 203,
+			PercentChange:  22.59,
+			PeakPeriod:     "2026-03",
+			PeakCount:      1103,
+		},
+	}
+
+	err := ValidateSummaryOutput(input, SummaryOutput{
+		Headline:             "Email volume rose by 22.59% from February to March 2026.",
+		SecondaryHeadline:    "Volume increased from 900 to 1,103 messages.",
+		SnapshotBullets:      []string{"March 2026 reached a peak of 1,103 messages."},
+		WhatThisMeansBullets: []string{"The inbox added 203 messages month over month."},
+		OpportunitiesBullets: []string{"Plan automation for the 1,103-message peak month."},
+		BottomLine:           "The inbox shows a measured 22.59% monthly increase.",
+	})
+	if err != nil {
+		t.Fatalf("expected exact two-decimal percent fact to validate, got %v", err)
+	}
+}
+
 func TestValidateSummaryOutput_RejectsDifferentNormalizedNumericValue(t *testing.T) {
 	input := validLargeSummaryInput(t)
 	err := ValidateSummaryOutput(input, SummaryOutput{
