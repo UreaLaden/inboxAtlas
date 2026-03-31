@@ -37,6 +37,10 @@ var newGmailProvider = func(email string, tokenSourceFactory func(context.Contex
 }
 var runIngestion = ingestion.Run
 var reportExportPDFRenderer exportpkg.PDFRenderer
+var readSummaryPromptFile = os.ReadFile
+var newSummaryProvider = func(command string, args []string) exportpkg.SummaryProvider {
+	return exportpkg.CommandSummaryProvider{Command: command, Args: args}
+}
 
 func main() {
 	cfg, err := config.Load()
@@ -701,6 +705,7 @@ func buildReportCmd(cfg config.Config) *cobra.Command {
 		Use:   "report",
 		Short: "Generate discovery reports from synced mailbox data",
 	}
+	cmd.AddCommand(buildReportSummarizeCmd(cfg))
 	cmd.AddCommand(buildReportExportCmd(cfg))
 	cmd.AddCommand(buildReportDomainsCmd(cfg))
 	cmd.AddCommand(buildReportSendersCmd(cfg))
@@ -716,6 +721,39 @@ type reportExportOptions struct {
 	ownerEmail  string
 	ownerDomain string
 	summaryFile string
+}
+
+type reportSummarizeOptions struct {
+	reportsDir      string
+	outputFile      string
+	ownerEmail      string
+	ownerDomain     string
+	providerCommand string
+	providerArgs    []string
+	promptFile      string
+}
+
+// buildReportSummarizeCmd returns the "report summarize" subcommand.
+func buildReportSummarizeCmd(cfg config.Config) *cobra.Command {
+	var opts reportSummarizeOptions
+	_ = cfg
+
+	cmd := &cobra.Command{
+		Use:   "summarize",
+		Short: "Generate a canonical summary.md artifact from report inputs",
+		RunE: func(cmd *cobra.Command, _ []string) error {
+			return runReportSummarize(cmd.Context(), cmd.OutOrStdout(), opts)
+		},
+	}
+	cmd.Flags().StringVar(&opts.reportsDir, "reports-dir", "", "directory containing report CSV inputs")
+	cmd.Flags().StringVar(&opts.outputFile, "output-file", "", "path to write generated summary markdown")
+	cmd.Flags().StringVar(&opts.ownerEmail, "owner-email", "", "owner email used for internal filtering and packaging")
+	cmd.Flags().StringVar(&opts.ownerDomain, "owner-domain", "", "owner domain used for internal filtering")
+	cmd.Flags().StringVar(&opts.providerCommand, "provider-command", "", "external command that returns structured summary JSON")
+	cmd.Flags().StringSliceVar(&opts.providerArgs, "provider-arg", nil, "argument to pass to the provider command; repeatable")
+	cmd.Flags().StringVar(&opts.promptFile, "prompt-file", ".claude/commands/summarizeReport.md", "prompt contract file supplied to the provider")
+	_ = cmd.MarkFlagRequired("reports-dir")
+	return cmd
 }
 
 // buildReportExportCmd returns the "report export" subcommand.
@@ -863,6 +901,74 @@ func validateExportFormat(f string) (string, error) {
 	default:
 		return "", fmt.Errorf("unknown export format %q — valid values: excel, html, pdf, all", f)
 	}
+}
+
+func runReportSummarize(ctx context.Context, w io.Writer, opts reportSummarizeOptions) error {
+	model, err := exportpkg.ParseReportsDir(exportpkg.Options{
+		ReportsDir:  opts.reportsDir,
+		OwnerEmail:  opts.ownerEmail,
+		OwnerDomain: opts.ownerDomain,
+	})
+	if err != nil {
+		return err
+	}
+
+	input, err := exportpkg.BuildSummaryInput(model)
+	if err != nil {
+		return err
+	}
+
+	prompt, err := loadSummaryPrompt(opts.promptFile)
+	if err != nil {
+		return err
+	}
+
+	command := strings.TrimSpace(opts.providerCommand)
+	if command == "" {
+		command = strings.TrimSpace(os.Getenv("INBOXATLAS_SUMMARY_PROVIDER_CMD"))
+	}
+	if command == "" {
+		return fmt.Errorf("summary provider command is required via --provider-command or INBOXATLAS_SUMMARY_PROVIDER_CMD")
+	}
+
+	outputPath := strings.TrimSpace(opts.outputFile)
+	if outputPath == "" {
+		outputPath = filepath.Join(opts.reportsDir, "summary.md")
+	}
+
+	provider := newSummaryProvider(command, opts.providerArgs)
+	output, err := provider.GenerateSummary(ctx, prompt, input)
+	if err != nil {
+		return err
+	}
+
+	narrative, err := exportpkg.AdaptSummaryOutput(input, output)
+	if err != nil {
+		return err
+	}
+
+	markdown, err := exportpkg.FormatSnapshotNarrativeMarkdown(narrative)
+	if err != nil {
+		return err
+	}
+
+	if err := os.MkdirAll(filepath.Dir(outputPath), 0o755); err != nil {
+		return fmt.Errorf("create summary output dir: %w", err)
+	}
+	if err := os.WriteFile(outputPath, markdown, 0o600); err != nil {
+		return fmt.Errorf("write summary file: %w", err)
+	}
+
+	_, _ = fmt.Fprintf(w, "Wrote %s\n", outputPath)
+	return nil
+}
+
+func loadSummaryPrompt(path string) (string, error) {
+	body, err := readSummaryPromptFile(path)
+	if err != nil {
+		return "", fmt.Errorf("read summary prompt: %w", err)
+	}
+	return string(body), nil
 }
 
 func runReportExport(ctx context.Context, w io.Writer, opts reportExportOptions) error {

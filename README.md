@@ -81,7 +81,8 @@ CLI (cmd/inboxatlas) → engine (internal/engine) → analysis/classification/st
 | `internal/storage` | SQLite CRUD, mailbox registry, message upsert, checkpoint CRUD, report queries |
 | `internal/ingestion` | Synchronous page loop, exponential backoff, checkpoint save/resume |
 | `internal/analysis` | Report queries, subject tokenization, table/CSV/JSON rendering |
-| `internal/export` | Reports-directory parsing, normalized export model, owner filtering, workbook generation, snapshot HTML rendering, and PDF adapter contracts |
+| `internal/export` | Reports-directory parsing, normalized export model, command-backed AI summary generation/validation, workbook generation, snapshot HTML rendering, and PDF adapter contracts |
+| `internal/aisummary/openai` | OpenAI-specific config, schema-constrained request construction, retry/backoff, and response parsing for the first-party summary provider binary |
 | `internal/classification` | Deterministic classification rules, default baseline seeds, mailbox bootstrap suggestions |
 | `internal/normalization` | Message normalization: lowercase domain, parse From header, trim fields |
 | `internal/providers/gmail` | Gmail REST API adapter — metadata-only, implements `models.MailProvider` |
@@ -116,6 +117,12 @@ Both `inboxatlas` and `ia` are supported binary names. To build both at once:
 
 ```bash
 make build
+```
+
+To build the first-party OpenAI summary provider binary:
+
+```bash
+go build -o ./bin/openai-summary-provider ./cmd/openai-summary-provider
 ```
 
 The `ia` binary is functionally identical to `inboxatlas` — help output and command
@@ -252,6 +259,10 @@ inboxatlas report domains  --account <id|alias> [--format table|csv|json] [--lim
 inboxatlas report senders  --account <id|alias> [--format table|csv|json] [--limit 25]
 inboxatlas report subjects --account <id|alias> [--format table|csv|json] [--limit 25]
 inboxatlas report volume   --account <id|alias> [--format table|csv|json]
+inboxatlas report summarize --reports-dir <dir> [--output-file <path>]
+                            [--owner-email <email>] [--owner-domain <domain>]
+                            [--provider-command <cmd>] [--provider-arg <arg> ...]
+                            [--prompt-file <path>]
 inboxatlas report export   --reports-dir <dir> --output-dir <dir> [--format excel|html|pdf|all]
                            [--owner-email <email>] [--owner-domain <domain>] [--summary-file <path>]
 ```
@@ -276,13 +287,41 @@ google.com           61
 atlassian.com        45
 ```
 
+`report summarize` builds deterministic summary input from the existing report
+artifacts, invokes a configured external AI provider command, validates the
+structured response, and writes canonical `summary.md` content for later
+snapshot export use. If `--output-file` is omitted, it writes `summary.md`
+inside `--reports-dir`. The provider command may also be supplied through
+`INBOXATLAS_SUMMARY_PROVIDER_CMD`.
+
+The first-party provider binary added in this repo is `cmd/openai-summary-provider`.
+It uses these environment variables:
+
+- `OPENAI_API_KEY` required
+- `OPENAI_MODEL` optional
+- `OPENAI_BASE_URL` optional
+- `OPENAI_TIMEOUT_SECONDS` optional
+- `OPENAI_DEBUG` optional
+
+Example:
+
+```bash
+go build -o ./bin/openai-summary-provider ./cmd/openai-summary-provider
+
+OPENAI_API_KEY=... inboxatlas report summarize \
+  --reports-dir ./reports \
+  --owner-email owner@company.com \
+  --provider-command ./bin/openai-summary-provider
+```
+
 `report export` packages artifacts from an existing reports directory rather
 than querying SQLite directly. `excel` needs only the report CSV inputs.
-`html`, `pdf`, and `all` also require `--summary-file` so snapshot rendering
-uses explicit narrative sections. Output filenames are deterministic and use the
-pattern `inbox-report-<owner>-<period>.<ext>` inside the selected output
-directory. PDF export currently depends on a renderer adapter and will fail
-explicitly until a concrete PDF engine is configured in a later feature.
+`html`, `pdf`, and `all` still require `--summary-file`; that file may be
+manually written or generated first through `report summarize`. Output
+filenames are deterministic and use the pattern
+`inbox-report-<owner>-<period>.<ext>` inside the selected output directory.
+PDF export currently depends on a renderer adapter and will fail explicitly
+until a concrete PDF engine is configured in a later feature.
 
 ---
 
@@ -328,7 +367,7 @@ Notes:
 make fmt            # format all Go source files
 make lint           # run golangci-lint
 make test           # go test ./...
-make build          # build both inboxatlas and ia binaries
+make build          # build inboxatlas, ia, and openai-summary-provider
 make coverage       # generate coverage profile (coverage.out)
 make coverage-func  # function-level coverage breakdown
 make coverage-total # total repository coverage summary line

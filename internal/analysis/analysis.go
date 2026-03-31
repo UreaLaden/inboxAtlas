@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"io"
 	"sort"
+	"strconv"
 	"strings"
 	"text/tabwriter"
 	"unicode"
@@ -53,12 +54,25 @@ const (
 	FormatJSON Format = "json"
 )
 
-// stopWords is the set of tokens filtered out by TokenizeSubjects.
-var stopWords = map[string]bool{
-	"the": true, "a": true, "an": true, "re": true, "fw": true, "fwd": true,
-	"is": true, "in": true, "of": true, "to": true, "and": true, "for": true,
-	"on": true, "at": true, "with": true, "be": true, "as": true, "by": true,
-	"or": true, "external": true,
+// subjectNoiseTokens is the set of low-value subject tokens filtered out by
+// TokenizeSubjects before theme extraction.
+var subjectNoiseTokens = map[string]bool{
+	"a": true, "an": true, "and": true, "as": true, "at": true, "attachment": true,
+	"be": true, "by": true, "co": true, "corp": true, "external": true,
+	"for": true, "from": true, "fwd": true, "fw": true, "has": true,
+	"have": true, "image": true, "img": true, "in": true, "inc": true,
+	"is": true, "join": true, "llc": true, "ltd": true, "md": true,
+	"message": true, "new": true, "of": true, "on": true, "or": true,
+	"pllc": true, "re": true, "the": true, "to": true, "with": true,
+	"you": true, "your": true,
+}
+
+type themeCandidate struct {
+	Term       string
+	Count      int
+	DocFreq    int
+	TokenCount int
+	Score      int
 }
 
 // QueryDomains returns domain aggregate rows for the given mailbox, sorted by
@@ -113,42 +127,200 @@ func QueryVolume(ctx context.Context, st *storage.Store, mailboxID string) ([]Vo
 	return rows, nil
 }
 
-// TokenizeSubjects splits subjects into tokens, filters stop words, and returns
-// the top limit terms by frequency. Terms are lowercased; tokens shorter than
-// 2 characters are discarded.
+// TokenizeSubjects extracts deterministic subject themes using phrase-first
+// ranking with stronger normalization and noise filtering. Repeated bigrams and
+// trigrams are preferred over unigrams; unigrams are used as fallback when no
+// repeated phrase candidates exist.
 func TokenizeSubjects(subjects []string, limit int) []SubjectTerm {
-	freq := make(map[string]int)
-	splitter := func(r rune) bool {
-		return unicode.IsSpace(r) || strings.ContainsRune(",.;:!?()[]\"'-", r)
+	if len(subjects) == 0 || limit == 0 {
+		return nil
 	}
-	for _, s := range subjects {
-		for _, token := range strings.FieldsFunc(s, splitter) {
-			t := strings.ToLower(token)
-			if len(t) < 2 {
-				continue
-			}
-			if stopWords[t] {
-				continue
-			}
-			freq[t]++
+
+	unigrams := map[string]*themeCandidate{}
+	phrases := map[string]*themeCandidate{}
+	for _, subject := range subjects {
+		for _, tokens := range subjectThemeSegments(subject) {
+			addCandidates(unigrams, buildNGramCandidates(tokens, 1))
+			addCandidates(phrases, buildNGramCandidates(tokens, 2))
+			addCandidates(phrases, buildNGramCandidates(tokens, 3))
 		}
 	}
 
-	terms := make([]SubjectTerm, 0, len(freq))
-	for term, count := range freq {
-		terms = append(terms, SubjectTerm{Term: term, Count: count})
+	phraseList := sortedThemeCandidates(phrases)
+	if hasStrongPhraseCandidates(phraseList) {
+		return toSubjectTerms(phraseList, limit)
 	}
-	sort.Slice(terms, func(i, j int) bool {
-		if terms[i].Count != terms[j].Count {
-			return terms[i].Count > terms[j].Count
+	return toSubjectTerms(sortedThemeCandidates(unigrams), limit)
+}
+
+func subjectThemeSegments(subject string) [][]string {
+	raw := strings.FieldsFunc(strings.ToLower(subject), subjectTokenSplitter)
+	for len(raw) > 0 && isReplyPrefix(raw[0]) {
+		raw = raw[1:]
+	}
+
+	segments := make([][]string, 0, 1)
+	current := make([]string, 0, len(raw))
+	for _, token := range raw {
+		if isUsefulThemeToken(token) {
+			current = append(current, token)
+			continue
 		}
-		return terms[i].Term < terms[j].Term
+		if len(current) > 0 {
+			segments = append(segments, current)
+			current = make([]string, 0, len(raw))
+		}
+	}
+	if len(current) > 0 {
+		segments = append(segments, current)
+	}
+	return segments
+}
+
+func subjectTokenSplitter(r rune) bool {
+	return unicode.IsSpace(r) || strings.ContainsRune(",.;:!?()[]{}<>\"'`|_/\\-:", r)
+}
+
+func isReplyPrefix(token string) bool {
+	return token == "re" || token == "fw" || token == "fwd"
+}
+
+func isUsefulThemeToken(token string) bool {
+	switch {
+	case len(token) < 2:
+		return false
+	case subjectNoiseTokens[token]:
+		return false
+	case isNumericToken(token):
+		return false
+	case isLikelyYearToken(token):
+		return false
+	default:
+		return true
+	}
+}
+
+func isNumericToken(token string) bool {
+	for _, r := range token {
+		if !unicode.IsDigit(r) {
+			return false
+		}
+	}
+	return token != ""
+}
+
+func isLikelyYearToken(token string) bool {
+	if len(token) != 4 || !isNumericToken(token) {
+		return false
+	}
+	year, err := strconv.Atoi(token)
+	if err != nil {
+		return false
+	}
+	return year >= 1900 && year <= 2099
+}
+
+func buildNGramCandidates(tokens []string, size int) []string {
+	if size <= 0 || len(tokens) < size {
+		return nil
+	}
+
+	out := make([]string, 0, len(tokens)-size+1)
+	for i := 0; i <= len(tokens)-size; i++ {
+		candidate := strings.Join(tokens[i:i+size], " ")
+		if isUsefulThemeCandidate(candidate) {
+			out = append(out, candidate)
+		}
+	}
+	return out
+}
+
+func isUsefulThemeCandidate(candidate string) bool {
+	parts := strings.Fields(candidate)
+	if len(parts) == 0 {
+		return false
+	}
+	numericParts := 0
+	for _, part := range parts {
+		if !isUsefulThemeToken(part) {
+			return false
+		}
+		if isNumericToken(part) || isLikelyYearToken(part) {
+			numericParts++
+		}
+	}
+	return numericParts*2 < len(parts)
+}
+
+func addCandidates(dst map[string]*themeCandidate, terms []string) {
+	seen := make(map[string]bool, len(terms))
+	for _, term := range terms {
+		candidate := dst[term]
+		if candidate == nil {
+			candidate = &themeCandidate{
+				Term:       term,
+				TokenCount: len(strings.Fields(term)),
+			}
+			dst[term] = candidate
+		}
+		candidate.Count++
+		if !seen[term] {
+			candidate.DocFreq++
+			seen[term] = true
+		}
+	}
+}
+
+func sortedThemeCandidates(src map[string]*themeCandidate) []themeCandidate {
+	out := make([]themeCandidate, 0, len(src))
+	for _, candidate := range src {
+		candidate.Score = scoreThemeCandidate(*candidate)
+		out = append(out, *candidate)
+	}
+	sort.Slice(out, func(i, j int) bool {
+		if out[i].Score != out[j].Score {
+			return out[i].Score > out[j].Score
+		}
+		if out[i].Count != out[j].Count {
+			return out[i].Count > out[j].Count
+		}
+		if out[i].DocFreq != out[j].DocFreq {
+			return out[i].DocFreq > out[j].DocFreq
+		}
+		if out[i].TokenCount != out[j].TokenCount {
+			return out[i].TokenCount > out[j].TokenCount
+		}
+		return out[i].Term < out[j].Term
 	})
+	return out
+}
 
-	if limit > 0 && len(terms) > limit {
-		terms = terms[:limit]
+func scoreThemeCandidate(candidate themeCandidate) int {
+	phraseBonus := 0
+	if candidate.TokenCount >= 2 {
+		phraseBonus = 25 + (candidate.TokenCount-2)*10
 	}
-	return terms
+	return candidate.Count*100 + candidate.DocFreq*20 + phraseBonus
+}
+
+func hasStrongPhraseCandidates(candidates []themeCandidate) bool {
+	for _, candidate := range candidates {
+		if candidate.TokenCount >= 2 && (candidate.Count >= 2 || candidate.DocFreq >= 2) {
+			return true
+		}
+	}
+	return false
+}
+
+func toSubjectTerms(candidates []themeCandidate, limit int) []SubjectTerm {
+	if limit > 0 && len(candidates) > limit {
+		candidates = candidates[:limit]
+	}
+	out := make([]SubjectTerm, 0, len(candidates))
+	for _, candidate := range candidates {
+		out = append(out, SubjectTerm{Term: candidate.Term, Count: candidate.Count})
+	}
+	return out
 }
 
 // RenderDomains writes domain rows to w in the requested format.

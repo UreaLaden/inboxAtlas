@@ -1478,6 +1478,135 @@ func TestRunReportExport_HTMLRequiresSummaryFile(t *testing.T) {
 	}
 }
 
+func TestRunReportSummarize_WritesCanonicalSummary(t *testing.T) {
+	reportsDir := filepath.Join("..", "..", "internal", "export", "testdata", "valid")
+	outputFile := filepath.Join(t.TempDir(), "summary.md")
+
+	prevReadPrompt := readSummaryPromptFile
+	prevProvider := newSummaryProvider
+	t.Cleanup(func() {
+		readSummaryPromptFile = prevReadPrompt
+		newSummaryProvider = prevProvider
+	})
+
+	readSummaryPromptFile = func(path string) ([]byte, error) {
+		if path != "test-prompt.md" {
+			t.Fatalf("unexpected prompt path: %s", path)
+		}
+		return []byte("prompt"), nil
+	}
+	newSummaryProvider = func(command string, args []string) exportpkg.SummaryProvider {
+		if command != "stub-provider" {
+			t.Fatalf("unexpected provider command: %s", command)
+		}
+		if len(args) != 1 || args[0] != "arg1" {
+			t.Fatalf("unexpected provider args: %+v", args)
+		}
+		return summaryProviderStub{
+			output: exportpkg.SummaryOutput{
+				Title:                "Inbox Snapshot",
+				Subtitle:             "owner@company.com",
+				Headline:             "Email volume increased from 5 to 8 messages across 2025-01 to 2025-03.",
+				SecondaryHeadline:    "alerts@vendor.com remained the top external sender with 9 messages.",
+				SnapshotBullets:      []string{"vendor.com is the most active external domain with 9 messages."},
+				WhatThisMeansBullets: []string{"A small number of external sources shape most of the 20 messages in scope."},
+				OpportunitiesBullets: []string{"Promote repeated alerts from alerts@vendor.com into a review workflow."},
+				BottomLine:           "The inbox shows stable patterns that are ready for structured automation review.",
+			},
+		}
+	}
+
+	var buf bytes.Buffer
+	err := runReportSummarize(context.Background(), &buf, reportSummarizeOptions{
+		reportsDir:      reportsDir,
+		outputFile:      outputFile,
+		ownerEmail:      "owner@company.com",
+		providerCommand: "stub-provider",
+		providerArgs:    []string{"arg1"},
+		promptFile:      "test-prompt.md",
+	})
+	if err != nil {
+		t.Fatalf("runReportSummarize: %v", err)
+	}
+	body, err := os.ReadFile(outputFile)
+	if err != nil {
+		t.Fatalf("ReadFile: %v", err)
+	}
+	if !strings.Contains(string(body), "## Key Takeaway") || !strings.Contains(string(body), "alerts@vendor.com") {
+		t.Fatalf("unexpected summary body: %s", string(body))
+	}
+	if !strings.Contains(buf.String(), outputFile) {
+		t.Fatalf("expected output path in command output, got %q", buf.String())
+	}
+}
+
+func TestRunReportSummarize_InvalidProviderOutputDoesNotWriteFile(t *testing.T) {
+	reportsDir := filepath.Join("..", "..", "internal", "export", "testdata", "valid")
+	outputFile := filepath.Join(t.TempDir(), "summary.md")
+
+	prevReadPrompt := readSummaryPromptFile
+	prevProvider := newSummaryProvider
+	t.Cleanup(func() {
+		readSummaryPromptFile = prevReadPrompt
+		newSummaryProvider = prevProvider
+	})
+
+	readSummaryPromptFile = func(path string) ([]byte, error) {
+		return []byte("prompt"), nil
+	}
+	newSummaryProvider = func(command string, args []string) exportpkg.SummaryProvider {
+		return summaryProviderStub{
+			output: exportpkg.SummaryOutput{
+				Headline:             "Email volume increased from 5 to 999 messages across 2025-01 to 2025-03.",
+				SecondaryHeadline:    "alerts@vendor.com remained the top external sender with 9 messages.",
+				SnapshotBullets:      []string{"vendor.com is the most active external domain with 9 messages."},
+				WhatThisMeansBullets: []string{"A small number of external sources shape most of the 20 messages in scope."},
+				OpportunitiesBullets: []string{"Promote repeated alerts from alerts@vendor.com into a review workflow."},
+				BottomLine:           "The inbox shows stable patterns that are ready for structured automation review.",
+			},
+		}
+	}
+
+	err := runReportSummarize(context.Background(), io.Discard, reportSummarizeOptions{
+		reportsDir:      reportsDir,
+		outputFile:      outputFile,
+		ownerEmail:      "owner@company.com",
+		providerCommand: "stub-provider",
+		promptFile:      "test-prompt.md",
+	})
+	if err == nil {
+		t.Fatal("expected invalid provider output error")
+	}
+	if _, statErr := os.Stat(outputFile); !errors.Is(statErr, os.ErrNotExist) {
+		t.Fatalf("expected no summary file, stat err=%v", statErr)
+	}
+}
+
+func TestRunReportSummarize_RequiresProviderCommand(t *testing.T) {
+	prevReadPrompt := readSummaryPromptFile
+	t.Cleanup(func() { readSummaryPromptFile = prevReadPrompt })
+	readSummaryPromptFile = func(path string) ([]byte, error) { return []byte("prompt"), nil }
+
+	err := runReportSummarize(context.Background(), io.Discard, reportSummarizeOptions{
+		reportsDir: filepath.Join("..", "..", "internal", "export", "testdata", "valid"),
+		ownerEmail: "owner@company.com",
+		promptFile: "test-prompt.md",
+	})
+	if err == nil {
+		t.Fatal("expected provider command error")
+	}
+	if !strings.Contains(err.Error(), "summary provider command is required") {
+		t.Fatalf("unexpected error: %v", err)
+	}
+}
+
+func TestBuildReportSummarizeCmd(t *testing.T) {
+	cmd := buildReportSummarizeCmd(config.Default())
+	if cmd.Name() != "summarize" {
+		t.Fatalf("unexpected command name: %s", cmd.Name())
+	}
+}
+
 func TestRunReportExport_HTMLWritesSnapshot(t *testing.T) {
 	outputDir := t.TempDir()
 	reportsDir := filepath.Join("..", "..", "internal", "export", "testdata", "valid")
@@ -2127,4 +2256,16 @@ func (s reportExportPDFStub) RenderPDF(_ []byte) ([]byte, error) {
 		return nil, s.err
 	}
 	return append([]byte(nil), s.returnBytes...), nil
+}
+
+type summaryProviderStub struct {
+	output exportpkg.SummaryOutput
+	err    error
+}
+
+func (s summaryProviderStub) GenerateSummary(_ context.Context, _ string, _ exportpkg.SummaryInput) (exportpkg.SummaryOutput, error) {
+	if s.err != nil {
+		return exportpkg.SummaryOutput{}, s.err
+	}
+	return s.output, nil
 }

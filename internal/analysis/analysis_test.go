@@ -68,10 +68,18 @@ func TestTokenizeSubjects_Basic(t *testing.T) {
 	}
 }
 
-func TestTokenizeSubjects_StopWordsFiltered(t *testing.T) {
-	subjects := []string{"re: the meeting", "fwd: an update for you", "re is in and for the or"}
+func TestTokenizeSubjects_NoiseTokensFiltered(t *testing.T) {
+	subjects := []string{
+		"re: the message from you",
+		"fwd: new image attachment for your llc inc md corp co ltd pllc",
+		"fw: 2025 2024 img join have has",
+	}
 	terms := TokenizeSubjects(subjects, 50)
-	stopList := []string{"re", "the", "fwd", "an", "for", "is", "in", "and", "or"}
+	stopList := []string{
+		"re", "fw", "fwd", "your", "you", "from", "have", "has", "new",
+		"message", "join", "llc", "inc", "corp", "co", "ltd", "pllc", "md",
+		"img", "image", "attachment", "2024", "2025",
+	}
 	found := make(map[string]bool)
 	for _, st := range terms {
 		found[st.Term] = true
@@ -104,6 +112,9 @@ func TestTokenizeSubjects_PunctuationStripped(t *testing.T) {
 	if freq["world"] != 1 {
 		t.Errorf("expected world=1")
 	}
+	if _, ok := freq["you"]; ok {
+		t.Errorf("expected filtered token 'you' to be absent: %v", freq)
+	}
 }
 
 func TestTokenizeSubjects_ShortTokensDiscarded(t *testing.T) {
@@ -135,26 +146,98 @@ func TestTokenizeSubjects_Empty(t *testing.T) {
 }
 
 func TestTokenizeSubjects_SortedByCountDesc(t *testing.T) {
-	subjects := []string{"foo bar foo baz foo baz"}
-	terms := TokenizeSubjects(subjects, 10)
-	if len(terms) < 2 {
-		t.Fatal("expected at least 2 terms")
+	subjects := []string{
+		"tax invoice payment",
+		"tax invoice received",
+		"clinical update payment",
 	}
-	for i := 1; i < len(terms); i++ {
-		if terms[i].Count > terms[i-1].Count {
-			t.Errorf("terms not sorted desc: %v > %v", terms[i], terms[i-1])
-		}
+	terms := TokenizeSubjects(subjects, 10)
+	if len(terms) == 0 {
+		t.Fatal("expected at least 1 term")
+	}
+	if terms[0].Term != "tax invoice" {
+		t.Fatalf("expected repeated phrase to rank first, got %+v", terms[0])
 	}
 }
 
 func TestTokenizeSubjects_TieBreakAlpha(t *testing.T) {
-	// "apple" and "zebra" both appear once — alpha tie-break should put apple first
 	terms := TokenizeSubjects([]string{"zebra apple"}, 10)
 	if len(terms) < 2 {
 		t.Fatal("expected 2 terms")
 	}
 	if terms[0].Term != "apple" {
 		t.Errorf("expected apple first (tie-break), got %q", terms[0].Term)
+	}
+}
+
+func TestTokenizeSubjects_PhraseFirstExtraction(t *testing.T) {
+	subjects := []string{
+		"re: tax invoice ready",
+		"fw: tax invoice sent",
+		"tax invoice followup",
+		"payment reminder",
+	}
+	terms := TokenizeSubjects(subjects, 10)
+	if len(terms) == 0 {
+		t.Fatal("expected non-empty terms")
+	}
+	if terms[0].Term != "tax invoice" {
+		t.Fatalf("expected phrase-first ranking, got %+v", terms[0])
+	}
+	for _, term := range terms {
+		if term.Term == "tax" || term.Term == "invoice" {
+			t.Fatalf("expected repeated phrase output instead of unigram fallback: %+v", terms)
+		}
+	}
+}
+
+func TestTokenizeSubjects_FallbackToUnigramsWhenNoRepeatedPhraseExists(t *testing.T) {
+	subjects := []string{
+		"invoice ready",
+		"payment posted",
+		"clinical review",
+	}
+	terms := TokenizeSubjects(subjects, 10)
+	found := make(map[string]int)
+	for _, term := range terms {
+		found[term.Term] = term.Count
+	}
+	if found["invoice"] == 0 {
+		t.Fatalf("expected unigram fallback when no repeated phrase exists: %+v", terms)
+	}
+}
+
+func TestTokenizeSubjects_RegressionSuppressesJunkWhenBetterPhrasesExist(t *testing.T) {
+	subjects := []string{
+		"your tax invoice is ready",
+		"you have a tax invoice",
+		"new tax invoice for llc",
+		"healthy md payment update",
+		"healthy md payment reminder",
+		"img 2025 message from andrea",
+	}
+	terms := TokenizeSubjects(subjects, 10)
+	if len(terms) == 0 {
+		t.Fatal("expected extracted themes")
+	}
+
+	found := make(map[string]int)
+	for _, term := range terms {
+		found[term.Term] = term.Count
+	}
+	for _, bad := range []string{"your", "you", "from", "llc", "md", "img", "new", "message", "2025"} {
+		if _, ok := found[bad]; ok {
+			t.Fatalf("unexpected junk token %q in %+v", bad, terms)
+		}
+	}
+	if _, ok := found["tax invoice"]; !ok {
+		t.Fatalf("expected high-quality phrase 'tax invoice' in %+v", terms)
+	}
+	if _, ok := found["healthy payment"]; ok {
+		t.Fatalf("unexpected fabricated phrase from filtered token removal in %+v", terms)
+	}
+	if _, ok := found["payment update"]; !ok && len(terms) < 2 {
+		t.Fatalf("expected a second useful phrase or sparse but non-trivial output: %+v", terms)
 	}
 }
 

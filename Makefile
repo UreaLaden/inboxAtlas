@@ -2,6 +2,7 @@
 
 BINARY  := inboxatlas
 CMD     := ./cmd/inboxatlas
+SUMMARY_PROVIDER := ./cmd/openai-summary-provider
 
 # Format all Go source files.
 fmt:
@@ -11,10 +12,11 @@ fmt:
 lint: fmt
 	golangci-lint run ./...
 
-# Build both the inboxatlas and ia binaries.
+# Build the inboxatlas, ia, and openai-summary-provider binaries.
 build:
 	go build -o inboxatlas $(CMD)
 	go build -o ia $(CMD)
+	go build -o openai-summary-provider.exe $(SUMMARY_PROVIDER)
 
 # Run all tests.
 test:
