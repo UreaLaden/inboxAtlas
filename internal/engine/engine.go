@@ -106,9 +106,14 @@ func ListClassifySuggestions(ctx context.Context, cfg config.Config, account str
 	}
 	defer func() { _ = st.Close() }()
 
+	suggestions, err := classification.MailboxBootstrapSuggestions(ctx, st, mb.ID, 5)
+	if err != nil {
+		return ClassifySuggestionsSummary{}, err
+	}
+
 	return ClassifySuggestionsSummary{
 		MailboxID:   mb.ID,
-		Suggestions: toEngineSuggestions(classification.MailboxBootstrapSuggestions(mb.ID)),
+		Suggestions: toEngineSuggestions(suggestions),
 	}, nil
 }
 
@@ -161,9 +166,12 @@ func PromoteClassifySuggestion(ctx context.Context, cfg config.Config, account s
 	}
 	defer func() { _ = st.Close() }()
 
-	suggestion, ok := findSuggestion(mb.ID, req.PatternType, req.PatternValue, req.Category)
+	suggestion, ok, err := findSuggestion(ctx, st, mb.ID, req.PatternType, req.PatternValue)
+	if err != nil {
+		return PromoteSuggestionResult{}, err
+	}
 	if !ok {
-		return PromoteSuggestionResult{}, fmt.Errorf("suggestion not found for mailbox %s: %s:%s (%s)", mb.ID, req.PatternType, req.PatternValue, req.Category)
+		return PromoteSuggestionResult{}, fmt.Errorf("suggestion not found for mailbox %s: %s:%s", mb.ID, req.PatternType, req.PatternValue)
 	}
 
 	priority := suggestion.Priority
@@ -265,11 +273,15 @@ func toEngineSuggestions(seeds []classification.ClassificationSeed) []ClassifySu
 	return out
 }
 
-func findSuggestion(mailboxID, patternType, patternValue, category string) (classification.ClassificationSeed, bool) {
-	for _, suggestion := range classification.MailboxBootstrapSuggestions(mailboxID) {
-		if suggestion.PatternType == patternType && suggestion.PatternValue == patternValue && suggestion.Category == category {
-			return suggestion, true
+func findSuggestion(ctx context.Context, st *storage.Store, mailboxID, patternType, patternValue string) (classification.ClassificationSeed, bool, error) {
+	suggestions, err := classification.MailboxBootstrapSuggestions(ctx, st, mailboxID, 5)
+	if err != nil {
+		return classification.ClassificationSeed{}, false, fmt.Errorf("list mailbox suggestions: %w", err)
+	}
+	for _, suggestion := range suggestions {
+		if suggestion.PatternType == patternType && suggestion.PatternValue == patternValue {
+			return suggestion, true, nil
 		}
 	}
-	return classification.ClassificationSeed{}, false
+	return classification.ClassificationSeed{}, false, nil
 }

@@ -1098,6 +1098,38 @@ func TestQueryMessagesByDomain_NoMessages(t *testing.T) {
 	}
 }
 
+func TestQueryDomainStatsByMailbox_MinCountAndOrdering(t *testing.T) {
+	st := newTestStore(t)
+	createTestMailbox(t, st, "user@example.com")
+
+	for _, stat := range []struct {
+		domain string
+		count  int
+	}{
+		{"alpha.example", 7},
+		{"zeta.example", 7},
+		{"beta.example", 4},
+	} {
+		if err := st.UpsertDomainStat(context.Background(), "user@example.com", stat.domain, stat.count); err != nil {
+			t.Fatalf("UpsertDomainStat(%s): %v", stat.domain, err)
+		}
+	}
+
+	rows, err := st.QueryDomainStatsByMailbox(context.Background(), "user@example.com", 5)
+	if err != nil {
+		t.Fatalf("QueryDomainStatsByMailbox: %v", err)
+	}
+	if len(rows) != 2 {
+		t.Fatalf("expected 2 rows, got %d", len(rows))
+	}
+	if rows[0] != (DomainCount{Domain: "alpha.example", Count: 7}) {
+		t.Fatalf("first row: got %+v", rows[0])
+	}
+	if rows[1] != (DomainCount{Domain: "zeta.example", Count: 7}) {
+		t.Fatalf("second row: got %+v", rows[1])
+	}
+}
+
 // --- QueryMessagesBySender ---
 
 func TestQueryMessagesBySender_ScopedOrderedDesc(t *testing.T) {
@@ -1169,6 +1201,84 @@ func TestQueryMessagesBySender_NoMessages(t *testing.T) {
 	}
 	if len(rows) != 0 {
 		t.Errorf("expected 0 rows, got %d", len(rows))
+	}
+}
+
+func TestQuerySenderStatsByMailbox_MinCountAndOrdering(t *testing.T) {
+	st := newTestStore(t)
+	createTestMailbox(t, st, "user@example.com")
+
+	for _, stat := range []struct {
+		email string
+		count int
+	}{
+		{"alpha@example.com", 7},
+		{"zeta@example.com", 7},
+		{"beta@example.com", 4},
+	} {
+		if err := st.UpsertSenderStat(context.Background(), "user@example.com", stat.email, "", "example.com", stat.count); err != nil {
+			t.Fatalf("UpsertSenderStat(%s): %v", stat.email, err)
+		}
+	}
+
+	rows, err := st.QuerySenderStatsByMailbox(context.Background(), "user@example.com", 5)
+	if err != nil {
+		t.Fatalf("QuerySenderStatsByMailbox: %v", err)
+	}
+	if len(rows) != 2 {
+		t.Fatalf("expected 2 rows, got %d", len(rows))
+	}
+	if rows[0].Email != "alpha@example.com" || rows[0].Count != 7 {
+		t.Fatalf("first row: got %+v", rows[0])
+	}
+	if rows[1].Email != "zeta@example.com" || rows[1].Count != 7 {
+		t.Fatalf("second row: got %+v", rows[1])
+	}
+}
+
+func TestUpsertSenderStat_UpdatesExistingRow(t *testing.T) {
+	st := newTestStore(t)
+	createTestMailbox(t, st, "user@example.com")
+
+	if err := st.UpsertSenderStat(context.Background(), "user@example.com", "owner@example.com", "Owner", "example.com", 2); err != nil {
+		t.Fatalf("first UpsertSenderStat: %v", err)
+	}
+	if err := st.UpsertSenderStat(context.Background(), "user@example.com", "owner@example.com", "Owner Updated", "mail.example.com", 5); err != nil {
+		t.Fatalf("second UpsertSenderStat: %v", err)
+	}
+
+	rows, err := st.QuerySenderStatsByMailbox(context.Background(), "user@example.com", 1)
+	if err != nil {
+		t.Fatalf("QuerySenderStatsByMailbox: %v", err)
+	}
+	if len(rows) != 1 {
+		t.Fatalf("expected 1 row, got %d", len(rows))
+	}
+	if rows[0].Name != "Owner Updated" || rows[0].Domain != "mail.example.com" || rows[0].Count != 5 {
+		t.Fatalf("unexpected updated sender stat: %+v", rows[0])
+	}
+}
+
+func TestUpsertDomainStat_UpdatesExistingRow(t *testing.T) {
+	st := newTestStore(t)
+	createTestMailbox(t, st, "user@example.com")
+
+	if err := st.UpsertDomainStat(context.Background(), "user@example.com", "example.com", 2); err != nil {
+		t.Fatalf("first UpsertDomainStat: %v", err)
+	}
+	if err := st.UpsertDomainStat(context.Background(), "user@example.com", "example.com", 5); err != nil {
+		t.Fatalf("second UpsertDomainStat: %v", err)
+	}
+
+	rows, err := st.QueryDomainStatsByMailbox(context.Background(), "user@example.com", 1)
+	if err != nil {
+		t.Fatalf("QueryDomainStatsByMailbox: %v", err)
+	}
+	if len(rows) != 1 {
+		t.Fatalf("expected 1 row, got %d", len(rows))
+	}
+	if rows[0] != (DomainCount{Domain: "example.com", Count: 5}) {
+		t.Fatalf("unexpected updated domain stat: %+v", rows[0])
 	}
 }
 

@@ -181,6 +181,9 @@ func TestListClassifySuggestions(t *testing.T) {
 	cfg := engineTestConfig(t)
 	st := engineTestStore(t, cfg)
 	createEngineMailbox(t, st, "user@example.com")
+	if err := st.UpsertDomainStat(context.Background(), "user@example.com", "healthymd.com", 6); err != nil {
+		t.Fatalf("UpsertDomainStat: %v", err)
+	}
 
 	result, err := ListClassifySuggestions(context.Background(), cfg, "user@example.com")
 	if err != nil {
@@ -189,8 +192,14 @@ func TestListClassifySuggestions(t *testing.T) {
 	if result.MailboxID != "user@example.com" {
 		t.Fatalf("MailboxID: got %q", result.MailboxID)
 	}
-	if len(result.Suggestions) == 0 {
-		t.Fatal("expected suggestions")
+	if len(result.Suggestions) != 1 {
+		t.Fatalf("expected one suggestion, got %d", len(result.Suggestions))
+	}
+	if result.Suggestions[0].PatternType != classification.PatternDomain || result.Suggestions[0].PatternValue != "healthymd.com" {
+		t.Fatalf("unexpected suggestion: %+v", result.Suggestions[0])
+	}
+	if result.Suggestions[0].Category != classification.CategoryUnknown {
+		t.Fatalf("Category: got %q, want %q", result.Suggestions[0].Category, classification.CategoryUnknown)
 	}
 }
 
@@ -306,6 +315,9 @@ func TestPromoteClassifySuggestion_Idempotent(t *testing.T) {
 	cfg := engineTestConfig(t)
 	st := engineTestStore(t, cfg)
 	createEngineMailbox(t, st, "user@example.com")
+	if err := st.UpsertDomainStat(context.Background(), "user@example.com", "healthymd.com", 6); err != nil {
+		t.Fatalf("UpsertDomainStat: %v", err)
+	}
 
 	req := PromoteSuggestionRequest{
 		PatternType:  classification.PatternDomain,
@@ -348,6 +360,13 @@ func TestPromoteClassifySuggestion_IgnoresGlobalAndUnrelatedMailboxSeeds(t *test
 	cfg := engineTestConfig(t)
 	st := engineTestStore(t, cfg)
 	createEngineMailbox(t, st, "user@example.com")
+	createEngineMailbox(t, st, "other@example.com")
+	if err := st.UpsertDomainStat(context.Background(), "user@example.com", "healthymd.com", 6); err != nil {
+		t.Fatalf("UpsertDomainStat user: %v", err)
+	}
+	if err := st.UpsertDomainStat(context.Background(), "other@example.com", "other.example.com", 6); err != nil {
+		t.Fatalf("UpsertDomainStat other: %v", err)
+	}
 
 	if err := st.InsertSeed(context.Background(), storage.ClassificationSeed{
 		PatternType:  classification.PatternDomain,
@@ -411,6 +430,9 @@ func TestPromoteClassifySuggestion_CustomPriority(t *testing.T) {
 	cfg := engineTestConfig(t)
 	st := engineTestStore(t, cfg)
 	createEngineMailbox(t, st, "user@example.com")
+	if err := st.UpsertDomainStat(context.Background(), "user@example.com", "healthymd.com", 6); err != nil {
+		t.Fatalf("UpsertDomainStat: %v", err)
+	}
 
 	result, err := PromoteClassifySuggestion(context.Background(), cfg, "user@example.com", PromoteSuggestionRequest{
 		PatternType:  classification.PatternDomain,
@@ -431,6 +453,9 @@ func TestPromoteClassifySuggestion_ConflictingExistingSeed(t *testing.T) {
 	cfg := engineTestConfig(t)
 	st := engineTestStore(t, cfg)
 	createEngineMailbox(t, st, "user@example.com")
+	if err := st.UpsertDomainStat(context.Background(), "user@example.com", "healthymd.com", 6); err != nil {
+		t.Fatalf("UpsertDomainStat: %v", err)
+	}
 
 	if err := st.InsertSeed(context.Background(), storage.ClassificationSeed{
 		MailboxID:    "user@example.com",
@@ -477,16 +502,30 @@ func TestToEngineSuggestions_MapsFields(t *testing.T) {
 }
 
 func TestFindSuggestion(t *testing.T) {
-	got, ok := findSuggestion("user@example.com", classification.PatternDomain, "healthymd.com", classification.CategoryClient)
+	st := engineTestStore(t, engineTestConfig(t))
+	createEngineMailbox(t, st, "user@example.com")
+	if err := st.UpsertDomainStat(context.Background(), "user@example.com", "healthymd.com", 6); err != nil {
+		t.Fatalf("UpsertDomainStat: %v", err)
+	}
+
+	got, ok, err := findSuggestion(context.Background(), st, "user@example.com", classification.PatternDomain, "healthymd.com")
+	if err != nil {
+		t.Fatalf("findSuggestion: %v", err)
+	}
 	if !ok {
 		t.Fatal("expected suggestion to be found")
 	}
 	if got.MailboxID != "user@example.com" {
 		t.Fatalf("MailboxID: got %q, want %q", got.MailboxID, "user@example.com")
 	}
+	if got.Category != classification.CategoryUnknown {
+		t.Fatalf("Category: got %q, want %q", got.Category, classification.CategoryUnknown)
+	}
 
-	if _, ok := findSuggestion("user@example.com", classification.PatternDomain, "healthymd.com", classification.CategoryVendor); ok {
-		t.Fatal("expected mismatched-category suggestion lookup to fail")
+	if _, ok, err := findSuggestion(context.Background(), st, "user@example.com", classification.PatternDomain, "missing.example"); err != nil {
+		t.Fatalf("findSuggestion missing: %v", err)
+	} else if ok {
+		t.Fatal("expected missing suggestion lookup to fail")
 	}
 }
 

@@ -18,6 +18,20 @@ func makeMsg(fromEmail, domain, subject string) models.MessageMeta {
 	}
 }
 
+func insertBootstrapDomainStat(t *testing.T, st *storage.Store, mailboxID, domain string, count int) {
+	t.Helper()
+	if err := st.UpsertDomainStat(context.Background(), mailboxID, domain, count); err != nil {
+		t.Fatalf("insert domain stat %s/%s: %v", mailboxID, domain, err)
+	}
+}
+
+func insertBootstrapSenderStat(t *testing.T, st *storage.Store, mailboxID, email, domain string, count int) {
+	t.Helper()
+	if err := st.UpsertSenderStat(context.Background(), mailboxID, email, "", domain, count); err != nil {
+		t.Fatalf("insert sender stat %s/%s: %v", mailboxID, email, err)
+	}
+}
+
 func TestSeedRuleClassifier_DomainMatch(t *testing.T) {
 	seeds := []ClassificationSeed{
 		{ID: 1, PatternType: PatternDomain, PatternValue: "facebookmail.com", Category: CategorySocial, Source: SourceSeed, Priority: 100},
@@ -403,29 +417,101 @@ func TestDefaultSeeds_DoNotClassifyFormerTenantSpecificDomain(t *testing.T) {
 }
 
 func TestMailboxBootstrapSuggestions_AreMailboxScoped(t *testing.T) {
-	suggestions := MailboxBootstrapSuggestions("owner@example.com")
-	if len(suggestions) == 0 {
-		t.Fatal("expected mailbox bootstrap suggestions")
-	}
+	st := newClassificationStore(t)
+	ctx := context.Background()
+	createClassificationMailbox(t, st, "owner@example.com")
+	createClassificationMailbox(t, st, "other@example.com")
+	insertBootstrapDomainStat(t, st, "owner@example.com", "healthymd.com", 7)
+	insertBootstrapDomainStat(t, st, "other@example.com", "other.example.com", 9)
 
-	foundTenantSeed := false
-	for _, suggestion := range suggestions {
-		if suggestion.MailboxID != "owner@example.com" {
-			t.Fatalf("suggestion mailbox_id: got %q, want %q", suggestion.MailboxID, "owner@example.com")
-		}
-		if suggestion.PatternValue == "healthymd.com" {
-			foundTenantSeed = true
-		}
+	suggestions, err := MailboxBootstrapSuggestions(ctx, st, "owner@example.com", 5)
+	if err != nil {
+		t.Fatalf("MailboxBootstrapSuggestions: %v", err)
 	}
-	if !foundTenantSeed {
-		t.Fatal("expected healthymd.com in mailbox bootstrap suggestions")
+	if len(suggestions) != 1 {
+		t.Fatalf("expected 1 scoped suggestion, got %d", len(suggestions))
+	}
+	if suggestions[0].MailboxID != "owner@example.com" {
+		t.Fatalf("suggestion mailbox_id: got %q, want %q", suggestions[0].MailboxID, "owner@example.com")
+	}
+	if suggestions[0].PatternValue != "healthymd.com" {
+		t.Fatalf("PatternValue: got %q, want %q", suggestions[0].PatternValue, "healthymd.com")
 	}
 }
 
 func TestMailboxBootstrapSuggestions_EmptyMailboxID(t *testing.T) {
-	suggestions := MailboxBootstrapSuggestions("")
+	suggestions, err := MailboxBootstrapSuggestions(context.Background(), newClassificationStore(t), "", 5)
+	if err != nil {
+		t.Fatalf("MailboxBootstrapSuggestions: %v", err)
+	}
 	if len(suggestions) != 0 {
 		t.Fatalf("expected no suggestions for empty mailbox id; got %d", len(suggestions))
+	}
+}
+
+func TestMailboxBootstrapSuggestions_RequiresStore(t *testing.T) {
+	_, err := MailboxBootstrapSuggestions(context.Background(), nil, "owner@example.com", 5)
+	if err == nil {
+		t.Fatal("expected nil-store error")
+	}
+}
+
+func TestMailboxBootstrapSuggestions_MinCountDefaultsToOne(t *testing.T) {
+	st := newClassificationStore(t)
+	ctx := context.Background()
+	createClassificationMailbox(t, st, "owner@example.com")
+	insertBootstrapDomainStat(t, st, "owner@example.com", "single-hit.example", 1)
+
+	suggestions, err := MailboxBootstrapSuggestions(ctx, st, "owner@example.com", 0)
+	if err != nil {
+		t.Fatalf("MailboxBootstrapSuggestions: %v", err)
+	}
+	if len(suggestions) != 1 || suggestions[0].PatternValue != "single-hit.example" {
+		t.Fatalf("unexpected suggestions: %+v", suggestions)
+	}
+}
+
+func TestMailboxBootstrapSuggestions_AppliesThresholdAndDefaultDedup(t *testing.T) {
+	st := newClassificationStore(t)
+	ctx := context.Background()
+	createClassificationMailbox(t, st, "owner@example.com")
+	insertBootstrapDomainStat(t, st, "owner@example.com", "healthymd.com", 6)
+	insertBootstrapDomainStat(t, st, "owner@example.com", "facebookmail.com", 8)
+	insertBootstrapDomainStat(t, st, "owner@example.com", "below-threshold.example", 4)
+	insertBootstrapSenderStat(t, st, "owner@example.com", "owner@healthymd.com", "healthymd.com", 6)
+	insertBootstrapSenderStat(t, st, "owner@example.com", "calendar-notification@google.com", "google.com", 9)
+
+	suggestions, err := MailboxBootstrapSuggestions(ctx, st, "owner@example.com", 5)
+	if err != nil {
+		t.Fatalf("MailboxBootstrapSuggestions: %v", err)
+	}
+
+	if len(suggestions) != 2 {
+		t.Fatalf("expected 2 suggestions after thresholding and dedup, got %d: %+v", len(suggestions), suggestions)
+	}
+
+	want := map[string]string{
+		PatternDomain + ":" + "healthymd.com":            CategoryUnknown,
+		PatternSenderEmail + ":" + "owner@healthymd.com": CategoryUnknown,
+	}
+	for _, suggestion := range suggestions {
+		key := suggestion.PatternType + ":" + suggestion.PatternValue
+		if suggestion.Source != SourceSeed {
+			t.Fatalf("Source for %s: got %q, want %q", key, suggestion.Source, SourceSeed)
+		}
+		if suggestion.Priority != 100 {
+			t.Fatalf("Priority for %s: got %d, want 100", key, suggestion.Priority)
+		}
+		if suggestion.Category != CategoryUnknown {
+			t.Fatalf("Category for %s: got %q, want %q", key, suggestion.Category, CategoryUnknown)
+		}
+		if _, ok := want[key]; !ok {
+			t.Fatalf("unexpected suggestion %s", key)
+		}
+		delete(want, key)
+	}
+	if len(want) != 0 {
+		t.Fatalf("missing suggestions: %+v", want)
 	}
 }
 
@@ -664,6 +750,58 @@ func TestRunMailboxClassification_RejectsCrossMailboxMessages(t *testing.T) {
 	}
 	if got != nil {
 		t.Fatal("expected no persisted classification on mailbox mismatch")
+	}
+}
+
+func TestRunMailboxClassification_RequiresMailboxID(t *testing.T) {
+	st := newClassificationStore(t)
+	err := RunMailboxClassification(context.Background(), st, "", nil)
+	if err == nil {
+		t.Fatal("expected mailboxID-required error")
+	}
+}
+
+func TestRunMailboxClassification_RejectsMissingProviderID(t *testing.T) {
+	st := newClassificationStore(t)
+	ctx := context.Background()
+	createClassificationMailbox(t, st, "alpha@example.com")
+
+	msg := mustStoreMessage(t, st, models.MessageMeta{
+		ID:         "m1",
+		MailboxID:  "alpha@example.com",
+		Provider:   "gmail",
+		FromEmail:  "person@example.com",
+		Domain:     "example.com",
+		ReceivedAt: time.Now().UTC(),
+	})
+
+	err := RunMailboxClassification(ctx, st, "alpha@example.com", []models.MessageMeta{msg})
+	if err == nil {
+		t.Fatal("expected providerID-required error")
+	}
+}
+
+func TestSpecificityRank_UnknownTypeFallsBackLast(t *testing.T) {
+	if got := specificityRank("mystery"); got != 5 {
+		t.Fatalf("specificityRank: got %d, want 5", got)
+	}
+}
+
+func TestSpecificityRank_KnownTypes(t *testing.T) {
+	tests := []struct {
+		patternType string
+		want        int
+	}{
+		{PatternSenderEmail, 1},
+		{PatternSenderPrefix, 2},
+		{PatternDomain, 3},
+		{PatternSubjectTerm, 4},
+	}
+
+	for _, tt := range tests {
+		if got := specificityRank(tt.patternType); got != tt.want {
+			t.Fatalf("specificityRank(%q): got %d, want %d", tt.patternType, got, tt.want)
+		}
 	}
 }
 

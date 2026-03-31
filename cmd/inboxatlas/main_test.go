@@ -1368,6 +1368,9 @@ func TestRunClassifySuggestions_Table(t *testing.T) {
 	if err := st.CreateMailbox(context.Background(), models.Mailbox{ID: "user@example.com", Provider: "gmail"}); err != nil {
 		t.Fatalf("CreateMailbox: %v", err)
 	}
+	if err := st.UpsertDomainStat(context.Background(), "user@example.com", "healthymd.com", 6); err != nil {
+		t.Fatalf("UpsertDomainStat: %v", err)
+	}
 	_ = st.Close()
 
 	var buf bytes.Buffer
@@ -1390,6 +1393,9 @@ func TestRunClassifySuggestions_JSON(t *testing.T) {
 	}
 	if err := st.CreateMailbox(context.Background(), models.Mailbox{ID: "user@example.com", Provider: "gmail"}); err != nil {
 		t.Fatalf("CreateMailbox: %v", err)
+	}
+	if err := st.UpsertDomainStat(context.Background(), "user@example.com", "healthymd.com", 6); err != nil {
+		t.Fatalf("UpsertDomainStat: %v", err)
 	}
 	_ = st.Close()
 
@@ -1475,6 +1481,9 @@ func TestRunClassifyPromote_SuccessAndIdempotent(t *testing.T) {
 	}
 	if err := st.CreateMailbox(context.Background(), models.Mailbox{ID: "user@example.com", Provider: "gmail"}); err != nil {
 		t.Fatalf("CreateMailbox: %v", err)
+	}
+	if err := st.UpsertDomainStat(context.Background(), "user@example.com", "healthymd.com", 6); err != nil {
+		t.Fatalf("UpsertDomainStat: %v", err)
 	}
 	_ = st.Close()
 

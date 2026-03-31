@@ -353,7 +353,7 @@ inboxatlas classify promote --account <id|alias> \
 |---|---|
 | `classify run` | Loads synced message metadata for one mailbox and persists mailbox-scoped classifications |
 | `classify results` | Shows mailbox-scoped classification totals, per-category counts, and unknown percentage |
-| `classify suggestions` | Shows read-only mailbox bootstrap suggestions derived from known mailbox-specific candidates |
+| `classify suggestions` | Shows read-only mailbox bootstrap suggestions derived from observed mailbox discovery data, excluding patterns already covered by global defaults |
 | `classify promote` | Validates one suggestion for the target mailbox and persists it as an active mailbox-scoped operator seed |
 
 Notes:

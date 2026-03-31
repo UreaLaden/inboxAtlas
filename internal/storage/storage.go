@@ -491,6 +491,41 @@ func (s *Store) QueryMessagesBySender(ctx context.Context, mailboxID string, lim
 	return out, rows.Err()
 }
 
+// QuerySenderStatsByMailbox returns persisted sender aggregate rows for one
+// mailbox from the discovery sender_stats table, filtered by minCount and
+// ordered by count descending then sender ascending.
+func (s *Store) QuerySenderStatsByMailbox(ctx context.Context, mailboxID string, minCount int) ([]SenderCount, error) {
+	rows, err := s.db.QueryContext(ctx,
+		`SELECT from_email, from_name, domain, message_count
+		 FROM sender_stats
+		 WHERE mailbox_id = ? AND from_email != '' AND message_count >= ?
+		 ORDER BY message_count DESC, from_email ASC`,
+		mailboxID, minCount,
+	)
+	if err != nil {
+		return nil, fmt.Errorf("query sender stats by mailbox: %w", err)
+	}
+	defer func() { _ = rows.Close() }()
+
+	var out []SenderCount
+	for rows.Next() {
+		var sc SenderCount
+		var fromName sql.NullString
+		var domain sql.NullString
+		if err := rows.Scan(&sc.Email, &fromName, &domain, &sc.Count); err != nil {
+			return nil, fmt.Errorf("scan sender stats row: %w", err)
+		}
+		if fromName.Valid {
+			sc.Name = fromName.String
+		}
+		if domain.Valid {
+			sc.Domain = domain.String
+		}
+		out = append(out, sc)
+	}
+	return out, rows.Err()
+}
+
 // QueryMessagesByVolume returns monthly message counts sorted by period asc.
 // When mailboxID is empty, results aggregate across all mailboxes.
 func (s *Store) QueryMessagesByVolume(ctx context.Context, mailboxID string) ([]VolumeCount, error) {
@@ -521,6 +556,33 @@ func (s *Store) QueryMessagesByVolume(ctx context.Context, mailboxID string) ([]
 			return nil, fmt.Errorf("scan volume row: %w", err)
 		}
 		out = append(out, vc)
+	}
+	return out, rows.Err()
+}
+
+// QueryDomainStatsByMailbox returns persisted domain aggregate rows for one
+// mailbox from the discovery domain_stats table, filtered by minCount and
+// ordered by count descending then domain ascending.
+func (s *Store) QueryDomainStatsByMailbox(ctx context.Context, mailboxID string, minCount int) ([]DomainCount, error) {
+	rows, err := s.db.QueryContext(ctx,
+		`SELECT domain, message_count
+		 FROM domain_stats
+		 WHERE mailbox_id = ? AND domain != '' AND message_count >= ?
+		 ORDER BY message_count DESC, domain ASC`,
+		mailboxID, minCount,
+	)
+	if err != nil {
+		return nil, fmt.Errorf("query domain stats by mailbox: %w", err)
+	}
+	defer func() { _ = rows.Close() }()
+
+	var out []DomainCount
+	for rows.Next() {
+		var dc DomainCount
+		if err := rows.Scan(&dc.Domain, &dc.Count); err != nil {
+			return nil, fmt.Errorf("scan domain stats row: %w", err)
+		}
+		out = append(out, dc)
 	}
 	return out, rows.Err()
 }
@@ -662,6 +724,44 @@ func (s *Store) UpsertMessage(ctx context.Context, msg models.MessageMeta) error
 	)
 	if err != nil {
 		return fmt.Errorf("upsert message: %w", err)
+	}
+	return nil
+}
+
+// UpsertSenderStat inserts or updates one sender_stats row for mailboxID.
+func (s *Store) UpsertSenderStat(ctx context.Context, mailboxID, fromEmail, fromName, domain string, messageCount int) error {
+	_, err := s.db.ExecContext(ctx,
+		`INSERT INTO sender_stats (mailbox_id, from_email, from_name, domain, message_count)
+		 VALUES (?, ?, ?, ?, ?)
+		 ON CONFLICT(mailbox_id, from_email) DO UPDATE SET
+		 from_name = excluded.from_name,
+		 domain = excluded.domain,
+		 message_count = excluded.message_count`,
+		mailboxID,
+		fromEmail,
+		nullableString(fromName),
+		nullableString(domain),
+		messageCount,
+	)
+	if err != nil {
+		return fmt.Errorf("upsert sender stat: %w", err)
+	}
+	return nil
+}
+
+// UpsertDomainStat inserts or updates one domain_stats row for mailboxID.
+func (s *Store) UpsertDomainStat(ctx context.Context, mailboxID, domain string, messageCount int) error {
+	_, err := s.db.ExecContext(ctx,
+		`INSERT INTO domain_stats (mailbox_id, domain, message_count)
+		 VALUES (?, ?, ?)
+		 ON CONFLICT(mailbox_id, domain) DO UPDATE SET
+		 message_count = excluded.message_count`,
+		mailboxID,
+		domain,
+		messageCount,
+	)
+	if err != nil {
+		return fmt.Errorf("upsert domain stat: %w", err)
 	}
 	return nil
 }

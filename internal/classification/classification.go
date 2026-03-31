@@ -324,30 +324,68 @@ func DefaultSeeds() []ClassificationSeed {
 // from mailbox-local discovery. These suggestions are intentionally separate
 // from DefaultSeeds and from promoted active seeds; they require explicit
 // operator review before influencing runtime classification.
-func MailboxBootstrapSuggestions(mailboxID string) []ClassificationSeed {
+func MailboxBootstrapSuggestions(ctx context.Context, st *storage.Store, mailboxID string, minCount int) ([]ClassificationSeed, error) {
 	if mailboxID == "" {
-		return nil
+		return nil, nil
+	}
+	if st == nil {
+		return nil, fmt.Errorf("storage is required")
+	}
+	if minCount < 1 {
+		minCount = 1
 	}
 
-	suggestions := []ClassificationSeed{
-		{PatternType: PatternSenderEmail, PatternValue: "acr@acrbookkeepingplus.com", Category: CategoryVendor, Source: SourceSeed, Priority: 50},
-		{PatternType: PatternDomain, PatternValue: "ealerts.bankofamerica.com", Category: CategoryVendor, Source: SourceSeed, Priority: 100},
-		{PatternType: PatternDomain, PatternValue: "citynational.com", Category: CategoryVendor, Source: SourceSeed, Priority: 100},
-		{PatternType: PatternDomain, PatternValue: "cardinalhealth.com", Category: CategoryVendor, Source: SourceSeed, Priority: 100},
-		{PatternType: PatternDomain, PatternValue: "acrbookkeepingplus.com", Category: CategoryVendor, Source: SourceSeed, Priority: 100},
-		{PatternType: PatternDomain, PatternValue: "healthymd.com", Category: CategoryClient, Source: SourceSeed, Priority: 100},
-		{PatternType: PatternDomain, PatternValue: "law360.com", Category: CategoryNewsletterMarketing, Source: SourceSeed, Priority: 100},
-		{PatternType: PatternDomain, PatternValue: "cpatrendlines.com", Category: CategoryNewsletterMarketing, Source: SourceSeed, Priority: 100},
-		{PatternType: PatternDomain, PatternValue: "mails.mycareers.net", Category: CategoryNewsletterMarketing, Source: SourceSeed, Priority: 100},
-		{PatternType: PatternDomain, PatternValue: "ktainstitute.com", Category: CategoryNewsletterMarketing, Source: SourceSeed, Priority: 100},
-		{PatternType: PatternDomain, PatternValue: "email.bradfordtaxinstitute.com", Category: CategoryNewsletterMarketing, Source: SourceSeed, Priority: 100},
-		{PatternType: PatternDomain, PatternValue: "woodard.com", Category: CategoryNewsletterMarketing, Source: SourceSeed, Priority: 100},
+	defaultCovered := make(map[string]struct{}, len(DefaultSeeds()))
+	for _, seed := range DefaultSeeds() {
+		defaultCovered[seed.PatternType+"\x00"+strings.ToLower(seed.PatternValue)] = struct{}{}
 	}
 
-	scoped := make([]ClassificationSeed, len(suggestions))
-	copy(scoped, suggestions)
-	for i := range scoped {
-		scoped[i].MailboxID = mailboxID
+	senderStats, err := st.QuerySenderStatsByMailbox(ctx, mailboxID, minCount)
+	if err != nil {
+		return nil, fmt.Errorf("query sender stats: %w", err)
 	}
-	return scoped
+	domainStats, err := st.QueryDomainStatsByMailbox(ctx, mailboxID, minCount)
+	if err != nil {
+		return nil, fmt.Errorf("query domain stats: %w", err)
+	}
+
+	suggestions := make([]ClassificationSeed, 0, len(senderStats)+len(domainStats))
+	seen := make(map[string]struct{}, len(senderStats)+len(domainStats))
+	appendSuggestion := func(patternType, patternValue string) {
+		patternValue = strings.TrimSpace(strings.ToLower(patternValue))
+		if patternValue == "" {
+			return
+		}
+		key := patternType + "\x00" + patternValue
+		if _, ok := defaultCovered[key]; ok {
+			return
+		}
+		if _, ok := seen[key]; ok {
+			return
+		}
+		seen[key] = struct{}{}
+		suggestions = append(suggestions, ClassificationSeed{
+			MailboxID:    mailboxID,
+			PatternType:  patternType,
+			PatternValue: patternValue,
+			Category:     CategoryUnknown,
+			Source:       SourceSeed,
+			Priority:     100,
+		})
+	}
+
+	for _, sender := range senderStats {
+		appendSuggestion(PatternSenderEmail, sender.Email)
+	}
+	for _, domain := range domainStats {
+		appendSuggestion(PatternDomain, domain.Domain)
+	}
+
+	sort.Slice(suggestions, func(i, j int) bool {
+		if suggestions[i].PatternType != suggestions[j].PatternType {
+			return suggestions[i].PatternType < suggestions[j].PatternType
+		}
+		return suggestions[i].PatternValue < suggestions[j].PatternValue
+	})
+	return suggestions, nil
 }
