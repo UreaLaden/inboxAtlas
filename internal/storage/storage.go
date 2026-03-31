@@ -385,6 +385,13 @@ type VolumeCount struct {
 	Count  int
 }
 
+// ClassificationCount is a single category aggregate row returned by
+// QueryClassificationsByMailbox.
+type ClassificationCount struct {
+	Category string
+	Count    int
+}
+
 // ClassificationSeed is a single rule stored in the classification_seeds table.
 // MailboxID is empty for global seeds (apply to all mailboxes).
 type ClassificationSeed struct {
@@ -846,6 +853,33 @@ func (s *Store) SaveClassification(ctx context.Context, c Classification) error 
 		return fmt.Errorf("save classification: %w", err)
 	}
 	return nil
+}
+
+// QueryClassificationsByMailbox returns mailbox-scoped classification counts by
+// category ordered by count descending, then category ascending.
+func (s *Store) QueryClassificationsByMailbox(ctx context.Context, mailboxID string) ([]ClassificationCount, error) {
+	rows, err := s.db.QueryContext(ctx,
+		`SELECT category, COUNT(*)
+		 FROM message_classifications
+		 WHERE mailbox_id = ?
+		 GROUP BY category
+		 ORDER BY COUNT(*) DESC, category ASC`,
+		mailboxID,
+	)
+	if err != nil {
+		return nil, fmt.Errorf("query classifications by mailbox: %w", err)
+	}
+	defer func() { _ = rows.Close() }()
+
+	var out []ClassificationCount
+	for rows.Next() {
+		var count ClassificationCount
+		if err := rows.Scan(&count.Category, &count.Count); err != nil {
+			return nil, fmt.Errorf("scan classification count row: %w", err)
+		}
+		out = append(out, count)
+	}
+	return out, rows.Err()
 }
 
 // BulkSaveClassifications saves multiple classifications in a single transaction.

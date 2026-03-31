@@ -335,6 +335,9 @@ explicit promotion before mailbox-specific suggestions become active seeds.
 # Run deterministic classification for one mailbox
 inboxatlas classify run --account <id|alias>
 
+# Review category counts and unknown% after a classify run
+inboxatlas classify results --account <id|alias> [--format table|json]
+
 # Review mailbox bootstrap suggestions
 inboxatlas classify suggestions --account <id|alias> [--format table|json]
 
@@ -349,6 +352,7 @@ inboxatlas classify promote --account <id|alias> \
 | Command | Purpose |
 |---|---|
 | `classify run` | Loads synced message metadata for one mailbox and persists mailbox-scoped classifications |
+| `classify results` | Shows mailbox-scoped classification totals, per-category counts, and unknown percentage |
 | `classify suggestions` | Shows read-only mailbox bootstrap suggestions derived from known mailbox-specific candidates |
 | `classify promote` | Validates one suggestion for the target mailbox and persists it as an active mailbox-scoped operator seed |
 
@@ -356,6 +360,7 @@ Notes:
 
 - `--account` is required for all classify commands.
 - `classify run` does not trigger sync; it operates on messages already stored locally.
+- `classify results` is read-only and reports on classifications already stored locally.
 - `classify suggestions` is read-only and does not activate any seed.
 - `classify promote` is idempotent for the same mailbox, pattern, category, and priority.
 

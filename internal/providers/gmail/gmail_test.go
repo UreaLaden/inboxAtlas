@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"io"
 	"net"
 	"net/http"
 	"net/http/httptest"
@@ -18,6 +19,12 @@ import (
 
 	"github.com/UreaLaden/inboxatlas/pkg/models"
 )
+
+type roundTripFunc func(*http.Request) (*http.Response, error)
+
+func (f roundTripFunc) RoundTrip(req *http.Request) (*http.Response, error) {
+	return f(req)
+}
 
 // --- Authenticate ---
 
@@ -76,6 +83,20 @@ func newTestService(t *testing.T, handler http.HandlerFunc) (*gmailapi.Service, 
 		t.Fatalf("NewService: %v", err)
 	}
 	return svc, srv.Close
+}
+
+func newRoundTripService(t *testing.T, handler roundTripFunc) *gmailapi.Service {
+	t.Helper()
+
+	svc, err := gmailapi.NewService(context.Background(),
+		option.WithHTTPClient(&http.Client{Transport: handler}),
+		option.WithEndpoint("https://gmail.test/"),
+		option.WithoutAuthentication(),
+	)
+	if err != nil {
+		t.Fatalf("NewService: %v", err)
+	}
+	return svc
 }
 
 // --- ListMessages guard ---
@@ -423,5 +444,64 @@ func TestWrapIfRetryable_Other(t *testing.T) {
 func TestWrapIfRetryable_Nil(t *testing.T) {
 	if wrapIfRetryable(nil) != nil {
 		t.Error("expected nil for nil input")
+	}
+}
+
+func TestRetryableError_ErrorAndUnwrap(t *testing.T) {
+	inner := errors.New("boom")
+	err := &retryableError{err: inner}
+	if err.Error() != "boom" {
+		t.Fatalf("Error: got %q", err.Error())
+	}
+	if !errors.Is(err, inner) {
+		t.Fatal("expected unwrap to expose inner error")
+	}
+}
+
+func TestListMessages_RoundTripperSuccess(t *testing.T) {
+	svc := newRoundTripService(t, func(r *http.Request) (*http.Response, error) {
+		if got := r.URL.Query().Get("pageToken"); got != "cursor1" {
+			t.Fatalf("pageToken: got %q", got)
+		}
+		return &http.Response{
+			StatusCode: http.StatusOK,
+			Header:     http.Header{"Content-Type": []string{"application/json"}},
+			Body: io.NopCloser(strings.NewReader(`{
+				"messages":[{"id":"msg1"},{"id":"msg2"}],
+				"nextPageToken":"cursor2"
+			}`)),
+		}, nil
+	})
+
+	p := &Provider{svc: svc, email: "test@example.com"}
+	ids, next, err := p.ListMessages(context.Background(), "cursor1")
+	if err != nil {
+		t.Fatalf("ListMessages: %v", err)
+	}
+	if len(ids) != 2 || ids[0] != "msg1" || ids[1] != "msg2" {
+		t.Fatalf("ids: got %v", ids)
+	}
+	if next != "cursor2" {
+		t.Fatalf("next: got %q", next)
+	}
+}
+
+func TestGetMessageMeta_RoundTripperRetryableError(t *testing.T) {
+	svc := newRoundTripService(t, func(r *http.Request) (*http.Response, error) {
+		return &http.Response{
+			StatusCode: http.StatusTooManyRequests,
+			Header:     http.Header{"Content-Type": []string{"application/json"}},
+			Body:       io.NopCloser(strings.NewReader(`{"error":{"code":429,"message":"quota exceeded"}}`)),
+		}, nil
+	})
+
+	p := &Provider{svc: svc, email: "test@example.com"}
+	_, err := p.GetMessageMeta(context.Background(), "msg1")
+	if err == nil {
+		t.Fatal("expected retryable error")
+	}
+	var re models.RetryableError
+	if !errors.As(err, &re) || !re.IsRetryable() {
+		t.Fatalf("expected retryable wrapped error, got %v", err)
 	}
 }

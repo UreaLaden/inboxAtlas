@@ -36,6 +36,15 @@ type ClassifySuggestionsSummary struct {
 	Suggestions []ClassifySuggestion
 }
 
+// ClassificationSummary describes mailbox-scoped classification results for
+// operator review.
+type ClassificationSummary struct {
+	MailboxID  string                        `json:"mailbox_id"`
+	Total      int                           `json:"total"`
+	Breakdown  []storage.ClassificationCount `json:"breakdown"`
+	UnknownPct float64                       `json:"unknown_pct"`
+}
+
 // PromoteSuggestionRequest identifies a mailbox bootstrap suggestion to promote
 // into the active mailbox-scoped seed set.
 type PromoteSuggestionRequest struct {
@@ -100,6 +109,42 @@ func ListClassifySuggestions(ctx context.Context, cfg config.Config, account str
 	return ClassifySuggestionsSummary{
 		MailboxID:   mb.ID,
 		Suggestions: toEngineSuggestions(classification.MailboxBootstrapSuggestions(mb.ID)),
+	}, nil
+}
+
+// GetClassificationSummary returns mailbox-scoped classification totals,
+// per-category counts, and the unknown percentage for operator review.
+func GetClassificationSummary(ctx context.Context, cfg config.Config, account string) (ClassificationSummary, error) {
+	st, mb, err := openResolvedStore(ctx, cfg, account)
+	if err != nil {
+		return ClassificationSummary{}, err
+	}
+	defer func() { _ = st.Close() }()
+
+	breakdown, err := st.QueryClassificationsByMailbox(ctx, mb.ID)
+	if err != nil {
+		return ClassificationSummary{}, err
+	}
+
+	total := 0
+	unknown := 0
+	for _, row := range breakdown {
+		total += row.Count
+		if row.Category == classification.CategoryUnknown {
+			unknown += row.Count
+		}
+	}
+
+	unknownPct := 0.0
+	if total > 0 {
+		unknownPct = float64(unknown) * 100 / float64(total)
+	}
+
+	return ClassificationSummary{
+		MailboxID:  mb.ID,
+		Total:      total,
+		Breakdown:  breakdown,
+		UnknownPct: unknownPct,
 	}, nil
 }
 

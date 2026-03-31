@@ -2,6 +2,7 @@ package engine
 
 import (
 	"context"
+	"math"
 	"path/filepath"
 	"testing"
 	"time"
@@ -209,6 +210,80 @@ func TestListClassifySuggestions_OpenStorageError(t *testing.T) {
 	_, err := ListClassifySuggestions(context.Background(), cfg, "user@example.com")
 	if err == nil {
 		t.Fatal("expected open storage error")
+	}
+}
+
+func TestGetClassificationSummary(t *testing.T) {
+	cfg := engineTestConfig(t)
+	st := engineTestStore(t, cfg)
+	createEngineMailbox(t, st, "user@example.com")
+	createEngineMailbox(t, st, "other@example.com")
+
+	now := time.Now().UTC()
+	for _, msg := range []models.MessageMeta{
+		{ProviderID: "m1", MailboxID: "user@example.com", Provider: "gmail", ReceivedAt: now},
+		{ProviderID: "m2", MailboxID: "user@example.com", Provider: "gmail", ReceivedAt: now},
+		{ProviderID: "m3", MailboxID: "user@example.com", Provider: "gmail", ReceivedAt: now},
+		{ProviderID: "m4", MailboxID: "other@example.com", Provider: "gmail", ReceivedAt: now},
+	} {
+		engineSeedMessage(t, st, msg)
+	}
+
+	for _, c := range []storage.Classification{
+		{MessageID: "m1", MailboxID: "user@example.com", Category: classification.CategoryUnknown, Source: classification.SourceSeed, ClassifiedAt: now},
+		{MessageID: "m2", MailboxID: "user@example.com", Category: classification.CategoryVendor, Source: classification.SourceSeed, ClassifiedAt: now},
+		{MessageID: "m3", MailboxID: "user@example.com", Category: classification.CategoryVendor, Source: classification.SourceSeed, ClassifiedAt: now},
+		{MessageID: "m4", MailboxID: "other@example.com", Category: classification.CategoryClient, Source: classification.SourceSeed, ClassifiedAt: now},
+	} {
+		if err := st.SaveClassification(context.Background(), c); err != nil {
+			t.Fatalf("SaveClassification(%s): %v", c.MessageID, err)
+		}
+	}
+
+	result, err := GetClassificationSummary(context.Background(), cfg, "user@example.com")
+	if err != nil {
+		t.Fatalf("GetClassificationSummary: %v", err)
+	}
+	if result.MailboxID != "user@example.com" {
+		t.Fatalf("MailboxID: got %q", result.MailboxID)
+	}
+	if result.Total != 3 {
+		t.Fatalf("Total: got %d, want 3", result.Total)
+	}
+	if len(result.Breakdown) != 2 {
+		t.Fatalf("expected 2 breakdown rows, got %d", len(result.Breakdown))
+	}
+	if result.Breakdown[0] != (storage.ClassificationCount{Category: classification.CategoryVendor, Count: 2}) {
+		t.Fatalf("first row: got %+v", result.Breakdown[0])
+	}
+	if result.Breakdown[1] != (storage.ClassificationCount{Category: classification.CategoryUnknown, Count: 1}) {
+		t.Fatalf("second row: got %+v", result.Breakdown[1])
+	}
+	if math.Abs(result.UnknownPct-33.333333333333336) > 0.000001 {
+		t.Fatalf("UnknownPct: got %v", result.UnknownPct)
+	}
+}
+
+func TestGetClassificationSummary_Empty(t *testing.T) {
+	cfg := engineTestConfig(t)
+	st := engineTestStore(t, cfg)
+	createEngineMailbox(t, st, "user@example.com")
+
+	result, err := GetClassificationSummary(context.Background(), cfg, "user@example.com")
+	if err != nil {
+		t.Fatalf("GetClassificationSummary: %v", err)
+	}
+	if result.Total != 0 || len(result.Breakdown) != 0 || result.UnknownPct != 0 {
+		t.Fatalf("unexpected empty summary: %+v", result)
+	}
+}
+
+func TestGetClassificationSummary_MailboxNotFound(t *testing.T) {
+	cfg := engineTestConfig(t)
+
+	_, err := GetClassificationSummary(context.Background(), cfg, "missing@example.com")
+	if err == nil {
+		t.Fatal("expected mailbox resolution error")
 	}
 }
 
