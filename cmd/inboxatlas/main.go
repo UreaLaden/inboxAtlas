@@ -36,6 +36,7 @@ var newGmailProvider = func(email string, tokenSourceFactory func(context.Contex
 	return gmailprovider.New(email, tokenSourceFactory)
 }
 var runIngestion = ingestion.Run
+var runClassify = engine.RunClassify
 var reportExportPDFRenderer exportpkg.PDFRenderer
 var readSummaryPromptFile = os.ReadFile
 var newSummaryProvider = func(command string, args []string) exportpkg.SummaryProvider {
@@ -565,6 +566,9 @@ func buildClassifyCmd(cfg config.Config) *cobra.Command {
 	cmd.AddCommand(buildClassifyResultsCmd(cfg))
 	cmd.AddCommand(buildClassifySuggestionsCmd(cfg))
 	cmd.AddCommand(buildClassifyPromoteCmd(cfg))
+	cmd.AddCommand(buildClassifySeedsCmd(cfg))
+	cmd.AddCommand(buildClassifyCategoriesCmd())
+	cmd.AddCommand(buildClassifyPatternTypesCmd())
 	return cmd
 }
 
@@ -650,6 +654,74 @@ func buildClassifyPromoteCmd(cfg config.Config) *cobra.Command {
 	return cmd
 }
 
+// buildClassifySeedsCmd returns the "classify seeds" parent command.
+func buildClassifySeedsCmd(cfg config.Config) *cobra.Command {
+	cmd := &cobra.Command{
+		Use:   "seeds",
+		Short: "List and delete active mailbox-scoped seeds",
+	}
+	cmd.AddCommand(buildClassifySeedsListCmd(cfg))
+	cmd.AddCommand(buildClassifySeedsDeleteCmd(cfg))
+	return cmd
+}
+
+// buildClassifySeedsListCmd returns the "classify seeds list" subcommand.
+func buildClassifySeedsListCmd(cfg config.Config) *cobra.Command {
+	var account string
+	var format string
+	cmd := &cobra.Command{
+		Use:   "list",
+		Short: "List active mailbox-scoped seeds",
+		RunE: func(cmd *cobra.Command, _ []string) error {
+			return runClassifySeedsList(cmd.Context(), cmd.OutOrStdout(), cfg, account, format)
+		},
+	}
+	cmd.Flags().StringVar(&account, "account", "", "mailbox email or alias")
+	cmd.Flags().StringVar(&format, "format", "table", "output format: table, json")
+	_ = cmd.MarkFlagRequired("account")
+	return cmd
+}
+
+// buildClassifySeedsDeleteCmd returns the "classify seeds delete" subcommand.
+func buildClassifySeedsDeleteCmd(cfg config.Config) *cobra.Command {
+	var account string
+	var seedID int64
+	cmd := &cobra.Command{
+		Use:   "delete",
+		Short: "Delete one active mailbox-scoped seed",
+		RunE: func(cmd *cobra.Command, _ []string) error {
+			return runClassifySeedsDelete(cmd.Context(), cmd.OutOrStdout(), cfg, account, seedID)
+		},
+	}
+	cmd.Flags().StringVar(&account, "account", "", "mailbox email or alias")
+	cmd.Flags().Int64Var(&seedID, "id", 0, "mailbox seed ID")
+	_ = cmd.MarkFlagRequired("account")
+	_ = cmd.MarkFlagRequired("id")
+	return cmd
+}
+
+// buildClassifyCategoriesCmd returns the "classify categories" subcommand.
+func buildClassifyCategoriesCmd() *cobra.Command {
+	return &cobra.Command{
+		Use:   "categories",
+		Short: "List valid deterministic classification categories",
+		RunE: func(cmd *cobra.Command, _ []string) error {
+			return runClassifyCategories(cmd.OutOrStdout())
+		},
+	}
+}
+
+// buildClassifyPatternTypesCmd returns the "classify pattern-types" subcommand.
+func buildClassifyPatternTypesCmd() *cobra.Command {
+	return &cobra.Command{
+		Use:   "pattern-types",
+		Short: "List valid deterministic classification pattern types",
+		RunE: func(cmd *cobra.Command, _ []string) error {
+			return runClassifyPatternTypes(cmd.OutOrStdout())
+		},
+	}
+}
+
 func validateClassifyFormat(f string) (string, error) {
 	switch f {
 	case "table", "json":
@@ -661,11 +733,24 @@ func validateClassifyFormat(f string) (string, error) {
 
 // runClassifyRun executes mailbox-scoped classification for one mailbox.
 func runClassifyRun(ctx context.Context, w io.Writer, cfg config.Config, account string) error {
-	result, err := engine.RunClassify(ctx, cfg, account)
+	result, err := runClassify(ctx, cfg, account)
 	if err != nil {
 		return err
 	}
 	_, _ = fmt.Fprintf(w, "Classified %d messages for %s.\n", result.MessagesProcessed, result.MailboxID)
+	if len(result.Breakdown) == 0 {
+		return nil
+	}
+
+	tw := tabwriter.NewWriter(w, 0, 0, 3, ' ', 0)
+	_, _ = fmt.Fprintln(tw, "CATEGORY\tCOUNT")
+	for _, row := range result.Breakdown {
+		_, _ = fmt.Fprintf(tw, "%s\t%d\n", row.Category, row.Count)
+	}
+	if err := tw.Flush(); err != nil {
+		return err
+	}
+	_, _ = fmt.Fprintf(w, "Unknown: %.1f%%\n", result.UnknownPct)
 	return nil
 }
 
@@ -751,6 +836,66 @@ func runClassifyPromote(ctx context.Context, w io.Writer, cfg config.Config, acc
 	}
 
 	_, _ = fmt.Fprintf(w, "Suggestion already promoted for %s: %s:%s -> %s (priority %d).\n", result.MailboxID, result.PatternType, result.PatternValue, result.Category, result.Priority)
+	return nil
+}
+
+// runClassifySeedsList renders active mailbox-scoped seeds for one mailbox.
+func runClassifySeedsList(ctx context.Context, w io.Writer, cfg config.Config, account, format string) error {
+	f, err := validateClassifyFormat(format)
+	if err != nil {
+		return err
+	}
+
+	seeds, err := engine.ListMailboxSeeds(ctx, cfg, account)
+	if err != nil {
+		return err
+	}
+
+	if f == "json" {
+		enc := json.NewEncoder(w)
+		enc.SetIndent("", "  ")
+		return enc.Encode(seeds)
+	}
+
+	if len(seeds) == 0 {
+		_, _ = fmt.Fprintf(w, "No mailbox-scoped seeds found for %s.\n", account)
+		return nil
+	}
+
+	tw := tabwriter.NewWriter(w, 0, 0, 3, ' ', 0)
+	_, _ = fmt.Fprintln(tw, "MAILBOX\tPATTERN TYPE\tPATTERN VALUE\tCATEGORY\tSOURCE\tPRIORITY")
+	for _, seed := range seeds {
+		_, _ = fmt.Fprintf(tw, "%s\t%s\t%s\t%s\t%s\t%d\n", seed.MailboxID, seed.PatternType, seed.PatternValue, seed.Category, seed.Source, seed.Priority)
+	}
+	return tw.Flush()
+}
+
+// runClassifySeedsDelete deletes one active mailbox-scoped seed by ID.
+func runClassifySeedsDelete(ctx context.Context, w io.Writer, cfg config.Config, account string, seedID int64) error {
+	if err := engine.DeleteMailboxSeed(ctx, cfg, account, seedID); err != nil {
+		return err
+	}
+	_, _ = fmt.Fprintf(w, "Deleted mailbox seed %d for %s.\n", seedID, account)
+	return nil
+}
+
+// runClassifyCategories writes the supported deterministic category names.
+func runClassifyCategories(w io.Writer) error {
+	for _, category := range engine.ClassificationCategories() {
+		if _, err := fmt.Fprintln(w, category); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// runClassifyPatternTypes writes the supported deterministic pattern types.
+func runClassifyPatternTypes(w io.Writer) error {
+	for _, patternType := range engine.ClassificationPatternTypes() {
+		if _, err := fmt.Fprintln(w, patternType); err != nil {
+			return err
+		}
+	}
 	return nil
 }
 

@@ -1300,9 +1300,22 @@ func TestBuildClassifyCmd_HasSubcommands(t *testing.T) {
 	for _, sub := range cmd.Commands() {
 		names[sub.Name()] = true
 	}
-	for _, want := range []string{"run", "results", "suggestions", "promote"} {
+	for _, want := range []string{"run", "results", "suggestions", "promote", "seeds", "categories", "pattern-types"} {
 		if !names[want] {
 			t.Errorf("expected subcommand %q under classify", want)
+		}
+	}
+}
+
+func TestBuildClassifySeedsCmd_HasSubcommands(t *testing.T) {
+	cmd := buildClassifySeedsCmd(config.Default())
+	names := make(map[string]bool)
+	for _, sub := range cmd.Commands() {
+		names[sub.Name()] = true
+	}
+	for _, want := range []string{"list", "delete"} {
+		if !names[want] {
+			t.Errorf("expected subcommand %q under classify seeds", want)
 		}
 	}
 }
@@ -1337,8 +1350,12 @@ func TestRunClassifyRun_Success(t *testing.T) {
 	if err := runClassifyRun(context.Background(), &buf, cfg, "user@example.com"); err != nil {
 		t.Fatalf("runClassifyRun: %v", err)
 	}
-	if !strings.Contains(buf.String(), "Classified 1 messages for user@example.com.") {
+	output := buf.String()
+	if !strings.Contains(output, "Classified 1 messages for user@example.com.") {
 		t.Fatalf("unexpected output: %q", buf.String())
+	}
+	if !strings.Contains(output, "CATEGORY") || !strings.Contains(output, "social") || !strings.Contains(output, "Unknown: 0.0%") {
+		t.Fatalf("missing breakdown output: %q", output)
 	}
 
 	st, err := storage.Open(cfg.StoragePath)
@@ -1356,6 +1373,96 @@ func TestRunClassifyRun_Success(t *testing.T) {
 	}
 }
 
+func TestRunClassifyRun_WithUnknownBreakdown(t *testing.T) {
+	dir := t.TempDir()
+	cfg := config.Default()
+	cfg.StoragePath = filepath.Join(dir, "test.db")
+
+	st, err := storage.Open(cfg.StoragePath)
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	if err := st.CreateMailbox(context.Background(), models.Mailbox{ID: "user@example.com", Provider: "gmail"}); err != nil {
+		t.Fatalf("CreateMailbox: %v", err)
+	}
+	now := time.Now().UTC()
+	for _, msg := range []models.MessageMeta{
+		{
+			ProviderID: "c1",
+			MailboxID:  "user@example.com",
+			Provider:   "gmail",
+			FromEmail:  "groupupdates@facebookmail.com",
+			Domain:     "facebookmail.com",
+			ReceivedAt: now,
+		},
+		{
+			ProviderID: "c2",
+			MailboxID:  "user@example.com",
+			Provider:   "gmail",
+			FromEmail:  "unknown@example.com",
+			Domain:     "example.com",
+			ReceivedAt: now.Add(time.Minute),
+		},
+	} {
+		if err := st.UpsertMessage(context.Background(), msg); err != nil {
+			t.Fatalf("UpsertMessage(%s): %v", msg.ProviderID, err)
+		}
+	}
+	_ = st.Close()
+
+	var buf bytes.Buffer
+	if err := runClassifyRun(context.Background(), &buf, cfg, "user@example.com"); err != nil {
+		t.Fatalf("runClassifyRun: %v", err)
+	}
+	output := buf.String()
+	if !strings.Contains(output, "social") || !strings.Contains(output, "unknown") || !strings.Contains(output, "Unknown: 50.0%") {
+		t.Fatalf("unexpected breakdown output: %q", output)
+	}
+}
+
+func TestRunClassifyRun_NoBreakdownRows(t *testing.T) {
+	dir := t.TempDir()
+	cfg := config.Default()
+	cfg.StoragePath = filepath.Join(dir, "test.db")
+
+	st, err := storage.Open(cfg.StoragePath)
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	if err := st.CreateMailbox(context.Background(), models.Mailbox{ID: "user@example.com", Provider: "gmail"}); err != nil {
+		t.Fatalf("CreateMailbox: %v", err)
+	}
+	now := time.Now().UTC()
+	if err := st.UpsertMessage(context.Background(), models.MessageMeta{
+		ProviderID: "c1",
+		MailboxID:  "user@example.com",
+		Provider:   "gmail",
+		FromEmail:  "groupupdates@facebookmail.com",
+		Domain:     "facebookmail.com",
+		ReceivedAt: now,
+	}); err != nil {
+		t.Fatalf("UpsertMessage: %v", err)
+	}
+	originalRun := runClassify
+	runClassify = func(ctx context.Context, cfg config.Config, account string) (engine.ClassifyRunSummary, error) {
+		return engine.ClassifyRunSummary{
+			MailboxID:         "user@example.com",
+			MessagesProcessed: 1,
+		}, nil
+	}
+	t.Cleanup(func() { runClassify = originalRun })
+	_ = st.Close()
+
+	var buf bytes.Buffer
+	if err := runClassifyRun(context.Background(), &buf, cfg, "user@example.com"); err != nil {
+		t.Fatalf("runClassifyRun: %v", err)
+	}
+	output := buf.String()
+	if strings.Contains(output, "CATEGORY") || strings.Contains(output, "Unknown:") {
+		t.Fatalf("expected count-only output, got %q", output)
+	}
+}
+
 func TestRunClassifySuggestions_Table(t *testing.T) {
 	dir := t.TempDir()
 	cfg := config.Default()
@@ -1367,6 +1474,9 @@ func TestRunClassifySuggestions_Table(t *testing.T) {
 	}
 	if err := st.CreateMailbox(context.Background(), models.Mailbox{ID: "user@example.com", Provider: "gmail"}); err != nil {
 		t.Fatalf("CreateMailbox: %v", err)
+	}
+	if err := st.UpsertDomainStat(context.Background(), "user@example.com", "healthymd.com", 6); err != nil {
+		t.Fatalf("UpsertDomainStat: %v", err)
 	}
 	_ = st.Close()
 
@@ -1390,6 +1500,9 @@ func TestRunClassifySuggestions_JSON(t *testing.T) {
 	}
 	if err := st.CreateMailbox(context.Background(), models.Mailbox{ID: "user@example.com", Provider: "gmail"}); err != nil {
 		t.Fatalf("CreateMailbox: %v", err)
+	}
+	if err := st.UpsertDomainStat(context.Background(), "user@example.com", "healthymd.com", 6); err != nil {
+		t.Fatalf("UpsertDomainStat: %v", err)
 	}
 	_ = st.Close()
 
@@ -1476,6 +1589,9 @@ func TestRunClassifyPromote_SuccessAndIdempotent(t *testing.T) {
 	if err := st.CreateMailbox(context.Background(), models.Mailbox{ID: "user@example.com", Provider: "gmail"}); err != nil {
 		t.Fatalf("CreateMailbox: %v", err)
 	}
+	if err := st.UpsertDomainStat(context.Background(), "user@example.com", "healthymd.com", 6); err != nil {
+		t.Fatalf("UpsertDomainStat: %v", err)
+	}
 	_ = st.Close()
 
 	req := engine.PromoteSuggestionRequest{
@@ -1522,6 +1638,202 @@ func TestRunClassifyPromote_InvalidSuggestion(t *testing.T) {
 	})
 	if err == nil {
 		t.Fatal("expected invalid suggestion error")
+	}
+}
+
+func TestRunClassifySeedsList_Table(t *testing.T) {
+	dir := t.TempDir()
+	cfg := config.Default()
+	cfg.StoragePath = filepath.Join(dir, "test.db")
+
+	st, err := storage.Open(cfg.StoragePath)
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	if err := st.CreateMailbox(context.Background(), models.Mailbox{ID: "user@example.com", Provider: "gmail"}); err != nil {
+		t.Fatalf("CreateMailbox: %v", err)
+	}
+	if err := st.InsertSeed(context.Background(), storage.ClassificationSeed{
+		MailboxID:    "user@example.com",
+		PatternType:  "domain",
+		PatternValue: "mailbox.example",
+		Category:     "client",
+		Source:       "operator",
+		Priority:     50,
+	}); err != nil {
+		t.Fatalf("InsertSeed: %v", err)
+	}
+	_ = st.Close()
+
+	var buf bytes.Buffer
+	if err := runClassifySeedsList(context.Background(), &buf, cfg, "user@example.com", "table"); err != nil {
+		t.Fatalf("runClassifySeedsList: %v", err)
+	}
+	if !strings.Contains(buf.String(), "MAILBOX") || !strings.Contains(buf.String(), "mailbox.example") {
+		t.Fatalf("unexpected output: %q", buf.String())
+	}
+}
+
+func TestRunClassifySeedsList_JSON(t *testing.T) {
+	dir := t.TempDir()
+	cfg := config.Default()
+	cfg.StoragePath = filepath.Join(dir, "test.db")
+
+	st, err := storage.Open(cfg.StoragePath)
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	if err := st.CreateMailbox(context.Background(), models.Mailbox{ID: "user@example.com", Provider: "gmail"}); err != nil {
+		t.Fatalf("CreateMailbox: %v", err)
+	}
+	if err := st.InsertSeed(context.Background(), storage.ClassificationSeed{
+		MailboxID:    "user@example.com",
+		PatternType:  "domain",
+		PatternValue: "mailbox.example",
+		Category:     "client",
+		Source:       "operator",
+		Priority:     50,
+	}); err != nil {
+		t.Fatalf("InsertSeed: %v", err)
+	}
+	_ = st.Close()
+
+	var buf bytes.Buffer
+	if err := runClassifySeedsList(context.Background(), &buf, cfg, "user@example.com", "json"); err != nil {
+		t.Fatalf("runClassifySeedsList: %v", err)
+	}
+	if !strings.Contains(buf.String(), "\"pattern_value\": \"mailbox.example\"") {
+		t.Fatalf("unexpected json output: %q", buf.String())
+	}
+}
+
+func TestRunClassifySeedsList_Empty(t *testing.T) {
+	dir := t.TempDir()
+	cfg := config.Default()
+	cfg.StoragePath = filepath.Join(dir, "test.db")
+
+	st, err := storage.Open(cfg.StoragePath)
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	if err := st.CreateMailbox(context.Background(), models.Mailbox{ID: "user@example.com", Provider: "gmail"}); err != nil {
+		t.Fatalf("CreateMailbox: %v", err)
+	}
+	_ = st.Close()
+
+	var buf bytes.Buffer
+	if err := runClassifySeedsList(context.Background(), &buf, cfg, "user@example.com", "table"); err != nil {
+		t.Fatalf("runClassifySeedsList: %v", err)
+	}
+	if !strings.Contains(buf.String(), "No mailbox-scoped seeds found") {
+		t.Fatalf("unexpected output: %q", buf.String())
+	}
+}
+
+func TestRunClassifySeedsList_InvalidFormat(t *testing.T) {
+	err := runClassifySeedsList(context.Background(), io.Discard, config.Default(), "user@example.com", "yaml")
+	if err == nil {
+		t.Fatal("expected invalid format error")
+	}
+}
+
+func TestRunClassifySeedsDelete(t *testing.T) {
+	dir := t.TempDir()
+	cfg := config.Default()
+	cfg.StoragePath = filepath.Join(dir, "test.db")
+
+	st, err := storage.Open(cfg.StoragePath)
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	if err := st.CreateMailbox(context.Background(), models.Mailbox{ID: "user@example.com", Provider: "gmail"}); err != nil {
+		t.Fatalf("CreateMailbox: %v", err)
+	}
+	if err := st.InsertSeed(context.Background(), storage.ClassificationSeed{
+		MailboxID:    "user@example.com",
+		PatternType:  "domain",
+		PatternValue: "mailbox.example",
+		Category:     "client",
+		Source:       "operator",
+		Priority:     50,
+	}); err != nil {
+		t.Fatalf("InsertSeed: %v", err)
+	}
+	seeds, err := st.ListSeeds(context.Background(), "user@example.com")
+	if err != nil {
+		t.Fatalf("ListSeeds: %v", err)
+	}
+	seedID := seeds[0].ID
+	_ = st.Close()
+
+	var buf bytes.Buffer
+	if err := runClassifySeedsDelete(context.Background(), &buf, cfg, "user@example.com", seedID); err != nil {
+		t.Fatalf("runClassifySeedsDelete: %v", err)
+	}
+	if !strings.Contains(buf.String(), "Deleted mailbox seed") {
+		t.Fatalf("unexpected output: %q", buf.String())
+	}
+}
+
+func TestRunClassifySeedsDelete_GlobalSeedError(t *testing.T) {
+	dir := t.TempDir()
+	cfg := config.Default()
+	cfg.StoragePath = filepath.Join(dir, "test.db")
+
+	st, err := storage.Open(cfg.StoragePath)
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	if err := st.CreateMailbox(context.Background(), models.Mailbox{ID: "user@example.com", Provider: "gmail"}); err != nil {
+		t.Fatalf("CreateMailbox: %v", err)
+	}
+	if err := st.InsertSeed(context.Background(), storage.ClassificationSeed{
+		PatternType:  "domain",
+		PatternValue: "global.example",
+		Category:     "vendor",
+		Source:       "seed",
+		Priority:     100,
+	}); err != nil {
+		t.Fatalf("InsertSeed: %v", err)
+	}
+	seeds, err := st.ListSeeds(context.Background(), "user@example.com")
+	if err != nil {
+		t.Fatalf("ListSeeds: %v", err)
+	}
+	seedID := seeds[0].ID
+	_ = st.Close()
+
+	err = runClassifySeedsDelete(context.Background(), io.Discard, cfg, "user@example.com", seedID)
+	if err == nil {
+		t.Fatal("expected global-seed guard error")
+	}
+}
+
+func TestRunClassifyCategories(t *testing.T) {
+	var buf bytes.Buffer
+	if err := runClassifyCategories(&buf); err != nil {
+		t.Fatalf("runClassifyCategories: %v", err)
+	}
+	if !strings.Contains(buf.String(), "internal") || !strings.Contains(buf.String(), "unknown") {
+		t.Fatalf("unexpected categories output: %q", buf.String())
+	}
+}
+
+func TestRunClassifyPatternTypes(t *testing.T) {
+	var buf bytes.Buffer
+	if err := runClassifyPatternTypes(&buf); err != nil {
+		t.Fatalf("runClassifyPatternTypes: %v", err)
+	}
+	if !strings.Contains(buf.String(), "domain") || !strings.Contains(buf.String(), "subject_term") {
+		t.Fatalf("unexpected pattern types output: %q", buf.String())
+	}
+}
+
+func TestBuildClassifySeedsDeleteCmd_RequiresFlags(t *testing.T) {
+	cmd := buildClassifySeedsDeleteCmd(config.Default())
+	cmd.SetArgs([]string{"--account", "user@example.com"})
+	if err := cmd.Execute(); err == nil {
+		t.Fatal("expected missing flag error")
 	}
 }
 

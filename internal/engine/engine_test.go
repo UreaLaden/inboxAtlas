@@ -33,6 +33,15 @@ func TestRunClassify_UsesBaselineDefaults(t *testing.T) {
 	if result.MessagesProcessed != 1 {
 		t.Fatalf("MessagesProcessed: got %d, want 1", result.MessagesProcessed)
 	}
+	if len(result.Breakdown) != 1 {
+		t.Fatalf("expected 1 breakdown row, got %d", len(result.Breakdown))
+	}
+	if result.Breakdown[0] != (storage.ClassificationCount{Category: classification.CategorySocial, Count: 1}) {
+		t.Fatalf("unexpected breakdown row: %+v", result.Breakdown[0])
+	}
+	if result.UnknownPct != 0 {
+		t.Fatalf("UnknownPct: got %v, want 0", result.UnknownPct)
+	}
 
 	got, err := st.GetClassification(context.Background(), "m1", "user@example.com")
 	if err != nil {
@@ -40,6 +49,48 @@ func TestRunClassify_UsesBaselineDefaults(t *testing.T) {
 	}
 	if got == nil || got.Category != classification.CategorySocial {
 		t.Fatalf("expected social classification, got %+v", got)
+	}
+}
+
+func TestRunClassify_PopulatesBreakdownAndUnknownPct(t *testing.T) {
+	cfg := engineTestConfig(t)
+	st := engineTestStore(t, cfg)
+	createEngineMailbox(t, st, "user@example.com")
+	engineSeedMessage(t, st, models.MessageMeta{
+		ProviderID: "m1",
+		MailboxID:  "user@example.com",
+		Provider:   "gmail",
+		FromEmail:  "groupupdates@facebookmail.com",
+		Domain:     "facebookmail.com",
+		ReceivedAt: time.Now().UTC(),
+	})
+	engineSeedMessage(t, st, models.MessageMeta{
+		ProviderID: "m2",
+		MailboxID:  "user@example.com",
+		Provider:   "gmail",
+		FromEmail:  "unknown@example.com",
+		Domain:     "example.com",
+		ReceivedAt: time.Now().UTC(),
+	})
+
+	result, err := RunClassify(context.Background(), cfg, "user@example.com")
+	if err != nil {
+		t.Fatalf("RunClassify: %v", err)
+	}
+	if result.MessagesProcessed != 2 {
+		t.Fatalf("MessagesProcessed: got %d, want 2", result.MessagesProcessed)
+	}
+	if len(result.Breakdown) != 2 {
+		t.Fatalf("expected 2 breakdown rows, got %d", len(result.Breakdown))
+	}
+	if result.Breakdown[0] != (storage.ClassificationCount{Category: classification.CategorySocial, Count: 1}) {
+		t.Fatalf("first breakdown row: %+v", result.Breakdown[0])
+	}
+	if result.Breakdown[1] != (storage.ClassificationCount{Category: classification.CategoryUnknown, Count: 1}) {
+		t.Fatalf("second breakdown row: %+v", result.Breakdown[1])
+	}
+	if math.Abs(result.UnknownPct-50.0) > 0.000001 {
+		t.Fatalf("UnknownPct: got %v, want 50", result.UnknownPct)
 	}
 }
 
@@ -177,10 +228,32 @@ func TestRunClassify_ResolvesAlias(t *testing.T) {
 	}
 }
 
+func TestRunClassify_PropagatesClassificationError(t *testing.T) {
+	cfg := engineTestConfig(t)
+	st := engineTestStore(t, cfg)
+	createEngineMailbox(t, st, "user@example.com")
+	engineSeedMessage(t, st, models.MessageMeta{
+		ID:         "m1",
+		MailboxID:  "user@example.com",
+		Provider:   "gmail",
+		FromEmail:  "groupupdates@facebookmail.com",
+		Domain:     "facebookmail.com",
+		ReceivedAt: time.Now().UTC(),
+	})
+
+	_, err := RunClassify(context.Background(), cfg, "user@example.com")
+	if err == nil {
+		t.Fatal("expected classification error")
+	}
+}
+
 func TestListClassifySuggestions(t *testing.T) {
 	cfg := engineTestConfig(t)
 	st := engineTestStore(t, cfg)
 	createEngineMailbox(t, st, "user@example.com")
+	if err := st.UpsertDomainStat(context.Background(), "user@example.com", "healthymd.com", 6); err != nil {
+		t.Fatalf("UpsertDomainStat: %v", err)
+	}
 
 	result, err := ListClassifySuggestions(context.Background(), cfg, "user@example.com")
 	if err != nil {
@@ -189,8 +262,14 @@ func TestListClassifySuggestions(t *testing.T) {
 	if result.MailboxID != "user@example.com" {
 		t.Fatalf("MailboxID: got %q", result.MailboxID)
 	}
-	if len(result.Suggestions) == 0 {
-		t.Fatal("expected suggestions")
+	if len(result.Suggestions) != 1 {
+		t.Fatalf("expected one suggestion, got %d", len(result.Suggestions))
+	}
+	if result.Suggestions[0].PatternType != classification.PatternDomain || result.Suggestions[0].PatternValue != "healthymd.com" {
+		t.Fatalf("unexpected suggestion: %+v", result.Suggestions[0])
+	}
+	if result.Suggestions[0].Category != classification.CategoryUnknown {
+		t.Fatalf("Category: got %q, want %q", result.Suggestions[0].Category, classification.CategoryUnknown)
 	}
 }
 
@@ -210,6 +289,144 @@ func TestListClassifySuggestions_OpenStorageError(t *testing.T) {
 	_, err := ListClassifySuggestions(context.Background(), cfg, "user@example.com")
 	if err == nil {
 		t.Fatal("expected open storage error")
+	}
+}
+
+func TestListMailboxSeeds(t *testing.T) {
+	cfg := engineTestConfig(t)
+	st := engineTestStore(t, cfg)
+	createEngineMailbox(t, st, "user@example.com")
+
+	if err := st.InsertSeed(context.Background(), storage.ClassificationSeed{
+		PatternType:  classification.PatternDomain,
+		PatternValue: "global.example",
+		Category:     classification.CategoryVendor,
+		Source:       classification.SourceSeed,
+		Priority:     100,
+	}); err != nil {
+		t.Fatalf("InsertSeed global: %v", err)
+	}
+	if err := st.InsertSeed(context.Background(), storage.ClassificationSeed{
+		MailboxID:    "user@example.com",
+		PatternType:  classification.PatternDomain,
+		PatternValue: "mailbox.example",
+		Category:     classification.CategoryClient,
+		Source:       classification.SourceOperator,
+		Priority:     50,
+	}); err != nil {
+		t.Fatalf("InsertSeed mailbox: %v", err)
+	}
+
+	seeds, err := ListMailboxSeeds(context.Background(), cfg, "user@example.com")
+	if err != nil {
+		t.Fatalf("ListMailboxSeeds: %v", err)
+	}
+	if len(seeds) != 1 {
+		t.Fatalf("expected 1 mailbox-scoped seed, got %d", len(seeds))
+	}
+	if seeds[0].MailboxID != "user@example.com" || seeds[0].PatternValue != "mailbox.example" {
+		t.Fatalf("unexpected seed: %+v", seeds[0])
+	}
+}
+
+func TestListMailboxSeeds_Empty(t *testing.T) {
+	cfg := engineTestConfig(t)
+	st := engineTestStore(t, cfg)
+	createEngineMailbox(t, st, "user@example.com")
+
+	seeds, err := ListMailboxSeeds(context.Background(), cfg, "user@example.com")
+	if err != nil {
+		t.Fatalf("ListMailboxSeeds: %v", err)
+	}
+	if len(seeds) != 0 {
+		t.Fatalf("expected no mailbox seeds, got %d", len(seeds))
+	}
+}
+
+func TestListMailboxSeeds_MailboxNotFound(t *testing.T) {
+	cfg := engineTestConfig(t)
+
+	_, err := ListMailboxSeeds(context.Background(), cfg, "missing@example.com")
+	if err == nil {
+		t.Fatal("expected mailbox resolution error")
+	}
+}
+
+func TestDeleteMailboxSeed_DeletesMailboxScopedSeed(t *testing.T) {
+	cfg := engineTestConfig(t)
+	st := engineTestStore(t, cfg)
+	createEngineMailbox(t, st, "user@example.com")
+
+	if err := st.InsertSeed(context.Background(), storage.ClassificationSeed{
+		MailboxID:    "user@example.com",
+		PatternType:  classification.PatternDomain,
+		PatternValue: "mailbox.example",
+		Category:     classification.CategoryClient,
+		Source:       classification.SourceOperator,
+		Priority:     50,
+	}); err != nil {
+		t.Fatalf("InsertSeed mailbox: %v", err)
+	}
+	seeds, err := st.ListSeeds(context.Background(), "user@example.com")
+	if err != nil {
+		t.Fatalf("ListSeeds: %v", err)
+	}
+
+	if err := DeleteMailboxSeed(context.Background(), cfg, "user@example.com", seeds[0].ID); err != nil {
+		t.Fatalf("DeleteMailboxSeed: %v", err)
+	}
+
+	after, err := st.ListSeeds(context.Background(), "user@example.com")
+	if err != nil {
+		t.Fatalf("ListSeeds after delete: %v", err)
+	}
+	if len(after) != 0 {
+		t.Fatalf("expected no mailbox seeds after delete, got %d", len(after))
+	}
+}
+
+func TestDeleteMailboxSeed_RejectsGlobalSeed(t *testing.T) {
+	cfg := engineTestConfig(t)
+	st := engineTestStore(t, cfg)
+	createEngineMailbox(t, st, "user@example.com")
+
+	if err := st.InsertSeed(context.Background(), storage.ClassificationSeed{
+		PatternType:  classification.PatternDomain,
+		PatternValue: "global.example",
+		Category:     classification.CategoryVendor,
+		Source:       classification.SourceSeed,
+		Priority:     100,
+	}); err != nil {
+		t.Fatalf("InsertSeed global: %v", err)
+	}
+	seeds, err := st.ListSeeds(context.Background(), "user@example.com")
+	if err != nil {
+		t.Fatalf("ListSeeds: %v", err)
+	}
+
+	err = DeleteMailboxSeed(context.Background(), cfg, "user@example.com", seeds[0].ID)
+	if err == nil {
+		t.Fatal("expected global-seed guard error")
+	}
+}
+
+func TestDeleteMailboxSeed_NotFound(t *testing.T) {
+	cfg := engineTestConfig(t)
+	st := engineTestStore(t, cfg)
+	createEngineMailbox(t, st, "user@example.com")
+
+	err := DeleteMailboxSeed(context.Background(), cfg, "user@example.com", 999)
+	if err == nil {
+		t.Fatal("expected not-found error")
+	}
+}
+
+func TestDeleteMailboxSeed_MailboxNotFound(t *testing.T) {
+	cfg := engineTestConfig(t)
+
+	err := DeleteMailboxSeed(context.Background(), cfg, "missing@example.com", 1)
+	if err == nil {
+		t.Fatal("expected mailbox resolution error")
 	}
 }
 
@@ -306,6 +523,9 @@ func TestPromoteClassifySuggestion_Idempotent(t *testing.T) {
 	cfg := engineTestConfig(t)
 	st := engineTestStore(t, cfg)
 	createEngineMailbox(t, st, "user@example.com")
+	if err := st.UpsertDomainStat(context.Background(), "user@example.com", "healthymd.com", 6); err != nil {
+		t.Fatalf("UpsertDomainStat: %v", err)
+	}
 
 	req := PromoteSuggestionRequest{
 		PatternType:  classification.PatternDomain,
@@ -348,6 +568,13 @@ func TestPromoteClassifySuggestion_IgnoresGlobalAndUnrelatedMailboxSeeds(t *test
 	cfg := engineTestConfig(t)
 	st := engineTestStore(t, cfg)
 	createEngineMailbox(t, st, "user@example.com")
+	createEngineMailbox(t, st, "other@example.com")
+	if err := st.UpsertDomainStat(context.Background(), "user@example.com", "healthymd.com", 6); err != nil {
+		t.Fatalf("UpsertDomainStat user: %v", err)
+	}
+	if err := st.UpsertDomainStat(context.Background(), "other@example.com", "other.example.com", 6); err != nil {
+		t.Fatalf("UpsertDomainStat other: %v", err)
+	}
 
 	if err := st.InsertSeed(context.Background(), storage.ClassificationSeed{
 		PatternType:  classification.PatternDomain,
@@ -411,6 +638,9 @@ func TestPromoteClassifySuggestion_CustomPriority(t *testing.T) {
 	cfg := engineTestConfig(t)
 	st := engineTestStore(t, cfg)
 	createEngineMailbox(t, st, "user@example.com")
+	if err := st.UpsertDomainStat(context.Background(), "user@example.com", "healthymd.com", 6); err != nil {
+		t.Fatalf("UpsertDomainStat: %v", err)
+	}
 
 	result, err := PromoteClassifySuggestion(context.Background(), cfg, "user@example.com", PromoteSuggestionRequest{
 		PatternType:  classification.PatternDomain,
@@ -431,6 +661,9 @@ func TestPromoteClassifySuggestion_ConflictingExistingSeed(t *testing.T) {
 	cfg := engineTestConfig(t)
 	st := engineTestStore(t, cfg)
 	createEngineMailbox(t, st, "user@example.com")
+	if err := st.UpsertDomainStat(context.Background(), "user@example.com", "healthymd.com", 6); err != nil {
+		t.Fatalf("UpsertDomainStat: %v", err)
+	}
 
 	if err := st.InsertSeed(context.Background(), storage.ClassificationSeed{
 		MailboxID:    "user@example.com",
@@ -477,16 +710,57 @@ func TestToEngineSuggestions_MapsFields(t *testing.T) {
 }
 
 func TestFindSuggestion(t *testing.T) {
-	got, ok := findSuggestion("user@example.com", classification.PatternDomain, "healthymd.com", classification.CategoryClient)
+	st := engineTestStore(t, engineTestConfig(t))
+	createEngineMailbox(t, st, "user@example.com")
+	if err := st.UpsertDomainStat(context.Background(), "user@example.com", "healthymd.com", 6); err != nil {
+		t.Fatalf("UpsertDomainStat: %v", err)
+	}
+
+	got, ok, err := findSuggestion(context.Background(), st, "user@example.com", classification.PatternDomain, "healthymd.com")
+	if err != nil {
+		t.Fatalf("findSuggestion: %v", err)
+	}
 	if !ok {
 		t.Fatal("expected suggestion to be found")
 	}
 	if got.MailboxID != "user@example.com" {
 		t.Fatalf("MailboxID: got %q, want %q", got.MailboxID, "user@example.com")
 	}
+	if got.Category != classification.CategoryUnknown {
+		t.Fatalf("Category: got %q, want %q", got.Category, classification.CategoryUnknown)
+	}
 
-	if _, ok := findSuggestion("user@example.com", classification.PatternDomain, "healthymd.com", classification.CategoryVendor); ok {
-		t.Fatal("expected mismatched-category suggestion lookup to fail")
+	if _, ok, err := findSuggestion(context.Background(), st, "user@example.com", classification.PatternDomain, "missing.example"); err != nil {
+		t.Fatalf("findSuggestion missing: %v", err)
+	} else if ok {
+		t.Fatal("expected missing suggestion lookup to fail")
+	}
+}
+
+func TestFindSuggestion_ClosedStore(t *testing.T) {
+	cfg := engineTestConfig(t)
+	st := engineTestStore(t, cfg)
+	createEngineMailbox(t, st, "user@example.com")
+	if err := st.Close(); err != nil {
+		t.Fatalf("Close: %v", err)
+	}
+
+	if _, ok, err := findSuggestion(context.Background(), st, "user@example.com", classification.PatternDomain, "healthymd.com"); err == nil || ok {
+		t.Fatalf("expected closed-store error, got ok=%v err=%v", ok, err)
+	}
+}
+
+func TestClassificationCategories(t *testing.T) {
+	got := ClassificationCategories()
+	if len(got) == 0 || got[0] != classification.CategoryInternal || got[len(got)-1] != classification.CategoryUnknown {
+		t.Fatalf("unexpected categories: %+v", got)
+	}
+}
+
+func TestClassificationPatternTypes(t *testing.T) {
+	got := ClassificationPatternTypes()
+	if len(got) == 0 || got[0] != classification.PatternDomain || got[len(got)-1] != classification.PatternSubjectTerm {
+		t.Fatalf("unexpected pattern types: %+v", got)
 	}
 }
 
