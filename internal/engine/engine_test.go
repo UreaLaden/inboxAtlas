@@ -42,6 +42,56 @@ func TestRunClassify_UsesBaselineDefaults(t *testing.T) {
 	}
 }
 
+func TestEnsureDefaultSeeds_UpdatesExistingSeed(t *testing.T) {
+	cfg := engineTestConfig(t)
+	st := engineTestStore(t, cfg)
+	createEngineMailbox(t, st, "user@example.com")
+
+	defaultSeed := classification.DefaultSeeds()[0]
+	if err := st.InsertSeed(context.Background(), storage.ClassificationSeed{
+		PatternType:  defaultSeed.PatternType,
+		PatternValue: defaultSeed.PatternValue,
+		Category:     classification.CategoryUnknown,
+		Source:       classification.SourceOperator,
+		Priority:     defaultSeed.Priority + 50,
+	}); err != nil {
+		t.Fatalf("InsertSeed: %v", err)
+	}
+
+	if err := ensureDefaultSeeds(context.Background(), st); err != nil {
+		t.Fatalf("ensureDefaultSeeds: %v", err)
+	}
+
+	seeds, err := st.ListSeeds(context.Background(), "")
+	if err != nil {
+		t.Fatalf("ListSeeds: %v", err)
+	}
+
+	var (
+		got   storage.ClassificationSeed
+		found bool
+	)
+	for i := range seeds {
+		if seeds[i].PatternType == defaultSeed.PatternType && seeds[i].PatternValue == defaultSeed.PatternValue {
+			got = seeds[i]
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Fatal("expected default seed to exist after ensureDefaultSeeds")
+	}
+	if got.Category != defaultSeed.Category {
+		t.Fatalf("Category after ensureDefaultSeeds: got %q, want %q", got.Category, defaultSeed.Category)
+	}
+	if got.Source != defaultSeed.Source {
+		t.Fatalf("Source after ensureDefaultSeeds: got %q, want %q", got.Source, defaultSeed.Source)
+	}
+	if got.Priority != defaultSeed.Priority {
+		t.Fatalf("Priority after ensureDefaultSeeds: got %d, want %d", got.Priority, defaultSeed.Priority)
+	}
+}
+
 func TestRunClassify_EmptyMailbox(t *testing.T) {
 	cfg := engineTestConfig(t)
 	st := engineTestStore(t, cfg)

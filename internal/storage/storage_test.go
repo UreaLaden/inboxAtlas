@@ -1474,6 +1474,58 @@ func TestSeedUniqueConstraint(t *testing.T) {
 	}
 }
 
+func TestUpsertSeed_UpdatesExistingRowAndPreservesCreatedAt(t *testing.T) {
+	st := newTestStore(t)
+	ctx := context.Background()
+
+	if err := st.InsertSeed(ctx, globalSeed("domain", "example.com", "vendor")); err != nil {
+		t.Fatalf("InsertSeed: %v", err)
+	}
+
+	before, err := st.ListSeeds(ctx, "")
+	if err != nil {
+		t.Fatalf("ListSeeds before upsert: %v", err)
+	}
+	if len(before) != 1 {
+		t.Fatalf("expected 1 seed before upsert, got %d", len(before))
+	}
+
+	createdAt := before[0].CreatedAt
+	id := before[0].ID
+	if err := st.UpsertSeed(ctx, ClassificationSeed{
+		PatternType:  "domain",
+		PatternValue: "example.com",
+		Category:     "client",
+		Source:       "operator",
+		Priority:     25,
+	}); err != nil {
+		t.Fatalf("UpsertSeed: %v", err)
+	}
+
+	after, err := st.ListSeeds(ctx, "")
+	if err != nil {
+		t.Fatalf("ListSeeds after upsert: %v", err)
+	}
+	if len(after) != 1 {
+		t.Fatalf("expected 1 seed after upsert, got %d", len(after))
+	}
+	if after[0].ID != id {
+		t.Fatalf("seed ID changed after upsert: got %d, want %d", after[0].ID, id)
+	}
+	if !after[0].CreatedAt.Equal(createdAt) {
+		t.Fatalf("CreatedAt changed after upsert: got %v, want %v", after[0].CreatedAt, createdAt)
+	}
+	if after[0].Category != "client" {
+		t.Fatalf("Category after upsert: got %q, want %q", after[0].Category, "client")
+	}
+	if after[0].Source != "operator" {
+		t.Fatalf("Source after upsert: got %q, want %q", after[0].Source, "operator")
+	}
+	if after[0].Priority != 25 {
+		t.Fatalf("Priority after upsert: got %d, want %d", after[0].Priority, 25)
+	}
+}
+
 func TestDeleteSeed(t *testing.T) {
 	st := newTestStore(t)
 	ctx := context.Background()
@@ -1507,6 +1559,16 @@ func TestInsertSeed_ClosedStore(t *testing.T) {
 	_ = st.Close()
 
 	err := st.InsertSeed(context.Background(), globalSeed("domain", "example.com", "vendor"))
+	if err == nil {
+		t.Fatal("expected error from closed store")
+	}
+}
+
+func TestUpsertSeed_ClosedStore(t *testing.T) {
+	st := newTestStore(t)
+	_ = st.Close()
+
+	err := st.UpsertSeed(context.Background(), globalSeed("domain", "example.com", "vendor"))
 	if err == nil {
 		t.Fatal("expected error from closed store")
 	}
