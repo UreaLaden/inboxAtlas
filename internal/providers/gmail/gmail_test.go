@@ -4,8 +4,10 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"net"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 	"time"
 
@@ -55,7 +57,16 @@ func TestAuthenticate_NilTokenSourceFactory(t *testing.T) {
 // The caller must invoke the returned cleanup function when done.
 func newTestService(t *testing.T, handler http.HandlerFunc) (*gmailapi.Service, func()) {
 	t.Helper()
-	srv := httptest.NewServer(handler)
+	listener, err := net.Listen("tcp4", "127.0.0.1:0")
+	if err != nil {
+		if strings.Contains(err.Error(), "operation not permitted") {
+			t.Skipf("local TCP listeners unavailable in this environment: %v", err)
+		}
+		t.Fatalf("Listen: %v", err)
+	}
+	srv := httptest.NewUnstartedServer(handler)
+	srv.Listener = listener
+	srv.Start()
 	svc, err := gmailapi.NewService(context.Background(),
 		option.WithEndpoint(srv.URL),
 		option.WithoutAuthentication(),

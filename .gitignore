@@ -7,6 +7,6 @@
 /inboxatlas.exe
 /ia
 /ia.exe
-
+/openai-summary-provider.exe
 # Test coverage output
 coverage.out

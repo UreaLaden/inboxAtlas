@@ -57,6 +57,7 @@ inboxatlas report domains  --account <id|alias> [--format table|csv|json] [--lim
 inboxatlas report senders  --account <id|alias> [--format table|csv|json] [--limit 25]
 inboxatlas report subjects --account <id|alias> [--format table|csv|json] [--limit 25]
 inboxatlas report volume   --account <id|alias> [--format table|csv|json]
+inboxatlas report summarize --reports-dir <dir> [--output-file <path>] [--owner-email <email>] [--owner-domain <domain>] [--provider-command <cmd>] [--provider-arg <arg> ...] [--prompt-file <path>]
 ```
 
 `--account` and `--all-accounts` are mutually exclusive.
@@ -75,6 +76,15 @@ Export operates on an existing reports directory rather than reading SQLite
 directly:
 
 ```bash
+inboxatlas report summarize \
+  --reports-dir <dir> \
+  [--output-file <path>] \
+  [--owner-email <email>] \
+  [--owner-domain <domain>] \
+  [--provider-command <cmd>] \
+  [--provider-arg <arg> ...] \
+  [--prompt-file <path>]
+
 inboxatlas report export \
   --reports-dir <dir> \
   --output-dir <dir> \
@@ -86,7 +96,22 @@ inboxatlas report export \
 
 Notes:
 
+- `report summarize` writes canonical `summary.md` output; if `--output-file` is omitted it defaults to `<reports-dir>/summary.md`
+- `report summarize` requires `--provider-command` or `INBOXATLAS_SUMMARY_PROVIDER_CMD`
+- the first-party provider binary in this repo is `cmd/openai-summary-provider`
+- the OpenAI provider binary uses `OPENAI_API_KEY` and optionally `OPENAI_MODEL`, `OPENAI_BASE_URL`, `OPENAI_TIMEOUT_SECONDS`, and `OPENAI_DEBUG`
 - `excel` needs only the report CSV inputs
 - `html`, `pdf`, and `all` require `--summary-file`
 - output filenames are deterministic: `inbox-report-<owner>-<period>.<ext>`
 - PDF export is still gated by renderer availability
+
+Example with the first-party provider:
+
+```bash
+go build -o ./bin/openai-summary-provider ./cmd/openai-summary-provider
+
+OPENAI_API_KEY=... inboxatlas report summarize \
+  --reports-dir ./reports \
+  --owner-email owner@company.com \
+  --provider-command ./bin/openai-summary-provider
+```

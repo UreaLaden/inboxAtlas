@@ -493,10 +493,7 @@ func TestRefreshAndSave_LoadError(t *testing.T) {
 // --- runFlow ---
 
 func TestRunFlow_Success(t *testing.T) {
-	listener, err := net.Listen("tcp", "127.0.0.1:0")
-	if err != nil {
-		t.Fatal(err)
-	}
+	listener := mustListenTCP4(t)
 	port := listener.Addr().(*net.TCPAddr).Port
 	state := "test-state-abc"
 
@@ -533,10 +530,7 @@ func TestRunFlow_Success(t *testing.T) {
 }
 
 func TestRunFlow_StateMismatch(t *testing.T) {
-	listener, err := net.Listen("tcp", "127.0.0.1:0")
-	if err != nil {
-		t.Fatal(err)
-	}
+	listener := mustListenTCP4(t)
 	port := listener.Addr().(*net.TCPAddr).Port
 	ctx := context.Background()
 
@@ -561,10 +555,7 @@ func TestRunFlow_StateMismatch(t *testing.T) {
 }
 
 func TestRunFlow_OAuthError(t *testing.T) {
-	listener, err := net.Listen("tcp", "127.0.0.1:0")
-	if err != nil {
-		t.Fatal(err)
-	}
+	listener := mustListenTCP4(t)
 	port := listener.Addr().(*net.TCPAddr).Port
 	ctx := context.Background()
 
@@ -589,10 +580,7 @@ func TestRunFlow_OAuthError(t *testing.T) {
 }
 
 func TestRunFlow_NoCode(t *testing.T) {
-	listener, err := net.Listen("tcp", "127.0.0.1:0")
-	if err != nil {
-		t.Fatal(err)
-	}
+	listener := mustListenTCP4(t)
 	port := listener.Addr().(*net.TCPAddr).Port
 	ctx := context.Background()
 
@@ -617,10 +605,7 @@ func TestRunFlow_NoCode(t *testing.T) {
 }
 
 func TestRunFlow_ContextCancelled(t *testing.T) {
-	listener, err := net.Listen("tcp", "127.0.0.1:0")
-	if err != nil {
-		t.Fatal(err)
-	}
+	listener := mustListenTCP4(t)
 	ctx, cancel := context.WithCancel(context.Background())
 
 	done := make(chan error, 1)
@@ -807,4 +792,17 @@ func waitForListener(t *testing.T, address string) {
 	}
 
 	t.Fatalf("listener %q was not ready before timeout", address)
+}
+
+func mustListenTCP4(t *testing.T) net.Listener {
+	t.Helper()
+
+	listener, err := net.Listen("tcp4", "127.0.0.1:0")
+	if err != nil {
+		if strings.Contains(err.Error(), "operation not permitted") {
+			t.Skipf("local TCP listeners unavailable in this environment: %v", err)
+		}
+		t.Fatalf("Listen: %v", err)
+	}
+	return listener
 }

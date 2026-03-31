@@ -755,6 +755,32 @@ func (s *Store) InsertSeed(ctx context.Context, seed ClassificationSeed) error {
 	return nil
 }
 
+// UpsertSeed inserts a classification seed or updates the existing row with
+// matching mailbox scope, pattern type, and pattern value while preserving the
+// original created_at timestamp.
+func (s *Store) UpsertSeed(ctx context.Context, seed ClassificationSeed) error {
+	_, err := s.db.ExecContext(ctx,
+		`INSERT INTO classification_seeds
+		 (mailbox_id, pattern_type, pattern_value, category, source, priority, created_at)
+		 VALUES (?, ?, ?, ?, ?, ?, ?)
+		 ON CONFLICT(COALESCE(mailbox_id, ''), pattern_type, pattern_value) DO UPDATE SET
+		 category = excluded.category,
+		 source = excluded.source,
+		 priority = excluded.priority`,
+		nullableString(seed.MailboxID),
+		seed.PatternType,
+		seed.PatternValue,
+		seed.Category,
+		seed.Source,
+		seed.Priority,
+		time.Now().UTC().Format(time.RFC3339),
+	)
+	if err != nil {
+		return fmt.Errorf("upsert seed: %w", err)
+	}
+	return nil
+}
+
 // ListSeeds returns all seeds that apply to the given mailboxID: global seeds
 // (mailbox_id IS NULL) plus mailbox-specific seeds (mailbox_id = mailboxID).
 // When mailboxID is empty, only global seeds are returned.

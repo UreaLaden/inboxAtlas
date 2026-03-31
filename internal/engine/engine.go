@@ -192,14 +192,14 @@ func openResolvedStore(ctx context.Context, cfg config.Config, account string) (
 
 func ensureDefaultSeeds(ctx context.Context, st *storage.Store) error {
 	for _, seed := range classification.DefaultSeeds() {
-		if err := st.InsertSeed(ctx, storage.ClassificationSeed{
+		if err := st.UpsertSeed(ctx, storage.ClassificationSeed{
 			PatternType:  seed.PatternType,
 			PatternValue: seed.PatternValue,
 			Category:     seed.Category,
 			Source:       seed.Source,
 			Priority:     seed.Priority,
 		}); err != nil {
-			return fmt.Errorf("insert default seed %s:%s: %w", seed.PatternType, seed.PatternValue, err)
+			return fmt.Errorf("upsert default seed %s:%s: %w", seed.PatternType, seed.PatternValue, err)
 		}
 	}
 	return nil
