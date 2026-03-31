@@ -323,7 +323,7 @@ func validSummaryInput(t *testing.T) SummaryInput {
 func validLargeSummaryInput(t *testing.T) SummaryInput {
 	t.Helper()
 	model, err := ParseReportsDir(Options{
-		ReportsDir: filepath.Join("..", "..", ".ai", "references", "reports", "out"),
+		ReportsDir: filepath.Join("testdata", "large"),
 		OwnerEmail: "acr@acrbookkeepingplus.com",
 	})
 	if err != nil {
