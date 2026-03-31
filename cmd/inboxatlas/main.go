@@ -36,6 +36,7 @@ var newGmailProvider = func(email string, tokenSourceFactory func(context.Contex
 	return gmailprovider.New(email, tokenSourceFactory)
 }
 var runIngestion = ingestion.Run
+var runClassify = engine.RunClassify
 var reportExportPDFRenderer exportpkg.PDFRenderer
 var readSummaryPromptFile = os.ReadFile
 var newSummaryProvider = func(command string, args []string) exportpkg.SummaryProvider {
@@ -732,11 +733,24 @@ func validateClassifyFormat(f string) (string, error) {
 
 // runClassifyRun executes mailbox-scoped classification for one mailbox.
 func runClassifyRun(ctx context.Context, w io.Writer, cfg config.Config, account string) error {
-	result, err := engine.RunClassify(ctx, cfg, account)
+	result, err := runClassify(ctx, cfg, account)
 	if err != nil {
 		return err
 	}
 	_, _ = fmt.Fprintf(w, "Classified %d messages for %s.\n", result.MessagesProcessed, result.MailboxID)
+	if len(result.Breakdown) == 0 {
+		return nil
+	}
+
+	tw := tabwriter.NewWriter(w, 0, 0, 3, ' ', 0)
+	_, _ = fmt.Fprintln(tw, "CATEGORY\tCOUNT")
+	for _, row := range result.Breakdown {
+		_, _ = fmt.Fprintf(tw, "%s\t%d\n", row.Category, row.Count)
+	}
+	if err := tw.Flush(); err != nil {
+		return err
+	}
+	_, _ = fmt.Fprintf(w, "Unknown: %.1f%%\n", result.UnknownPct)
 	return nil
 }
 

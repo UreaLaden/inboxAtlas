@@ -361,7 +361,7 @@ inboxatlas classify promote --account <id|alias> \
 
 | Command | Purpose |
 |---|---|
-| `classify run` | Loads synced message metadata for one mailbox and persists mailbox-scoped classifications |
+| `classify run` | Loads synced message metadata for one mailbox, persists mailbox-scoped classifications, and prints a per-category breakdown with unknown percentage |
 | `classify results` | Shows mailbox-scoped classification totals, per-category counts, and unknown percentage |
 | `classify suggestions` | Shows read-only mailbox bootstrap suggestions derived from observed mailbox discovery data, excluding patterns already covered by global defaults |
 | `classify seeds list` | Lists active mailbox-scoped seeds and excludes global defaults from the mailbox operator view |
@@ -373,7 +373,7 @@ inboxatlas classify promote --account <id|alias> \
 Notes:
 
 - `--account` is required for mailbox-scoped classify commands.
-- `classify run` does not trigger sync; it operates on messages already stored locally.
+- `classify run` does not trigger sync; it operates on messages already stored locally and prints the post-run category breakdown immediately.
 - `classify results` is read-only and reports on classifications already stored locally.
 - `classify suggestions` is read-only and does not activate any seed.
 - `classify seeds list` and `classify seeds delete` operate only on mailbox-scoped active seeds; global defaults remain protected.

@@ -1350,8 +1350,12 @@ func TestRunClassifyRun_Success(t *testing.T) {
 	if err := runClassifyRun(context.Background(), &buf, cfg, "user@example.com"); err != nil {
 		t.Fatalf("runClassifyRun: %v", err)
 	}
-	if !strings.Contains(buf.String(), "Classified 1 messages for user@example.com.") {
+	output := buf.String()
+	if !strings.Contains(output, "Classified 1 messages for user@example.com.") {
 		t.Fatalf("unexpected output: %q", buf.String())
+	}
+	if !strings.Contains(output, "CATEGORY") || !strings.Contains(output, "social") || !strings.Contains(output, "Unknown: 0.0%") {
+		t.Fatalf("missing breakdown output: %q", output)
 	}
 
 	st, err := storage.Open(cfg.StoragePath)
@@ -1366,6 +1370,96 @@ func TestRunClassifyRun_Success(t *testing.T) {
 	}
 	if got == nil || got.Category != "social" {
 		t.Fatalf("expected social classification, got %+v", got)
+	}
+}
+
+func TestRunClassifyRun_WithUnknownBreakdown(t *testing.T) {
+	dir := t.TempDir()
+	cfg := config.Default()
+	cfg.StoragePath = filepath.Join(dir, "test.db")
+
+	st, err := storage.Open(cfg.StoragePath)
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	if err := st.CreateMailbox(context.Background(), models.Mailbox{ID: "user@example.com", Provider: "gmail"}); err != nil {
+		t.Fatalf("CreateMailbox: %v", err)
+	}
+	now := time.Now().UTC()
+	for _, msg := range []models.MessageMeta{
+		{
+			ProviderID: "c1",
+			MailboxID:  "user@example.com",
+			Provider:   "gmail",
+			FromEmail:  "groupupdates@facebookmail.com",
+			Domain:     "facebookmail.com",
+			ReceivedAt: now,
+		},
+		{
+			ProviderID: "c2",
+			MailboxID:  "user@example.com",
+			Provider:   "gmail",
+			FromEmail:  "unknown@example.com",
+			Domain:     "example.com",
+			ReceivedAt: now.Add(time.Minute),
+		},
+	} {
+		if err := st.UpsertMessage(context.Background(), msg); err != nil {
+			t.Fatalf("UpsertMessage(%s): %v", msg.ProviderID, err)
+		}
+	}
+	_ = st.Close()
+
+	var buf bytes.Buffer
+	if err := runClassifyRun(context.Background(), &buf, cfg, "user@example.com"); err != nil {
+		t.Fatalf("runClassifyRun: %v", err)
+	}
+	output := buf.String()
+	if !strings.Contains(output, "social") || !strings.Contains(output, "unknown") || !strings.Contains(output, "Unknown: 50.0%") {
+		t.Fatalf("unexpected breakdown output: %q", output)
+	}
+}
+
+func TestRunClassifyRun_NoBreakdownRows(t *testing.T) {
+	dir := t.TempDir()
+	cfg := config.Default()
+	cfg.StoragePath = filepath.Join(dir, "test.db")
+
+	st, err := storage.Open(cfg.StoragePath)
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	if err := st.CreateMailbox(context.Background(), models.Mailbox{ID: "user@example.com", Provider: "gmail"}); err != nil {
+		t.Fatalf("CreateMailbox: %v", err)
+	}
+	now := time.Now().UTC()
+	if err := st.UpsertMessage(context.Background(), models.MessageMeta{
+		ProviderID: "c1",
+		MailboxID:  "user@example.com",
+		Provider:   "gmail",
+		FromEmail:  "groupupdates@facebookmail.com",
+		Domain:     "facebookmail.com",
+		ReceivedAt: now,
+	}); err != nil {
+		t.Fatalf("UpsertMessage: %v", err)
+	}
+	originalRun := runClassify
+	runClassify = func(ctx context.Context, cfg config.Config, account string) (engine.ClassifyRunSummary, error) {
+		return engine.ClassifyRunSummary{
+			MailboxID:         "user@example.com",
+			MessagesProcessed: 1,
+		}, nil
+	}
+	t.Cleanup(func() { runClassify = originalRun })
+	_ = st.Close()
+
+	var buf bytes.Buffer
+	if err := runClassifyRun(context.Background(), &buf, cfg, "user@example.com"); err != nil {
+		t.Fatalf("runClassifyRun: %v", err)
+	}
+	output := buf.String()
+	if strings.Contains(output, "CATEGORY") || strings.Contains(output, "Unknown:") {
+		t.Fatalf("expected count-only output, got %q", output)
 	}
 }
 

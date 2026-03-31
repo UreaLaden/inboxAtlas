@@ -33,6 +33,15 @@ func TestRunClassify_UsesBaselineDefaults(t *testing.T) {
 	if result.MessagesProcessed != 1 {
 		t.Fatalf("MessagesProcessed: got %d, want 1", result.MessagesProcessed)
 	}
+	if len(result.Breakdown) != 1 {
+		t.Fatalf("expected 1 breakdown row, got %d", len(result.Breakdown))
+	}
+	if result.Breakdown[0] != (storage.ClassificationCount{Category: classification.CategorySocial, Count: 1}) {
+		t.Fatalf("unexpected breakdown row: %+v", result.Breakdown[0])
+	}
+	if result.UnknownPct != 0 {
+		t.Fatalf("UnknownPct: got %v, want 0", result.UnknownPct)
+	}
 
 	got, err := st.GetClassification(context.Background(), "m1", "user@example.com")
 	if err != nil {
@@ -40,6 +49,48 @@ func TestRunClassify_UsesBaselineDefaults(t *testing.T) {
 	}
 	if got == nil || got.Category != classification.CategorySocial {
 		t.Fatalf("expected social classification, got %+v", got)
+	}
+}
+
+func TestRunClassify_PopulatesBreakdownAndUnknownPct(t *testing.T) {
+	cfg := engineTestConfig(t)
+	st := engineTestStore(t, cfg)
+	createEngineMailbox(t, st, "user@example.com")
+	engineSeedMessage(t, st, models.MessageMeta{
+		ProviderID: "m1",
+		MailboxID:  "user@example.com",
+		Provider:   "gmail",
+		FromEmail:  "groupupdates@facebookmail.com",
+		Domain:     "facebookmail.com",
+		ReceivedAt: time.Now().UTC(),
+	})
+	engineSeedMessage(t, st, models.MessageMeta{
+		ProviderID: "m2",
+		MailboxID:  "user@example.com",
+		Provider:   "gmail",
+		FromEmail:  "unknown@example.com",
+		Domain:     "example.com",
+		ReceivedAt: time.Now().UTC(),
+	})
+
+	result, err := RunClassify(context.Background(), cfg, "user@example.com")
+	if err != nil {
+		t.Fatalf("RunClassify: %v", err)
+	}
+	if result.MessagesProcessed != 2 {
+		t.Fatalf("MessagesProcessed: got %d, want 2", result.MessagesProcessed)
+	}
+	if len(result.Breakdown) != 2 {
+		t.Fatalf("expected 2 breakdown rows, got %d", len(result.Breakdown))
+	}
+	if result.Breakdown[0] != (storage.ClassificationCount{Category: classification.CategorySocial, Count: 1}) {
+		t.Fatalf("first breakdown row: %+v", result.Breakdown[0])
+	}
+	if result.Breakdown[1] != (storage.ClassificationCount{Category: classification.CategoryUnknown, Count: 1}) {
+		t.Fatalf("second breakdown row: %+v", result.Breakdown[1])
+	}
+	if math.Abs(result.UnknownPct-50.0) > 0.000001 {
+		t.Fatalf("UnknownPct: got %v, want 50", result.UnknownPct)
 	}
 }
 

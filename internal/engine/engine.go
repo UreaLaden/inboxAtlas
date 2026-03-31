@@ -17,6 +17,8 @@ import (
 type ClassifyRunSummary struct {
 	MailboxID         string
 	MessagesProcessed int
+	Breakdown         []storage.ClassificationCount
+	UnknownPct        float64
 }
 
 // ClassifySuggestion is a mailbox-scoped candidate classification seed shown
@@ -182,9 +184,30 @@ func RunClassify(ctx context.Context, cfg config.Config, account string) (Classi
 		return ClassifyRunSummary{}, err
 	}
 
+	breakdown, err := st.QueryClassificationsByMailbox(ctx, mb.ID)
+	if err != nil {
+		return ClassifyRunSummary{}, fmt.Errorf("query classifications by mailbox: %w", err)
+	}
+
+	total := 0
+	unknown := 0
+	for _, row := range breakdown {
+		total += row.Count
+		if row.Category == classification.CategoryUnknown {
+			unknown += row.Count
+		}
+	}
+
+	unknownPct := 0.0
+	if total > 0 {
+		unknownPct = float64(unknown) * 100 / float64(total)
+	}
+
 	return ClassifyRunSummary{
 		MailboxID:         mb.ID,
 		MessagesProcessed: len(messages),
+		Breakdown:         breakdown,
+		UnknownPct:        unknownPct,
 	}, nil
 }
 
