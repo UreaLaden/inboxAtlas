@@ -341,6 +341,16 @@ inboxatlas classify results --account <id|alias> [--format table|json]
 # Review mailbox bootstrap suggestions
 inboxatlas classify suggestions --account <id|alias> [--format table|json]
 
+# List active mailbox-scoped seeds
+inboxatlas classify seeds list --account <id|alias> [--format table|json]
+
+# Delete one active mailbox-scoped seed
+inboxatlas classify seeds delete --account <id|alias> --id <seed-id>
+
+# List valid categories and pattern types
+inboxatlas classify categories
+inboxatlas classify pattern-types
+
 # Promote one reviewed suggestion into the active mailbox-scoped seed set
 inboxatlas classify promote --account <id|alias> \
   --pattern-type <domain|sender_email|sender_prefix|subject_term> \
@@ -354,14 +364,19 @@ inboxatlas classify promote --account <id|alias> \
 | `classify run` | Loads synced message metadata for one mailbox and persists mailbox-scoped classifications |
 | `classify results` | Shows mailbox-scoped classification totals, per-category counts, and unknown percentage |
 | `classify suggestions` | Shows read-only mailbox bootstrap suggestions derived from observed mailbox discovery data, excluding patterns already covered by global defaults |
+| `classify seeds list` | Lists active mailbox-scoped seeds and excludes global defaults from the mailbox operator view |
+| `classify seeds delete` | Deletes one active mailbox-scoped seed by ID and refuses to delete global defaults |
+| `classify categories` | Prints the valid deterministic classification taxonomy values |
+| `classify pattern-types` | Prints the valid deterministic seed pattern types |
 | `classify promote` | Validates one suggestion for the target mailbox and persists it as an active mailbox-scoped operator seed |
 
 Notes:
 
-- `--account` is required for all classify commands.
+- `--account` is required for mailbox-scoped classify commands.
 - `classify run` does not trigger sync; it operates on messages already stored locally.
 - `classify results` is read-only and reports on classifications already stored locally.
 - `classify suggestions` is read-only and does not activate any seed.
+- `classify seeds list` and `classify seeds delete` operate only on mailbox-scoped active seeds; global defaults remain protected.
 - `classify promote` is idempotent for the same mailbox, pattern, category, and priority.
 
 ---
