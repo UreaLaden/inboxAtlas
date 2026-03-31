@@ -1819,3 +1819,60 @@ func TestBulkSaveClassifications_ClosedStore(t *testing.T) {
 		t.Fatal("expected error from closed store")
 	}
 }
+
+func TestQueryClassificationsByMailbox(t *testing.T) {
+	st := newTestStore(t)
+	ctx := context.Background()
+	createTestMailbox(t, st, "user@example.com")
+	createTestMailbox(t, st, "other@example.com")
+
+	now := time.Now().UTC()
+	for _, id := range []string{"m1", "m2", "m3", "m4", "m5"} {
+		seedMessage(t, st, id, "user@example.com", "a@x.com", "", "x.com", "", now)
+	}
+	seedMessage(t, st, "m6", "other@example.com", "b@y.com", "", "y.com", "", now)
+
+	for _, c := range []Classification{
+		{MessageID: "m1", MailboxID: "user@example.com", Category: "unknown", Source: "seed", ClassifiedAt: now},
+		{MessageID: "m2", MailboxID: "user@example.com", Category: "vendor", Source: "seed", ClassifiedAt: now},
+		{MessageID: "m3", MailboxID: "user@example.com", Category: "vendor", Source: "seed", ClassifiedAt: now},
+		{MessageID: "m4", MailboxID: "user@example.com", Category: "client", Source: "seed", ClassifiedAt: now},
+		{MessageID: "m5", MailboxID: "user@example.com", Category: "client", Source: "seed", ClassifiedAt: now},
+		{MessageID: "m6", MailboxID: "other@example.com", Category: "social", Source: "seed", ClassifiedAt: now},
+	} {
+		if err := st.SaveClassification(ctx, c); err != nil {
+			t.Fatalf("SaveClassification(%s): %v", c.MessageID, err)
+		}
+	}
+
+	counts, err := st.QueryClassificationsByMailbox(ctx, "user@example.com")
+	if err != nil {
+		t.Fatalf("QueryClassificationsByMailbox: %v", err)
+	}
+	if len(counts) != 3 {
+		t.Fatalf("expected 3 category rows, got %d", len(counts))
+	}
+	if counts[0] != (ClassificationCount{Category: "client", Count: 2}) {
+		t.Fatalf("first row: got %+v", counts[0])
+	}
+	if counts[1] != (ClassificationCount{Category: "vendor", Count: 2}) {
+		t.Fatalf("second row: got %+v", counts[1])
+	}
+	if counts[2] != (ClassificationCount{Category: "unknown", Count: 1}) {
+		t.Fatalf("third row: got %+v", counts[2])
+	}
+}
+
+func TestQueryClassificationsByMailbox_Empty(t *testing.T) {
+	st := newTestStore(t)
+	ctx := context.Background()
+	createTestMailbox(t, st, "user@example.com")
+
+	counts, err := st.QueryClassificationsByMailbox(ctx, "user@example.com")
+	if err != nil {
+		t.Fatalf("QueryClassificationsByMailbox: %v", err)
+	}
+	if len(counts) != 0 {
+		t.Fatalf("expected 0 rows, got %d", len(counts))
+	}
+}

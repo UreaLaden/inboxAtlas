@@ -66,6 +66,7 @@ inboxatlas report summarize --reports-dir <dir> [--output-file <path>] [--owner-
 
 ```bash
 inboxatlas classify run --account <id|alias>
+inboxatlas classify results --account <id|alias> [--format table|json]
 inboxatlas classify suggestions --account <id|alias> [--format table|json]
 inboxatlas classify promote --account <id|alias> --pattern-type <type> --pattern-value <value> --category <category> [--priority n]
 ```

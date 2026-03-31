@@ -562,6 +562,7 @@ func buildClassifyCmd(cfg config.Config) *cobra.Command {
 		Short: "Run and manage mailbox classification workflows",
 	}
 	cmd.AddCommand(buildClassifyRunCmd(cfg))
+	cmd.AddCommand(buildClassifyResultsCmd(cfg))
 	cmd.AddCommand(buildClassifySuggestionsCmd(cfg))
 	cmd.AddCommand(buildClassifyPromoteCmd(cfg))
 	return cmd
@@ -591,6 +592,23 @@ func buildClassifySuggestionsCmd(cfg config.Config) *cobra.Command {
 		Short: "Show mailbox bootstrap classification suggestions",
 		RunE: func(cmd *cobra.Command, _ []string) error {
 			return runClassifySuggestions(cmd.Context(), cmd.OutOrStdout(), cfg, account, format)
+		},
+	}
+	cmd.Flags().StringVar(&account, "account", "", "mailbox email or alias")
+	cmd.Flags().StringVar(&format, "format", "table", "output format: table, json")
+	_ = cmd.MarkFlagRequired("account")
+	return cmd
+}
+
+// buildClassifyResultsCmd returns the "classify results" subcommand.
+func buildClassifyResultsCmd(cfg config.Config) *cobra.Command {
+	var account string
+	var format string
+	cmd := &cobra.Command{
+		Use:   "results",
+		Short: "Review mailbox classification results",
+		RunE: func(cmd *cobra.Command, _ []string) error {
+			return runClassifyResults(cmd.Context(), cmd.OutOrStdout(), cfg, account, format)
 		},
 	}
 	cmd.Flags().StringVar(&account, "account", "", "mailbox email or alias")
@@ -680,6 +698,43 @@ func runClassifySuggestions(ctx context.Context, w io.Writer, cfg config.Config,
 		_, _ = fmt.Fprintf(tw, "%s\t%s\t%s\t%s\t%d\n", suggestion.PatternType, suggestion.PatternValue, suggestion.Category, suggestion.Source, suggestion.Priority)
 	}
 	return tw.Flush()
+}
+
+// runClassifyResults renders mailbox-scoped classification summary output.
+func runClassifyResults(ctx context.Context, w io.Writer, cfg config.Config, account, format string) error {
+	f, err := validateClassifyFormat(format)
+	if err != nil {
+		return err
+	}
+
+	result, err := engine.GetClassificationSummary(ctx, cfg, account)
+	if err != nil {
+		return err
+	}
+
+	if f == "json" {
+		enc := json.NewEncoder(w)
+		enc.SetIndent("", "  ")
+		return enc.Encode(result)
+	}
+
+	if len(result.Breakdown) == 0 {
+		_, _ = fmt.Fprintf(w, "No classifications found for %s.\n", result.MailboxID)
+		return nil
+	}
+
+	tw := tabwriter.NewWriter(w, 0, 0, 3, ' ', 0)
+	_, _ = fmt.Fprintln(tw, "CATEGORY\tCOUNT")
+	for _, row := range result.Breakdown {
+		_, _ = fmt.Fprintf(tw, "%s\t%d\n", row.Category, row.Count)
+	}
+	if err := tw.Flush(); err != nil {
+		return err
+	}
+
+	_, _ = fmt.Fprintf(w, "Total: %d\n", result.Total)
+	_, _ = fmt.Fprintf(w, "Unknown: %.1f%%\n", result.UnknownPct)
+	return nil
 }
 
 // runClassifyPromote promotes a reviewed mailbox bootstrap suggestion into the

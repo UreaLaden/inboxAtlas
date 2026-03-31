@@ -167,6 +167,108 @@ func TestRun_ClientErrorLeavesStdoutEmpty(t *testing.T) {
 	}
 }
 
+func TestRun_EncodeFailure(t *testing.T) {
+	prevLoad := loadProviderConfig
+	prevClient := newOpenAIClient
+	t.Cleanup(func() {
+		loadProviderConfig = prevLoad
+		newOpenAIClient = prevClient
+	})
+
+	loadProviderConfig = func() (aisummaryopenai.Config, error) {
+		return aisummaryopenai.Config{APIKey: "x"}, nil
+	}
+	newOpenAIClient = func(cfg aisummaryopenai.Config) providerClient {
+		return providerClientStub{
+			output: exportpkg.SummaryOutput{
+				Title:                "Inbox Snapshot",
+				Subtitle:             "owner@company.com",
+				Headline:             "headline",
+				SecondaryHeadline:    "secondary",
+				SnapshotBullets:      []string{"snapshot"},
+				WhatThisMeansBullets: []string{"meaning"},
+				OpportunitiesBullets: []string{"opportunity"},
+				BottomLine:           "bottom",
+			},
+		}
+	}
+
+	err := run(context.Background(), strings.NewReader(`{"prompt":"prompt","input":{"total_messages":0,"owner":{},"reporting_period":{},"top_external_senders":[],"top_external_domains":[],"top_subject_themes":[],"volume_highlights":{},"derived_metrics":{}}}`), failingWriter{}, &bytes.Buffer{})
+	if err == nil {
+		t.Fatal("expected encode error")
+	}
+}
+
+func TestMain_ErrorExit(t *testing.T) {
+	prevRun := runProviderMain
+	prevStdin := providerStdin
+	prevStdout := providerStdout
+	prevStderr := providerStderr
+	prevExit := exitProvider
+	t.Cleanup(func() {
+		runProviderMain = prevRun
+		providerStdin = prevStdin
+		providerStdout = prevStdout
+		providerStderr = prevStderr
+		exitProvider = prevExit
+	})
+
+	var stderr bytes.Buffer
+	runProviderMain = func(context.Context, io.Reader, io.Writer, io.Writer) error {
+		return errors.New("boom")
+	}
+	providerStdin = strings.NewReader("")
+	providerStdout = &bytes.Buffer{}
+	providerStderr = &stderr
+
+	exitCode := 0
+	exitProvider = func(code int) {
+		exitCode = code
+	}
+
+	main()
+
+	if exitCode != 1 {
+		t.Fatalf("exitCode: got %d, want 1", exitCode)
+	}
+	if !strings.Contains(stderr.String(), "boom") {
+		t.Fatalf("stderr: got %q", stderr.String())
+	}
+}
+
+func TestMain_Success(t *testing.T) {
+	prevRun := runProviderMain
+	prevStdin := providerStdin
+	prevStdout := providerStdout
+	prevStderr := providerStderr
+	prevExit := exitProvider
+	t.Cleanup(func() {
+		runProviderMain = prevRun
+		providerStdin = prevStdin
+		providerStdout = prevStdout
+		providerStderr = prevStderr
+		exitProvider = prevExit
+	})
+
+	runCalled := false
+	runProviderMain = func(context.Context, io.Reader, io.Writer, io.Writer) error {
+		runCalled = true
+		return nil
+	}
+	providerStdin = strings.NewReader("")
+	providerStdout = &bytes.Buffer{}
+	providerStderr = &bytes.Buffer{}
+	exitProvider = func(code int) {
+		t.Fatalf("unexpected exit %d", code)
+	}
+
+	main()
+
+	if !runCalled {
+		t.Fatal("expected main to call runProviderMain")
+	}
+}
+
 type providerClientStub struct {
 	output exportpkg.SummaryOutput
 	err    error
@@ -177,4 +279,10 @@ func (s providerClientStub) GenerateSummary(_ context.Context, _ string, _ expor
 		return exportpkg.SummaryOutput{}, s.err
 	}
 	return s.output, nil
+}
+
+type failingWriter struct{}
+
+func (failingWriter) Write([]byte) (int, error) {
+	return 0, errors.New("write failed")
 }

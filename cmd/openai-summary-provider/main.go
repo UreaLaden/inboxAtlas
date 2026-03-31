@@ -17,6 +17,11 @@ var (
 	newOpenAIClient    = func(cfg aisummaryopenai.Config) providerClient {
 		return aisummaryopenai.NewClient(cfg)
 	}
+	runProviderMain           = run
+	providerStdin   io.Reader = os.Stdin
+	providerStdout  io.Writer = os.Stdout
+	providerStderr  io.Writer = os.Stderr
+	exitProvider              = os.Exit
 )
 
 type providerRequest struct {
@@ -29,9 +34,9 @@ type providerClient interface {
 }
 
 func main() {
-	if err := run(context.Background(), os.Stdin, os.Stdout, os.Stderr); err != nil {
-		fmt.Fprintln(os.Stderr, err)
-		os.Exit(1)
+	if err := runProviderMain(context.Background(), providerStdin, providerStdout, providerStderr); err != nil {
+		_, _ = fmt.Fprintln(providerStderr, err)
+		exitProvider(1)
 	}
 }
 

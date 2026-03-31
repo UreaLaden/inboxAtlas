@@ -1230,6 +1230,41 @@ func seedClassifyData(t *testing.T, dbPath string) {
 	}
 }
 
+func seedClassifyResultsData(t *testing.T, dbPath string) {
+	t.Helper()
+	st, err := storage.Open(dbPath)
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	defer func() { _ = st.Close() }()
+
+	ctx := context.Background()
+	if err := st.CreateMailbox(ctx, models.Mailbox{ID: "user@example.com", Provider: "gmail"}); err != nil {
+		t.Fatalf("CreateMailbox: %v", err)
+	}
+
+	now := time.Date(2025, 2, 4, 0, 0, 0, 0, time.UTC)
+	for _, msg := range []models.MessageMeta{
+		{ProviderID: "r1", MailboxID: "user@example.com", Provider: "gmail", ReceivedAt: now},
+		{ProviderID: "r2", MailboxID: "user@example.com", Provider: "gmail", ReceivedAt: now},
+		{ProviderID: "r3", MailboxID: "user@example.com", Provider: "gmail", ReceivedAt: now},
+	} {
+		if err := st.UpsertMessage(ctx, msg); err != nil {
+			t.Fatalf("UpsertMessage(%s): %v", msg.ProviderID, err)
+		}
+	}
+
+	for _, c := range []storage.Classification{
+		{MessageID: "r1", MailboxID: "user@example.com", Category: "vendor", Source: "seed", ClassifiedAt: now},
+		{MessageID: "r2", MailboxID: "user@example.com", Category: "vendor", Source: "seed", ClassifiedAt: now},
+		{MessageID: "r3", MailboxID: "user@example.com", Category: "unknown", Source: "seed", ClassifiedAt: now},
+	} {
+		if err := st.SaveClassification(ctx, c); err != nil {
+			t.Fatalf("SaveClassification(%s): %v", c.MessageID, err)
+		}
+	}
+}
+
 // --- buildReportCmd ---
 
 func TestBuildReportCmd_HasSubcommands(t *testing.T) {
@@ -1265,7 +1300,7 @@ func TestBuildClassifyCmd_HasSubcommands(t *testing.T) {
 	for _, sub := range cmd.Commands() {
 		names[sub.Name()] = true
 	}
-	for _, want := range []string{"run", "suggestions", "promote"} {
+	for _, want := range []string{"run", "results", "suggestions", "promote"} {
 		if !names[want] {
 			t.Errorf("expected subcommand %q under classify", want)
 		}
@@ -1364,6 +1399,68 @@ func TestRunClassifySuggestions_JSON(t *testing.T) {
 	}
 	if !strings.Contains(buf.String(), "\"pattern_value\": \"healthymd.com\"") {
 		t.Fatalf("unexpected json output: %q", buf.String())
+	}
+}
+
+func TestRunClassifyResults_Table(t *testing.T) {
+	dir := t.TempDir()
+	cfg := config.Default()
+	cfg.StoragePath = filepath.Join(dir, "test.db")
+	seedClassifyResultsData(t, cfg.StoragePath)
+
+	var buf bytes.Buffer
+	if err := runClassifyResults(context.Background(), &buf, cfg, "user@example.com", "table"); err != nil {
+		t.Fatalf("runClassifyResults: %v", err)
+	}
+
+	output := buf.String()
+	if !strings.Contains(output, "CATEGORY") || !strings.Contains(output, "vendor") || !strings.Contains(output, "unknown") {
+		t.Fatalf("unexpected table output: %q", output)
+	}
+	if !strings.Contains(output, "Total: 3") || !strings.Contains(output, "Unknown: 33.3%") {
+		t.Fatalf("missing summary footer: %q", output)
+	}
+}
+
+func TestRunClassifyResults_JSON(t *testing.T) {
+	dir := t.TempDir()
+	cfg := config.Default()
+	cfg.StoragePath = filepath.Join(dir, "test.db")
+	seedClassifyResultsData(t, cfg.StoragePath)
+
+	var buf bytes.Buffer
+	if err := runClassifyResults(context.Background(), &buf, cfg, "user@example.com", "json"); err != nil {
+		t.Fatalf("runClassifyResults: %v", err)
+	}
+
+	output := buf.String()
+	if !strings.Contains(output, "\"mailbox_id\": \"user@example.com\"") ||
+		!strings.Contains(output, "\"total\": 3") ||
+		!strings.Contains(output, "\"unknown_pct\": 33.333333333333336") {
+		t.Fatalf("unexpected json output: %q", output)
+	}
+}
+
+func TestRunClassifyResults_Empty(t *testing.T) {
+	dir := t.TempDir()
+	cfg := config.Default()
+	cfg.StoragePath = filepath.Join(dir, "test.db")
+
+	st, err := storage.Open(cfg.StoragePath)
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	if err := st.CreateMailbox(context.Background(), models.Mailbox{ID: "user@example.com", Provider: "gmail"}); err != nil {
+		t.Fatalf("CreateMailbox: %v", err)
+	}
+	_ = st.Close()
+
+	var buf bytes.Buffer
+	if err := runClassifyResults(context.Background(), &buf, cfg, "user@example.com", "table"); err != nil {
+		t.Fatalf("runClassifyResults: %v", err)
+	}
+	if !strings.Contains(buf.String(), "No classifications found for user@example.com.") {
+		t.Fatalf("unexpected empty output: %q", buf.String())
 	}
 }
 
