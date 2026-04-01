@@ -3,6 +3,7 @@
 BINARY  := inboxatlas
 CMD     := ./cmd/inboxatlas
 SUMMARY_PROVIDER := ./cmd/openai-summary-provider
+INFERENCE_PROVIDER := ./cmd/ai-inference-provider
 GO ?= go
 GO_TEST_ENV := env GOCACHE=/tmp/inboxatlas-gocache GOTMPDIR=/tmp/inboxatlas-gotmp
 GO_TEST_PREP := mkdir -p /tmp/inboxatlas-gocache /tmp/inboxatlas-gotmp
@@ -20,11 +21,12 @@ fmt:
 lint: fmt
 	golangci-lint run ./...
 
-# Build the inboxatlas, ia, and openai-summary-provider binaries.
+# Build the inboxatlas, ia, openai-summary-provider, and ai-inference-provider binaries.
 build:
 	$(GO) build -o inboxatlas $(CMD)
 	$(GO) build -o ia $(CMD)
 	$(GO) build -o openai-summary-provider.exe $(SUMMARY_PROVIDER)
+	$(GO) build -o ai-inference-provider.exe $(INFERENCE_PROVIDER)
 
 # Run all tests.
 test:
