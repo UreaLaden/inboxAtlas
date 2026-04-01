@@ -2,6 +2,8 @@ package classification
 
 import (
 	"context"
+	"os/exec"
+	"strings"
 	"testing"
 	"time"
 
@@ -263,6 +265,214 @@ func TestChainClassifier_FirstMatchWins(t *testing.T) {
 	}
 	if result.Category != CategoryVendor {
 		t.Errorf("Category: got %q, want %q", result.Category, CategoryVendor)
+	}
+}
+
+func TestAIInferenceClassifier_SkipsDeterministicallyClassifiedMessage(t *testing.T) {
+	classifier := NewAIInferenceClassifier(
+		map[string]string{"m1": CategoryVendor},
+		map[string]InferenceCandidate{"m1": {
+			MessageID:      "m1",
+			Category:       CategoryClient,
+			Confidence:     0.91,
+			ConfidenceBand: "high",
+		}},
+	)
+
+	result, err := classifier.Classify(context.Background(), models.MessageMeta{ProviderID: "m1"})
+	if err != nil {
+		t.Fatalf("Classify: %v", err)
+	}
+	if result.Category != CategoryUnknown {
+		t.Fatalf("expected deterministic shortcut to keep unknown AI result, got %+v", result)
+	}
+}
+
+func TestAIInferenceClassifier_ReturnsCandidateForUnknownMessage(t *testing.T) {
+	classifier := NewAIInferenceClassifier(
+		map[string]string{"m1": CategoryUnknown},
+		map[string]InferenceCandidate{"m1": {
+			MessageID:      "m1",
+			Category:       CategoryClient,
+			Confidence:     0.76,
+			ConfidenceBand: "medium",
+		}},
+	)
+
+	result, err := classifier.Classify(context.Background(), models.MessageMeta{ProviderID: "m1"})
+	if err != nil {
+		t.Fatalf("Classify: %v", err)
+	}
+	if result.Category != CategoryClient || result.Source != SourceAI {
+		t.Fatalf("unexpected AI classification result: %+v", result)
+	}
+}
+
+func TestValidateInferenceCandidate(t *testing.T) {
+	requests := map[string]InferenceRequest{
+		"m1": {MessageID: "m1"},
+	}
+
+	valid := InferenceCandidate{
+		MessageID:      "m1",
+		Category:       CategoryClient,
+		Confidence:     0.81,
+		ConfidenceBand: "high",
+		ReviewRequired: false,
+	}
+	if err := ValidateInferenceCandidate(valid, requests); err != nil {
+		t.Fatalf("ValidateInferenceCandidate(valid): %v", err)
+	}
+
+	for _, tc := range []struct {
+		name      string
+		candidate InferenceCandidate
+	}{
+		{
+			name: "unknown message",
+			candidate: InferenceCandidate{
+				MessageID:      "missing",
+				Category:       CategoryClient,
+				Confidence:     0.81,
+				ConfidenceBand: "high",
+			},
+		},
+		{
+			name: "invalid category",
+			candidate: InferenceCandidate{
+				MessageID:      "m1",
+				Category:       "not-valid",
+				Confidence:     0.81,
+				ConfidenceBand: "high",
+			},
+		},
+		{
+			name: "invalid confidence",
+			candidate: InferenceCandidate{
+				MessageID:      "m1",
+				Category:       CategoryClient,
+				Confidence:     1.2,
+				ConfidenceBand: "high",
+			},
+		},
+		{
+			name: "inconsistent band",
+			candidate: InferenceCandidate{
+				MessageID:      "m1",
+				Category:       CategoryClient,
+				Confidence:     0.40,
+				ConfidenceBand: "high",
+			},
+		},
+		{
+			name: "inconsistent review flag",
+			candidate: InferenceCandidate{
+				MessageID:      "m1",
+				Category:       CategoryClient,
+				Confidence:     0.60,
+				ConfidenceBand: "medium",
+				ReviewRequired: false,
+			},
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if err := ValidateInferenceCandidate(tc.candidate, requests); err == nil {
+				t.Fatal("expected validation error")
+			}
+		})
+	}
+}
+
+func TestInferenceConfidenceBand(t *testing.T) {
+	if got := InferenceConfidenceBand(0.80); got != "high" {
+		t.Fatalf("0.80 band: got %q", got)
+	}
+	if got := InferenceConfidenceBand(0.55); got != "medium" {
+		t.Fatalf("0.55 band: got %q", got)
+	}
+	if got := InferenceConfidenceBand(0.54); got != "low" {
+		t.Fatalf("0.54 band: got %q", got)
+	}
+}
+
+func TestCommandInferenceProvider(t *testing.T) {
+	provider := testCommandInferenceProvider("valid")
+	candidates, err := provider.Infer(t.Context(), []InferenceRequest{{MessageID: "m1"}})
+	if err != nil {
+		t.Fatalf("Infer: %v", err)
+	}
+	if len(candidates) != 1 || candidates[0].MessageID != "m1" {
+		t.Fatalf("unexpected candidates: %+v", candidates)
+	}
+}
+
+func TestCommandInferenceProvider_InvalidJSON(t *testing.T) {
+	provider := testCommandInferenceProvider("invalid-json")
+	_, err := provider.Infer(t.Context(), []InferenceRequest{{MessageID: "m1"}})
+	if err == nil {
+		t.Fatal("expected invalid json error")
+	}
+	if !strings.Contains(err.Error(), "parse inference output") {
+		t.Fatalf("unexpected error: %v", err)
+	}
+}
+
+func TestCommandInferenceProvider_ExitErrorIncludesStderr(t *testing.T) {
+	provider := testCommandInferenceProvider("stderr-exit")
+	_, err := provider.Infer(t.Context(), []InferenceRequest{{MessageID: "m1"}})
+	if err == nil {
+		t.Fatal("expected provider failure")
+	}
+	if !strings.Contains(err.Error(), "debug trace") {
+		t.Fatalf("expected stderr in error, got %v", err)
+	}
+}
+
+func TestCommandInferenceProvider_RequiresCommand(t *testing.T) {
+	_, err := (CommandInferenceProvider{}).Infer(t.Context(), nil)
+	if err == nil {
+		t.Fatal("expected missing command error")
+	}
+}
+
+func testCommandInferenceProvider(mode string) CommandInferenceProvider {
+	if _, err := exec.LookPath("sh"); err == nil {
+		return CommandInferenceProvider{
+			Command: "sh",
+			Args:    []string{"-c", testInferenceProviderScript(mode)},
+		}
+	}
+	return CommandInferenceProvider{
+		Command: "cmd",
+		Args:    []string{"/d", "/c", testInferenceProviderWindows(mode)},
+	}
+}
+
+func testInferenceProviderScript(mode string) string {
+	switch mode {
+	case "valid":
+		return `cat >/dev/null; cat <<'EOF'
+[{"message_id":"m1","category":"client","confidence":0.81,"confidence_band":"high","review_required":false,"evidence":{"subject_phrases":["invoice"],"snippet_phrases":["payment"],"sender_signal":"known sender","domain_signal":"known domain","label_signals":["INBOX"]}}]
+EOF`
+	case "invalid-json":
+		return `cat >/dev/null; printf 'not-json'`
+	case "stderr-exit":
+		return `cat >/dev/null; printf 'debug trace\n' >&2; exit 9`
+	default:
+		panic("unknown provider mode: " + mode)
+	}
+}
+
+func testInferenceProviderWindows(mode string) string {
+	switch mode {
+	case "valid":
+		return `more >nul & echo [{"message_id":"m1","category":"client","confidence":0.81,"confidence_band":"high","review_required":false,"evidence":{"subject_phrases":["invoice"],"snippet_phrases":["payment"],"sender_signal":"known sender","domain_signal":"known domain","label_signals":["INBOX"]}}]`
+	case "invalid-json":
+		return `more >nul & <nul set /p =not-json`
+	case "stderr-exit":
+		return `more >nul & >&2 echo debug trace & exit /b 9`
+	default:
+		panic("unknown provider mode: " + mode)
 	}
 }
 

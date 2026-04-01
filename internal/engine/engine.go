@@ -6,6 +6,8 @@ package engine
 import (
 	"context"
 	"fmt"
+	"strings"
+	"time"
 
 	"github.com/UreaLaden/inboxatlas/internal/classification"
 	"github.com/UreaLaden/inboxatlas/internal/config"
@@ -37,6 +39,37 @@ type ClassifySuggestion struct {
 type ClassifySuggestionsSummary struct {
 	MailboxID   string
 	Suggestions []ClassifySuggestion
+}
+
+// InferenceRunSummary reports the outcome of one mailbox-scoped inference run.
+type InferenceRunSummary struct {
+	MailboxID string `json:"mailbox_id"`
+	Submitted int    `json:"submitted"`
+	Persisted int    `json:"persisted"`
+	High      int    `json:"high"`
+	Medium    int    `json:"medium"`
+	Low       int    `json:"low"`
+	Rejected  int    `json:"rejected"`
+}
+
+// InferenceSuggestionsSummary describes the persisted AI inference suggestions
+// available for operator review for one mailbox.
+type InferenceSuggestionsSummary struct {
+	MailboxID   string                `json:"mailbox_id"`
+	Suggestions []InferenceSuggestion `json:"suggestions"`
+}
+
+// InferenceSuggestion is one persisted AI inference candidate rendered for CLI
+// review and optional promotion.
+type InferenceSuggestion struct {
+	MessageID      string                    `json:"message_id"`
+	PatternType    string                    `json:"pattern_type"`
+	PatternValue   string                    `json:"pattern_value"`
+	Category       string                    `json:"category"`
+	Confidence     float64                   `json:"confidence"`
+	ConfidenceBand string                    `json:"confidence_band"`
+	ReviewRequired bool                      `json:"review_required"`
+	Evidence       storage.InferenceEvidence `json:"evidence"`
 }
 
 // ClassificationSummary describes mailbox-scoped classification results for
@@ -268,6 +301,177 @@ func GetClassificationSummary(ctx context.Context, cfg config.Config, account st
 	}, nil
 }
 
+// RunInference executes mailbox-scoped AI inference over messages that remain
+// unknown after deterministic classification and stages valid medium/high
+// confidence candidates for operator review.
+func RunInference(ctx context.Context, cfg config.Config, account, command string, args []string) (InferenceRunSummary, error) {
+	st, mb, err := openResolvedStore(ctx, cfg, account)
+	if err != nil {
+		return InferenceRunSummary{}, err
+	}
+	defer func() { _ = st.Close() }()
+
+	if err := ensureDefaultSeeds(ctx, st); err != nil {
+		return InferenceRunSummary{}, err
+	}
+
+	messages, err := st.ListMessageMetaByMailbox(ctx, mb.ID)
+	if err != nil {
+		return InferenceRunSummary{}, fmt.Errorf("list mailbox messages: %w", err)
+	}
+	if len(messages) == 0 {
+		return InferenceRunSummary{}, fmt.Errorf("no synced messages found for %s — run 'inboxatlas sync gmail --account %s' first", mb.ID, mb.ID)
+	}
+
+	if err := classification.RunMailboxClassification(ctx, st, mb.ID, messages); err != nil {
+		return InferenceRunSummary{}, fmt.Errorf("run deterministic classification: %w", err)
+	}
+
+	deterministicCategories := make(map[string]string, len(messages))
+	for _, msg := range messages {
+		got, err := st.GetClassification(ctx, msg.ProviderID, mb.ID)
+		if err != nil {
+			return InferenceRunSummary{}, fmt.Errorf("get classification %s: %w", msg.ProviderID, err)
+		}
+		if got == nil {
+			deterministicCategories[msg.ProviderID] = classification.CategoryUnknown
+			continue
+		}
+		deterministicCategories[msg.ProviderID] = got.Category
+	}
+
+	senderCounts, err := st.QuerySenderStatsByMailbox(ctx, mb.ID, 1)
+	if err != nil {
+		return InferenceRunSummary{}, fmt.Errorf("query sender stats: %w", err)
+	}
+	domainCounts, err := st.QueryDomainStatsByMailbox(ctx, mb.ID, 1)
+	if err != nil {
+		return InferenceRunSummary{}, fmt.Errorf("query domain stats: %w", err)
+	}
+
+	senderCountByEmail := make(map[string]int, len(senderCounts))
+	for _, row := range senderCounts {
+		senderCountByEmail[strings.ToLower(row.Email)] = row.Count
+	}
+	domainCountByDomain := make(map[string]int, len(domainCounts))
+	for _, row := range domainCounts {
+		domainCountByDomain[strings.ToLower(row.Domain)] = row.Count
+	}
+
+	requests := make([]classification.InferenceRequest, 0, len(messages))
+	requestByID := make(map[string]classification.InferenceRequest, len(messages))
+	messageByID := make(map[string]models.MessageMeta, len(messages))
+	for _, msg := range messages {
+		messageByID[msg.ProviderID] = msg
+		if deterministicCategories[msg.ProviderID] != classification.CategoryUnknown {
+			continue
+		}
+
+		req := classification.InferenceRequest{
+			MessageID:             msg.ProviderID,
+			MailboxID:             mb.ID,
+			FromEmail:             msg.FromEmail,
+			FromName:              msg.FromName,
+			Domain:                msg.Domain,
+			Subject:               msg.Subject,
+			Snippet:               msg.Snippet,
+			Labels:                append([]string(nil), msg.Labels...),
+			ReceivedAt:            msg.ReceivedAt.UTC().Format(time.RFC3339),
+			SenderCount:           senderCountByEmail[strings.ToLower(msg.FromEmail)],
+			DomainCount:           domainCountByDomain[strings.ToLower(msg.Domain)],
+			DeterministicCategory: classification.CategoryUnknown,
+		}
+		requests = append(requests, req)
+		requestByID[req.MessageID] = req
+	}
+
+	summary := InferenceRunSummary{
+		MailboxID: mb.ID,
+		Submitted: len(requests),
+	}
+	if len(requests) == 0 {
+		return summary, nil
+	}
+
+	provider := classification.CommandInferenceProvider{Command: command, Args: args}
+	candidates, err := provider.Infer(ctx, requests)
+	if err != nil {
+		return InferenceRunSummary{}, err
+	}
+
+	for _, candidate := range candidates {
+		if err := classification.ValidateInferenceCandidate(candidate, requestByID); err != nil {
+			summary.Rejected++
+			continue
+		}
+
+		switch candidate.ConfidenceBand {
+		case "high":
+			summary.High++
+		case "medium":
+			summary.Medium++
+		default:
+			summary.Low++
+			continue
+		}
+
+		msg := messageByID[candidate.MessageID]
+		patternType, patternValue, ok := inferencePatternForMessage(msg)
+		if !ok {
+			summary.Rejected++
+			continue
+		}
+
+		if err := st.SaveInferenceCandidate(ctx, storage.InferenceSuggestion{
+			MailboxID:      mb.ID,
+			MessageID:      candidate.MessageID,
+			PatternType:    patternType,
+			PatternValue:   patternValue,
+			Category:       candidate.Category,
+			Confidence:     candidate.Confidence,
+			ConfidenceBand: candidate.ConfidenceBand,
+			Evidence:       toStorageEvidence(candidate.Evidence),
+			ReviewRequired: candidate.ReviewRequired,
+		}); err != nil {
+			return InferenceRunSummary{}, fmt.Errorf("save inference candidate %s: %w", candidate.MessageID, err)
+		}
+		summary.Persisted++
+	}
+
+	return summary, nil
+}
+
+// ListInferenceSuggestions returns persisted AI inference suggestions for one
+// mailbox in operator review order.
+func ListInferenceSuggestions(ctx context.Context, cfg config.Config, account string) (InferenceSuggestionsSummary, error) {
+	st, mb, err := openResolvedStore(ctx, cfg, account)
+	if err != nil {
+		return InferenceSuggestionsSummary{}, err
+	}
+	defer func() { _ = st.Close() }()
+
+	suggestions, err := st.ListInferenceSuggestions(ctx, mb.ID)
+	if err != nil {
+		return InferenceSuggestionsSummary{}, fmt.Errorf("list inference suggestions: %w", err)
+	}
+
+	out := make([]InferenceSuggestion, len(suggestions))
+	for i, suggestion := range suggestions {
+		out[i] = InferenceSuggestion{
+			MessageID:      suggestion.MessageID,
+			PatternType:    suggestion.PatternType,
+			PatternValue:   suggestion.PatternValue,
+			Category:       suggestion.Category,
+			Confidence:     suggestion.Confidence,
+			ConfidenceBand: suggestion.ConfidenceBand,
+			ReviewRequired: suggestion.ReviewRequired,
+			Evidence:       suggestion.Evidence,
+		}
+	}
+
+	return InferenceSuggestionsSummary{MailboxID: mb.ID, Suggestions: out}, nil
+}
+
 // PromoteClassifySuggestion validates a mailbox bootstrap suggestion and
 // persists it as an active mailbox-scoped operator seed.
 func PromoteClassifySuggestion(ctx context.Context, cfg config.Config, account string, req PromoteSuggestionRequest) (PromoteSuggestionResult, error) {
@@ -398,5 +602,41 @@ func findSuggestion(ctx context.Context, st *storage.Store, mailboxID, patternTy
 			return suggestion, true, nil
 		}
 	}
+	inferenceSuggestions, err := st.ListInferenceSuggestions(ctx, mailboxID)
+	if err != nil {
+		return classification.ClassificationSeed{}, false, fmt.Errorf("list inference suggestions: %w", err)
+	}
+	for _, suggestion := range inferenceSuggestions {
+		if suggestion.PatternType == patternType && suggestion.PatternValue == patternValue {
+			return classification.ClassificationSeed{
+				MailboxID:    suggestion.MailboxID,
+				PatternType:  suggestion.PatternType,
+				PatternValue: suggestion.PatternValue,
+				Category:     suggestion.Category,
+				Source:       classification.SourceAI,
+				Priority:     100,
+			}, true, nil
+		}
+	}
 	return classification.ClassificationSeed{}, false, nil
+}
+
+func inferencePatternForMessage(msg models.MessageMeta) (string, string, bool) {
+	if value := strings.TrimSpace(strings.ToLower(msg.Domain)); value != "" {
+		return classification.PatternDomain, value, true
+	}
+	if value := strings.TrimSpace(strings.ToLower(msg.FromEmail)); value != "" {
+		return classification.PatternSenderEmail, value, true
+	}
+	return "", "", false
+}
+
+func toStorageEvidence(e classification.InferenceEvidence) storage.InferenceEvidence {
+	return storage.InferenceEvidence{
+		SubjectPhrases: append([]string(nil), e.SubjectPhrases...),
+		SnippetPhrases: append([]string(nil), e.SnippetPhrases...),
+		SenderSignal:   e.SenderSignal,
+		DomainSignal:   e.DomainSignal,
+		LabelSignals:   append([]string(nil), e.LabelSignals...),
+	}
 }

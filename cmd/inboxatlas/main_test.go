@@ -1300,10 +1300,29 @@ func TestBuildClassifyCmd_HasSubcommands(t *testing.T) {
 	for _, sub := range cmd.Commands() {
 		names[sub.Name()] = true
 	}
-	for _, want := range []string{"run", "results", "suggestions", "promote", "seeds", "categories", "pattern-types"} {
+	for _, want := range []string{"run", "results", "suggestions", "infer", "promote", "seeds", "categories", "pattern-types"} {
 		if !names[want] {
 			t.Errorf("expected subcommand %q under classify", want)
 		}
+	}
+}
+
+func TestBuildClassifyInferCmd_HasSubcommands(t *testing.T) {
+	cmd := buildClassifyInferCmd(config.Default())
+	names := make(map[string]bool)
+	for _, sub := range cmd.Commands() {
+		names[sub.Name()] = true
+	}
+	if !names["suggestions"] {
+		t.Fatal("expected suggestions subcommand under classify infer")
+	}
+}
+
+func TestBuildClassifyInferSuggestionsCmd_RequiresAccount(t *testing.T) {
+	cmd := buildClassifyInferSuggestionsCmd(config.Default())
+	cmd.SetArgs(nil)
+	if err := cmd.Execute(); err == nil {
+		t.Fatal("expected missing account flag error")
 	}
 }
 
@@ -1512,6 +1531,135 @@ func TestRunClassifySuggestions_JSON(t *testing.T) {
 	}
 	if !strings.Contains(buf.String(), "\"pattern_value\": \"healthymd.com\"") {
 		t.Fatalf("unexpected json output: %q", buf.String())
+	}
+}
+
+func TestRunClassifyInfer(t *testing.T) {
+	originalRunInference := runInference
+	runInference = func(ctx context.Context, cfg config.Config, account, command string, args []string) (engine.InferenceRunSummary, error) {
+		return engine.InferenceRunSummary{
+			MailboxID: "user@example.com",
+			Submitted: 3,
+			Persisted: 2,
+			High:      1,
+			Medium:    1,
+			Low:       1,
+			Rejected:  0,
+		}, nil
+	}
+	t.Cleanup(func() { runInference = originalRunInference })
+
+	var buf bytes.Buffer
+	if err := runClassifyInfer(context.Background(), &buf, config.Default(), "user@example.com", "provider", nil); err != nil {
+		t.Fatalf("runClassifyInfer: %v", err)
+	}
+	output := buf.String()
+	if !strings.Contains(output, "Inference submitted 3 unknown messages") || !strings.Contains(output, "Persisted 2 suggestions") {
+		t.Fatalf("unexpected output: %q", output)
+	}
+}
+
+func TestRunClassifyInfer_RequiresProviderCommand(t *testing.T) {
+	t.Setenv("INBOXATLAS_INFERENCE_PROVIDER_CMD", "")
+	err := runClassifyInfer(context.Background(), io.Discard, config.Default(), "user@example.com", "", nil)
+	if err == nil {
+		t.Fatal("expected missing provider command error")
+	}
+}
+
+func TestRunClassifyInfer_UsesEnvProviderCommand(t *testing.T) {
+	originalRunInference := runInference
+	runInference = func(ctx context.Context, cfg config.Config, account, command string, args []string) (engine.InferenceRunSummary, error) {
+		if command != "provider-from-env" {
+			t.Fatalf("command: got %q", command)
+		}
+		return engine.InferenceRunSummary{MailboxID: "user@example.com"}, nil
+	}
+	t.Cleanup(func() { runInference = originalRunInference })
+
+	t.Setenv("INBOXATLAS_INFERENCE_PROVIDER_CMD", "provider-from-env")
+	if err := runClassifyInfer(context.Background(), io.Discard, config.Default(), "user@example.com", "", nil); err != nil {
+		t.Fatalf("runClassifyInfer: %v", err)
+	}
+}
+
+func TestRunClassifyInferSuggestions_TableAndJSON(t *testing.T) {
+	dir := t.TempDir()
+	cfg := config.Default()
+	cfg.StoragePath = filepath.Join(dir, "test.db")
+
+	st, err := storage.Open(cfg.StoragePath)
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	if err := st.CreateMailbox(context.Background(), models.Mailbox{ID: "user@example.com", Provider: "gmail"}); err != nil {
+		t.Fatalf("CreateMailbox: %v", err)
+	}
+	if err := st.UpsertMessage(context.Background(), models.MessageMeta{
+		ProviderID: "m1",
+		MailboxID:  "user@example.com",
+		Provider:   "gmail",
+		FromEmail:  "ai@healthymd.com",
+		Domain:     "healthymd.com",
+		ReceivedAt: time.Now().UTC(),
+	}); err != nil {
+		t.Fatalf("UpsertMessage: %v", err)
+	}
+	if err := st.SaveInferenceCandidate(context.Background(), storage.InferenceSuggestion{
+		MailboxID:      "user@example.com",
+		MessageID:      "m1",
+		PatternType:    "domain",
+		PatternValue:   "healthymd.com",
+		Category:       "client",
+		Confidence:     0.81,
+		ConfidenceBand: "high",
+		ReviewRequired: false,
+	}); err != nil {
+		t.Fatalf("SaveInferenceCandidate: %v", err)
+	}
+	_ = st.Close()
+
+	var table bytes.Buffer
+	if err := runClassifyInferSuggestions(context.Background(), &table, cfg, "user@example.com", "table"); err != nil {
+		t.Fatalf("runClassifyInferSuggestions table: %v", err)
+	}
+	if !strings.Contains(table.String(), "MESSAGE ID") || !strings.Contains(table.String(), "healthymd.com") {
+		t.Fatalf("unexpected table output: %q", table.String())
+	}
+
+	var jsonBuf bytes.Buffer
+	if err := runClassifyInferSuggestions(context.Background(), &jsonBuf, cfg, "user@example.com", "json"); err != nil {
+		t.Fatalf("runClassifyInferSuggestions json: %v", err)
+	}
+	if !strings.Contains(jsonBuf.String(), "\"message_id\": \"m1\"") || !strings.Contains(jsonBuf.String(), "\"pattern_value\": \"healthymd.com\"") {
+		t.Fatalf("unexpected json output: %q", jsonBuf.String())
+	}
+}
+
+func TestRunClassifyInferSuggestions_EmptyAndInvalidFormat(t *testing.T) {
+	dir := t.TempDir()
+	cfg := config.Default()
+	cfg.StoragePath = filepath.Join(dir, "test.db")
+
+	st, err := storage.Open(cfg.StoragePath)
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	if err := st.CreateMailbox(context.Background(), models.Mailbox{ID: "user@example.com", Provider: "gmail"}); err != nil {
+		t.Fatalf("CreateMailbox: %v", err)
+	}
+	_ = st.Close()
+
+	var buf bytes.Buffer
+	if err := runClassifyInferSuggestions(context.Background(), &buf, cfg, "user@example.com", "table"); err != nil {
+		t.Fatalf("runClassifyInferSuggestions empty: %v", err)
+	}
+	if !strings.Contains(buf.String(), "No AI inference suggestions") {
+		t.Fatalf("unexpected empty output: %q", buf.String())
+	}
+
+	if err := runClassifyInferSuggestions(context.Background(), io.Discard, cfg, "user@example.com", "yaml"); err == nil {
+		t.Fatal("expected invalid format error")
 	}
 }
 
@@ -1819,6 +1967,19 @@ func TestRunClassifyCategories(t *testing.T) {
 	}
 }
 
+func TestBuildClassifyCategoriesCmd_Executes(t *testing.T) {
+	cmd := buildClassifyCategoriesCmd()
+	var buf bytes.Buffer
+	cmd.SetOut(&buf)
+	cmd.SetArgs(nil)
+	if err := cmd.Execute(); err != nil {
+		t.Fatalf("Execute: %v", err)
+	}
+	if !strings.Contains(buf.String(), "internal") {
+		t.Fatalf("unexpected output: %q", buf.String())
+	}
+}
+
 func TestRunClassifyPatternTypes(t *testing.T) {
 	var buf bytes.Buffer
 	if err := runClassifyPatternTypes(&buf); err != nil {
@@ -1826,6 +1987,19 @@ func TestRunClassifyPatternTypes(t *testing.T) {
 	}
 	if !strings.Contains(buf.String(), "domain") || !strings.Contains(buf.String(), "subject_term") {
 		t.Fatalf("unexpected pattern types output: %q", buf.String())
+	}
+}
+
+func TestBuildClassifyPatternTypesCmd_Executes(t *testing.T) {
+	cmd := buildClassifyPatternTypesCmd()
+	var buf bytes.Buffer
+	cmd.SetOut(&buf)
+	cmd.SetArgs(nil)
+	if err := cmd.Execute(); err != nil {
+		t.Fatalf("Execute: %v", err)
+	}
+	if !strings.Contains(buf.String(), "domain") {
+		t.Fatalf("unexpected output: %q", buf.String())
 	}
 }
 

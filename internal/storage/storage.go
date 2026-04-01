@@ -128,6 +128,20 @@ CREATE TABLE IF NOT EXISTS message_classifications (
     classified_at TEXT NOT NULL,
     PRIMARY KEY (message_id, mailbox_id)
 );
+
+CREATE TABLE IF NOT EXISTS ai_inference_suggestions (
+    mailbox_id       TEXT NOT NULL REFERENCES mailboxes(id),
+    message_id       TEXT NOT NULL REFERENCES messages(id),
+    pattern_type     TEXT NOT NULL,
+    pattern_value    TEXT NOT NULL,
+    category         TEXT NOT NULL,
+    confidence       REAL NOT NULL,
+    confidence_band  TEXT NOT NULL,
+    evidence_json    TEXT NOT NULL,
+    review_required  INTEGER NOT NULL DEFAULT 1,
+    created_at       TEXT NOT NULL,
+    PRIMARY KEY (mailbox_id, message_id)
+);
 `
 
 func (s *Store) migrate() error {
@@ -413,6 +427,31 @@ type Classification struct {
 	MatchedRule  string
 	Source       string
 	ClassifiedAt time.Time
+}
+
+// InferenceEvidence is the persisted structured evidence payload for an AI
+// inference suggestion.
+type InferenceEvidence struct {
+	SubjectPhrases []string `json:"subject_phrases"`
+	SnippetPhrases []string `json:"snippet_phrases"`
+	SenderSignal   string   `json:"sender_signal"`
+	DomainSignal   string   `json:"domain_signal"`
+	LabelSignals   []string `json:"label_signals"`
+}
+
+// InferenceSuggestion is one persisted mailbox-scoped AI inference candidate
+// staged for operator review.
+type InferenceSuggestion struct {
+	MailboxID      string
+	MessageID      string
+	PatternType    string
+	PatternValue   string
+	Category       string
+	Confidence     float64
+	ConfidenceBand string
+	Evidence       InferenceEvidence
+	ReviewRequired bool
+	CreatedAt      time.Time
 }
 
 // QueryMessagesByDomain returns domain aggregate counts sorted by count desc.
@@ -936,6 +975,83 @@ func (s *Store) DeleteSeed(ctx context.Context, id int64) error {
 	return nil
 }
 
+// SaveInferenceCandidate inserts or updates one mailbox-scoped AI inference
+// suggestion keyed by mailbox and message.
+func (s *Store) SaveInferenceCandidate(ctx context.Context, suggestion InferenceSuggestion) error {
+	evidenceJSON, err := json.Marshal(suggestion.Evidence)
+	if err != nil {
+		return fmt.Errorf("marshal inference evidence: %w", err)
+	}
+
+	_, err = s.db.ExecContext(ctx,
+		`INSERT INTO ai_inference_suggestions
+		 (mailbox_id, message_id, pattern_type, pattern_value, category, confidence, confidence_band, evidence_json, review_required, created_at)
+		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+		 ON CONFLICT(mailbox_id, message_id) DO UPDATE SET
+		 pattern_type = excluded.pattern_type,
+		 pattern_value = excluded.pattern_value,
+		 category = excluded.category,
+		 confidence = excluded.confidence,
+		 confidence_band = excluded.confidence_band,
+		 evidence_json = excluded.evidence_json,
+		 review_required = excluded.review_required`,
+		suggestion.MailboxID,
+		suggestion.MessageID,
+		suggestion.PatternType,
+		suggestion.PatternValue,
+		suggestion.Category,
+		suggestion.Confidence,
+		suggestion.ConfidenceBand,
+		string(evidenceJSON),
+		boolToInt(suggestion.ReviewRequired),
+		time.Now().UTC().Format(time.RFC3339),
+	)
+	if err != nil {
+		return fmt.Errorf("save inference candidate: %w", err)
+	}
+	return nil
+}
+
+// ListInferenceSuggestions returns persisted mailbox-scoped AI inference
+// suggestions ordered by confidence descending then message ID ascending.
+func (s *Store) ListInferenceSuggestions(ctx context.Context, mailboxID string) ([]InferenceSuggestion, error) {
+	rows, err := s.db.QueryContext(ctx,
+		`SELECT mailbox_id, message_id, pattern_type, pattern_value, category, confidence, confidence_band, evidence_json, review_required, created_at
+		 FROM ai_inference_suggestions
+		 WHERE mailbox_id = ?
+		 ORDER BY confidence DESC, message_id ASC`,
+		mailboxID,
+	)
+	if err != nil {
+		return nil, fmt.Errorf("list inference suggestions: %w", err)
+	}
+	defer func() { _ = rows.Close() }()
+
+	var out []InferenceSuggestion
+	for rows.Next() {
+		suggestion, err := scanInferenceSuggestion(rows)
+		if err != nil {
+			return nil, err
+		}
+		out = append(out, *suggestion)
+	}
+	return out, rows.Err()
+}
+
+// DeleteInferenceSuggestion removes one persisted AI inference suggestion for a
+// mailbox/message pair.
+func (s *Store) DeleteInferenceSuggestion(ctx context.Context, mailboxID, messageID string) error {
+	_, err := s.db.ExecContext(ctx,
+		`DELETE FROM ai_inference_suggestions WHERE mailbox_id = ? AND message_id = ?`,
+		mailboxID,
+		messageID,
+	)
+	if err != nil {
+		return fmt.Errorf("delete inference suggestion: %w", err)
+	}
+	return nil
+}
+
 // SaveClassification inserts or replaces a message classification.
 func (s *Store) SaveClassification(ctx context.Context, c Classification) error {
 	_, err := s.db.ExecContext(ctx,
@@ -1054,6 +1170,45 @@ func scanSeed(s scanner) (*ClassificationSeed, error) {
 		return nil, fmt.Errorf("parse seed created_at %q: %w", createdAt, err)
 	}
 	return &seed, nil
+}
+
+func scanInferenceSuggestion(s scanner) (*InferenceSuggestion, error) {
+	var suggestion InferenceSuggestion
+	var evidenceJSON string
+	var reviewRequired int
+	var createdAt string
+
+	if err := s.Scan(
+		&suggestion.MailboxID,
+		&suggestion.MessageID,
+		&suggestion.PatternType,
+		&suggestion.PatternValue,
+		&suggestion.Category,
+		&suggestion.Confidence,
+		&suggestion.ConfidenceBand,
+		&evidenceJSON,
+		&reviewRequired,
+		&createdAt,
+	); err != nil {
+		return nil, fmt.Errorf("scan inference suggestion: %w", err)
+	}
+	if err := json.Unmarshal([]byte(evidenceJSON), &suggestion.Evidence); err != nil {
+		return nil, fmt.Errorf("unmarshal inference evidence: %w", err)
+	}
+	parsedCreatedAt, err := time.Parse(time.RFC3339, createdAt)
+	if err != nil {
+		return nil, fmt.Errorf("parse inference suggestion created_at %q: %w", createdAt, err)
+	}
+	suggestion.CreatedAt = parsedCreatedAt
+	suggestion.ReviewRequired = reviewRequired != 0
+	return &suggestion, nil
+}
+
+func boolToInt(value bool) int {
+	if value {
+		return 1
+	}
+	return 0
 }
 
 // scanClassification reads one message_classifications row from s.
