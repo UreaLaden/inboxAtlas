@@ -341,6 +341,12 @@ inboxatlas classify results --account <id|alias> [--format table|json]
 # Review mailbox bootstrap suggestions
 inboxatlas classify suggestions --account <id|alias> [--format table|json]
 
+# Run AI-assisted inference over still-unknown messages
+inboxatlas classify infer --account <id|alias> --provider-command <cmd> [--provider-arg <arg>...]
+
+# Review persisted AI inference suggestions
+inboxatlas classify infer suggestions --account <id|alias> [--format table|json]
+
 # List active mailbox-scoped seeds
 inboxatlas classify seeds list --account <id|alias> [--format table|json]
 
@@ -364,6 +370,8 @@ inboxatlas classify promote --account <id|alias> \
 | `classify run` | Loads synced message metadata for one mailbox, persists mailbox-scoped classifications, and prints a per-category breakdown with unknown percentage |
 | `classify results` | Shows mailbox-scoped classification totals, per-category counts, and unknown percentage |
 | `classify suggestions` | Shows read-only mailbox bootstrap suggestions derived from observed mailbox discovery data, excluding patterns already covered by global defaults |
+| `classify infer` | Runs AI-assisted inference only for messages still classified as `unknown` and stages valid medium/high-confidence suggestions for review |
+| `classify infer suggestions` | Lists persisted AI inference suggestions, including promotable pattern information and confidence metadata |
 | `classify seeds list` | Lists active mailbox-scoped seeds and excludes global defaults from the mailbox operator view |
 | `classify seeds delete` | Deletes one active mailbox-scoped seed by ID and refuses to delete global defaults |
 | `classify categories` | Prints the valid deterministic classification taxonomy values |
@@ -376,8 +384,23 @@ Notes:
 - `classify run` does not trigger sync; it operates on messages already stored locally and prints the post-run category breakdown immediately.
 - `classify results` is read-only and reports on classifications already stored locally.
 - `classify suggestions` is read-only and does not activate any seed.
+- `classify infer` requires `--provider-command` or `INBOXATLAS_INFERENCE_PROVIDER_CMD`; it only submits messages that remain `unknown` after deterministic classification.
+- `classify infer suggestions` is read-only and lists staged AI candidates rather than active seeds.
+- The first-party inference provider binary added in this repo is `cmd/ai-inference-provider`.
+- Set `OPENAI_API_KEY` before running the first-party inference provider. Optional overrides are `OPENAI_INFERENCE_MODEL`, `OPENAI_MODEL`, `OPENAI_BASE_URL`, `OPENAI_TIMEOUT_SECONDS`, and `OPENAI_DEBUG`.
 - `classify seeds list` and `classify seeds delete` operate only on mailbox-scoped active seeds; global defaults remain protected.
 - `classify promote` is idempotent for the same mailbox, pattern, category, and priority.
+
+Example first-party inference provider workflow:
+
+```bash
+go build -o ./bin/ai-inference-provider ./cmd/ai-inference-provider
+
+export OPENAI_API_KEY=sk-...
+./bin/inboxatlas classify infer \
+  --account <id|alias> \
+  --provider-command ./bin/ai-inference-provider
+```
 
 ---
 
@@ -387,7 +410,7 @@ Notes:
 make fmt            # format all Go source files
 make lint           # run golangci-lint
 make test           # go test ./...
-make build          # build inboxatlas, ia, and openai-summary-provider
+make build          # build inboxatlas, ia, openai-summary-provider, and ai-inference-provider
 make coverage       # generate coverage profile (coverage.out)
 make coverage-func  # function-level coverage breakdown
 make coverage-total # total repository coverage summary line

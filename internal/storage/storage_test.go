@@ -1986,3 +1986,173 @@ func TestQueryClassificationsByMailbox_Empty(t *testing.T) {
 		t.Fatalf("expected 0 rows, got %d", len(counts))
 	}
 }
+
+func TestSaveAndListInferenceSuggestions(t *testing.T) {
+	st := newTestStore(t)
+	ctx := context.Background()
+	createTestMailbox(t, st, "user@example.com")
+	seedMessage(t, st, "msg1", "user@example.com", "a@x.com", "", "x.com", "Invoice", time.Now())
+
+	if err := st.SaveInferenceCandidate(ctx, InferenceSuggestion{
+		MailboxID:      "user@example.com",
+		MessageID:      "msg1",
+		PatternType:    "domain",
+		PatternValue:   "x.com",
+		Category:       "client",
+		Confidence:     0.81,
+		ConfidenceBand: "high",
+		Evidence: InferenceEvidence{
+			SubjectPhrases: []string{"invoice"},
+		},
+		ReviewRequired: false,
+	}); err != nil {
+		t.Fatalf("SaveInferenceCandidate: %v", err)
+	}
+
+	got, err := st.ListInferenceSuggestions(ctx, "user@example.com")
+	if err != nil {
+		t.Fatalf("ListInferenceSuggestions: %v", err)
+	}
+	if len(got) != 1 {
+		t.Fatalf("expected 1 suggestion, got %d", len(got))
+	}
+	if got[0].PatternValue != "x.com" || got[0].Category != "client" || got[0].CreatedAt.IsZero() {
+		t.Fatalf("unexpected suggestion: %+v", got[0])
+	}
+}
+
+func TestSaveInferenceCandidate_UpsertByMailboxAndMessage(t *testing.T) {
+	st := newTestStore(t)
+	ctx := context.Background()
+	createTestMailbox(t, st, "user@example.com")
+	seedMessage(t, st, "msg1", "user@example.com", "a@x.com", "", "x.com", "Invoice", time.Now())
+
+	first := InferenceSuggestion{
+		MailboxID:      "user@example.com",
+		MessageID:      "msg1",
+		PatternType:    "domain",
+		PatternValue:   "x.com",
+		Category:       "client",
+		Confidence:     0.81,
+		ConfidenceBand: "high",
+		ReviewRequired: false,
+	}
+	if err := st.SaveInferenceCandidate(ctx, first); err != nil {
+		t.Fatalf("SaveInferenceCandidate first: %v", err)
+	}
+	before, err := st.ListInferenceSuggestions(ctx, "user@example.com")
+	if err != nil {
+		t.Fatalf("ListInferenceSuggestions before: %v", err)
+	}
+
+	if err := st.SaveInferenceCandidate(ctx, InferenceSuggestion{
+		MailboxID:      "user@example.com",
+		MessageID:      "msg1",
+		PatternType:    "sender_email",
+		PatternValue:   "a@x.com",
+		Category:       "vendor",
+		Confidence:     0.61,
+		ConfidenceBand: "medium",
+		ReviewRequired: true,
+	}); err != nil {
+		t.Fatalf("SaveInferenceCandidate second: %v", err)
+	}
+	after, err := st.ListInferenceSuggestions(ctx, "user@example.com")
+	if err != nil {
+		t.Fatalf("ListInferenceSuggestions after: %v", err)
+	}
+	if len(after) != 1 {
+		t.Fatalf("expected 1 suggestion after upsert, got %d", len(after))
+	}
+	if !after[0].CreatedAt.Equal(before[0].CreatedAt) {
+		t.Fatalf("CreatedAt changed after upsert: before=%v after=%v", before[0].CreatedAt, after[0].CreatedAt)
+	}
+	if after[0].PatternType != "sender_email" || after[0].Category != "vendor" || !after[0].ReviewRequired {
+		t.Fatalf("unexpected updated suggestion: %+v", after[0])
+	}
+}
+
+func TestDeleteInferenceSuggestion(t *testing.T) {
+	st := newTestStore(t)
+	ctx := context.Background()
+	createTestMailbox(t, st, "user@example.com")
+	seedMessage(t, st, "msg1", "user@example.com", "a@x.com", "", "x.com", "Invoice", time.Now())
+
+	if err := st.SaveInferenceCandidate(ctx, InferenceSuggestion{
+		MailboxID:      "user@example.com",
+		MessageID:      "msg1",
+		PatternType:    "domain",
+		PatternValue:   "x.com",
+		Category:       "client",
+		Confidence:     0.81,
+		ConfidenceBand: "high",
+	}); err != nil {
+		t.Fatalf("SaveInferenceCandidate: %v", err)
+	}
+	if err := st.DeleteInferenceSuggestion(ctx, "user@example.com", "msg1"); err != nil {
+		t.Fatalf("DeleteInferenceSuggestion: %v", err)
+	}
+	got, err := st.ListInferenceSuggestions(ctx, "user@example.com")
+	if err != nil {
+		t.Fatalf("ListInferenceSuggestions: %v", err)
+	}
+	if len(got) != 0 {
+		t.Fatalf("expected no inference suggestions, got %d", len(got))
+	}
+}
+
+func TestListInferenceSuggestions_Empty(t *testing.T) {
+	st := newTestStore(t)
+	ctx := context.Background()
+	createTestMailbox(t, st, "user@example.com")
+
+	got, err := st.ListInferenceSuggestions(ctx, "user@example.com")
+	if err != nil {
+		t.Fatalf("ListInferenceSuggestions: %v", err)
+	}
+	if len(got) != 0 {
+		t.Fatalf("expected no inference suggestions, got %d", len(got))
+	}
+}
+
+func TestInferenceSuggestionMethods_ClosedStore(t *testing.T) {
+	st := newTestStore(t)
+	_ = st.Close()
+
+	if err := st.SaveInferenceCandidate(context.Background(), InferenceSuggestion{
+		MailboxID:      "user@example.com",
+		MessageID:      "msg1",
+		PatternType:    "domain",
+		PatternValue:   "x.com",
+		Category:       "client",
+		Confidence:     0.81,
+		ConfidenceBand: "high",
+	}); err == nil {
+		t.Fatal("expected SaveInferenceCandidate error from closed store")
+	}
+	if _, err := st.ListInferenceSuggestions(context.Background(), "user@example.com"); err == nil {
+		t.Fatal("expected ListInferenceSuggestions error from closed store")
+	}
+	if err := st.DeleteInferenceSuggestion(context.Background(), "user@example.com", "msg1"); err == nil {
+		t.Fatal("expected DeleteInferenceSuggestion error from closed store")
+	}
+}
+
+func TestListInferenceSuggestions_InvalidCreatedAt(t *testing.T) {
+	st := newTestStore(t)
+	ctx := context.Background()
+	createTestMailbox(t, st, "user@example.com")
+	seedMessage(t, st, "msg1", "user@example.com", "a@x.com", "", "x.com", "Invoice", time.Now())
+
+	if _, err := st.db.ExecContext(ctx,
+		`INSERT INTO ai_inference_suggestions (mailbox_id, message_id, pattern_type, pattern_value, category, confidence, confidence_band, evidence_json, review_required, created_at)
+		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		"user@example.com", "msg1", "domain", "x.com", "client", 0.81, "high", `{}`, 0, "not-valid-rfc3339",
+	); err != nil {
+		t.Fatal(err)
+	}
+
+	if _, err := st.ListInferenceSuggestions(ctx, "user@example.com"); err == nil {
+		t.Fatal("expected parse error for invalid inference suggestion created_at")
+	}
+}

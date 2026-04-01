@@ -37,6 +37,7 @@ var newGmailProvider = func(email string, tokenSourceFactory func(context.Contex
 }
 var runIngestion = ingestion.Run
 var runClassify = engine.RunClassify
+var runInference = engine.RunInference
 var reportExportPDFRenderer exportpkg.PDFRenderer
 var readSummaryPromptFile = os.ReadFile
 var newSummaryProvider = func(command string, args []string) exportpkg.SummaryProvider {
@@ -432,14 +433,16 @@ func buildSyncCmd(cfg config.Config) *cobra.Command {
 // buildSyncGmailCmd returns the "sync gmail" subcommand.
 func buildSyncGmailCmd(cfg config.Config) *cobra.Command {
 	var account string
+	var limit int
 	cmd := &cobra.Command{
 		Use:   "gmail",
 		Short: "Sync messages from Gmail",
 		RunE: func(cmd *cobra.Command, _ []string) error {
-			return runSyncGmail(cmd.Context(), cmd.OutOrStdout(), cfg, account)
+			return runSyncGmail(cmd.Context(), cmd.OutOrStdout(), cfg, account, limit)
 		},
 	}
 	cmd.Flags().StringVar(&account, "account", "", "mailbox email or alias to sync")
+	cmd.Flags().IntVar(&limit, "limit", 0, "stop after syncing this many messages and complete (0 = unlimited)")
 	_ = cmd.MarkFlagRequired("account")
 	return cmd
 }
@@ -462,7 +465,7 @@ func buildSyncStatusCmd(cfg config.Config) *cobra.Command {
 // runSyncGmail resolves the mailbox, resolves the auth mode, builds a Gmail provider,
 // and runs a full ingestion sync. It is separated from the Cobra handler for
 // testability.
-func runSyncGmail(ctx context.Context, w io.Writer, cfg config.Config, account string) error {
+func runSyncGmail(ctx context.Context, w io.Writer, cfg config.Config, account string, limit int) error {
 	st, err := storage.Open(cfg.StoragePath)
 	if err != nil {
 		return fmt.Errorf("open storage: %w", err)
@@ -492,6 +495,7 @@ func runSyncGmail(ctx context.Context, w io.Writer, cfg config.Config, account s
 		Stdout:       w,
 		RequestDelay: time.Duration(cfg.SyncDelayMS) * time.Millisecond,
 		MaxRetries:   5,
+		MessageLimit: limit,
 	})
 }
 
@@ -565,10 +569,51 @@ func buildClassifyCmd(cfg config.Config) *cobra.Command {
 	cmd.AddCommand(buildClassifyRunCmd(cfg))
 	cmd.AddCommand(buildClassifyResultsCmd(cfg))
 	cmd.AddCommand(buildClassifySuggestionsCmd(cfg))
+	cmd.AddCommand(buildClassifyInferCmd(cfg))
 	cmd.AddCommand(buildClassifyPromoteCmd(cfg))
 	cmd.AddCommand(buildClassifySeedsCmd(cfg))
 	cmd.AddCommand(buildClassifyCategoriesCmd())
 	cmd.AddCommand(buildClassifyPatternTypesCmd())
+	return cmd
+}
+
+// buildClassifyInferCmd returns the "classify infer" command, which runs one
+// mailbox-scoped inference pass and also hosts inference suggestion listing.
+func buildClassifyInferCmd(cfg config.Config) *cobra.Command {
+	var account string
+	var providerCommand string
+	var providerArgs []string
+
+	cmd := &cobra.Command{
+		Use:   "infer",
+		Short: "Run AI-assisted inference for still-unknown mailbox messages",
+		RunE: func(cmd *cobra.Command, _ []string) error {
+			return runClassifyInfer(cmd.Context(), cmd.OutOrStdout(), cfg, account, providerCommand, providerArgs)
+		},
+	}
+	cmd.Flags().StringVar(&account, "account", "", "mailbox email or alias")
+	cmd.Flags().StringVar(&providerCommand, "provider-command", "", "external command that returns structured inference candidates")
+	cmd.Flags().StringSliceVar(&providerArgs, "provider-arg", nil, "argument to pass to the inference provider command; repeatable")
+	_ = cmd.MarkFlagRequired("account")
+	cmd.AddCommand(buildClassifyInferSuggestionsCmd(cfg))
+	return cmd
+}
+
+// buildClassifyInferSuggestionsCmd returns the "classify infer suggestions"
+// subcommand.
+func buildClassifyInferSuggestionsCmd(cfg config.Config) *cobra.Command {
+	var account string
+	var format string
+	cmd := &cobra.Command{
+		Use:   "suggestions",
+		Short: "List persisted AI inference suggestions for operator review",
+		RunE: func(cmd *cobra.Command, _ []string) error {
+			return runClassifyInferSuggestions(cmd.Context(), cmd.OutOrStdout(), cfg, account, format)
+		},
+	}
+	cmd.Flags().StringVar(&account, "account", "", "mailbox email or alias")
+	cmd.Flags().StringVar(&format, "format", "table", "output format: table, json")
+	_ = cmd.MarkFlagRequired("account")
 	return cmd
 }
 
@@ -785,6 +830,58 @@ func runClassifySuggestions(ctx context.Context, w io.Writer, cfg config.Config,
 	return tw.Flush()
 }
 
+// runClassifyInfer executes one mailbox-scoped AI inference pass.
+func runClassifyInfer(ctx context.Context, w io.Writer, cfg config.Config, account, providerCommand string, providerArgs []string) error {
+	command := strings.TrimSpace(providerCommand)
+	if command == "" {
+		command = strings.TrimSpace(os.Getenv("INBOXATLAS_INFERENCE_PROVIDER_CMD"))
+	}
+	if command == "" {
+		return fmt.Errorf("inference provider command is required via --provider-command or INBOXATLAS_INFERENCE_PROVIDER_CMD")
+	}
+
+	result, err := runInference(ctx, cfg, account, command, providerArgs)
+	if err != nil {
+		return err
+	}
+
+	_, _ = fmt.Fprintf(w, "Inference submitted %d unknown messages for %s.\n", result.Submitted, result.MailboxID)
+	_, _ = fmt.Fprintf(w, "Persisted %d suggestions. High: %d Medium: %d Low: %d Rejected: %d\n", result.Persisted, result.High, result.Medium, result.Low, result.Rejected)
+	return nil
+}
+
+// runClassifyInferSuggestions renders persisted AI inference suggestions for
+// one mailbox.
+func runClassifyInferSuggestions(ctx context.Context, w io.Writer, cfg config.Config, account, format string) error {
+	f, err := validateClassifyFormat(format)
+	if err != nil {
+		return err
+	}
+
+	result, err := engine.ListInferenceSuggestions(ctx, cfg, account)
+	if err != nil {
+		return err
+	}
+
+	if f == "json" {
+		enc := json.NewEncoder(w)
+		enc.SetIndent("", "  ")
+		return enc.Encode(result.Suggestions)
+	}
+
+	if len(result.Suggestions) == 0 {
+		_, _ = fmt.Fprintf(w, "No AI inference suggestions for %s.\n", result.MailboxID)
+		return nil
+	}
+
+	tw := tabwriter.NewWriter(w, 0, 0, 3, ' ', 0)
+	_, _ = fmt.Fprintln(tw, "MESSAGE ID\tPATTERN TYPE\tPATTERN VALUE\tCATEGORY\tCONFIDENCE\tBAND\tREVIEW REQUIRED")
+	for _, suggestion := range result.Suggestions {
+		_, _ = fmt.Fprintf(tw, "%s\t%s\t%s\t%s\t%.2f\t%s\t%t\n", suggestion.MessageID, suggestion.PatternType, suggestion.PatternValue, suggestion.Category, suggestion.Confidence, suggestion.ConfidenceBand, suggestion.ReviewRequired)
+	}
+	return tw.Flush()
+}
+
 // runClassifyResults renders mailbox-scoped classification summary output.
 func runClassifyResults(ctx context.Context, w io.Writer, cfg config.Config, account, format string) error {
 	f, err := validateClassifyFormat(format)
@@ -863,9 +960,9 @@ func runClassifySeedsList(ctx context.Context, w io.Writer, cfg config.Config, a
 	}
 
 	tw := tabwriter.NewWriter(w, 0, 0, 3, ' ', 0)
-	_, _ = fmt.Fprintln(tw, "MAILBOX\tPATTERN TYPE\tPATTERN VALUE\tCATEGORY\tSOURCE\tPRIORITY")
+	_, _ = fmt.Fprintln(tw, "ID\tMAILBOX\tPATTERN TYPE\tPATTERN VALUE\tCATEGORY\tSOURCE\tPRIORITY")
 	for _, seed := range seeds {
-		_, _ = fmt.Fprintf(tw, "%s\t%s\t%s\t%s\t%s\t%d\n", seed.MailboxID, seed.PatternType, seed.PatternValue, seed.Category, seed.Source, seed.Priority)
+		_, _ = fmt.Fprintf(tw, "%d\t%s\t%s\t%s\t%s\t%s\t%d\n", seed.ID, seed.MailboxID, seed.PatternType, seed.PatternValue, seed.Category, seed.Source, seed.Priority)
 	}
 	return tw.Flush()
 }

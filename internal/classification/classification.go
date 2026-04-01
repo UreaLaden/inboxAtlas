@@ -5,8 +5,13 @@
 package classification
 
 import (
+	"bytes"
 	"context"
+	"encoding/json"
 	"fmt"
+	"io"
+	"os"
+	"os/exec"
 	"sort"
 	"strings"
 	"time"
@@ -92,6 +97,146 @@ type Classifier interface {
 	// Classify returns a ClassificationResult for msg. An unknown category result
 	// (Category == CategoryUnknown) signals that this classifier could not match msg.
 	Classify(ctx context.Context, msg models.MessageMeta) (ClassificationResult, error)
+}
+
+// InferenceRequest is the mailbox-scoped deterministic payload supplied to an
+// AI inference provider for one still-unknown message.
+type InferenceRequest struct {
+	MessageID             string   `json:"message_id"`
+	MailboxID             string   `json:"mailbox_id"`
+	FromEmail             string   `json:"from_email"`
+	FromName              string   `json:"from_name"`
+	Domain                string   `json:"domain"`
+	Subject               string   `json:"subject"`
+	Snippet               string   `json:"snippet"`
+	Labels                []string `json:"labels"`
+	ReceivedAt            string   `json:"received_at"`
+	SenderCount           int      `json:"sender_count"`
+	DomainCount           int      `json:"domain_count"`
+	DeterministicCategory string   `json:"deterministic_category"`
+}
+
+// InferenceEvidence captures the structured rationale returned by an AI
+// inference provider for operator review.
+type InferenceEvidence struct {
+	SubjectPhrases []string `json:"subject_phrases"`
+	SnippetPhrases []string `json:"snippet_phrases"`
+	SenderSignal   string   `json:"sender_signal"`
+	DomainSignal   string   `json:"domain_signal"`
+	LabelSignals   []string `json:"label_signals"`
+}
+
+// InferenceCandidate is one provider-returned classification proposal for a
+// message that remained unknown after deterministic classification.
+type InferenceCandidate struct {
+	MessageID      string            `json:"message_id"`
+	Category       string            `json:"category"`
+	Confidence     float64           `json:"confidence"`
+	ConfidenceBand string            `json:"confidence_band"`
+	Evidence       InferenceEvidence `json:"evidence"`
+	ReviewRequired bool              `json:"review_required"`
+}
+
+// InferenceProvider returns structured inference candidates for a mailbox
+// batch of still-unknown messages.
+type InferenceProvider interface {
+	Infer(ctx context.Context, requests []InferenceRequest) ([]InferenceCandidate, error)
+}
+
+// CommandInferenceProvider invokes an external command that accepts a JSON
+// inference request payload on stdin and returns structured candidates on
+// stdout.
+type CommandInferenceProvider struct {
+	Command string
+	Args    []string
+}
+
+type inferenceProviderRequest struct {
+	Requests []InferenceRequest `json:"requests"`
+}
+
+// Infer executes the configured command-backed provider and decodes structured
+// inference candidates from stdout.
+func (p CommandInferenceProvider) Infer(ctx context.Context, requests []InferenceRequest) ([]InferenceCandidate, error) {
+	if strings.TrimSpace(p.Command) == "" {
+		return nil, fmt.Errorf("inference provider command is required")
+	}
+
+	reqBody, err := json.Marshal(inferenceProviderRequest{Requests: requests})
+	if err != nil {
+		return nil, fmt.Errorf("marshal inference request: %w", err)
+	}
+
+	cmd := exec.CommandContext(ctx, p.Command, p.Args...)
+	cmd.Stdin = bytes.NewReader(reqBody)
+	var stderr bytes.Buffer
+	cmd.Stderr = io.MultiWriter(os.Stderr, &stderr)
+	output, err := cmd.Output()
+	if err != nil {
+		if _, ok := err.(*exec.ExitError); ok {
+			return nil, fmt.Errorf("run inference provider: %s", strings.TrimSpace(stderr.String()))
+		}
+		return nil, fmt.Errorf("run inference provider: %w", err)
+	}
+
+	var candidates []InferenceCandidate
+	if err := json.Unmarshal(output, &candidates); err != nil {
+		return nil, fmt.Errorf("parse inference output: %w", err)
+	}
+	return candidates, nil
+}
+
+// AIInferenceClassifier is a read-only adapter over a prevalidated candidate
+// lookup computed for one mailbox inference run.
+type AIInferenceClassifier struct {
+	deterministicCategories map[string]string
+	candidates              map[string]InferenceCandidate
+}
+
+// NewAIInferenceClassifier creates an AIInferenceClassifier from precomputed
+// deterministic categories and validated inference candidates keyed by
+// message ID.
+func NewAIInferenceClassifier(deterministicCategories map[string]string, candidates map[string]InferenceCandidate) *AIInferenceClassifier {
+	detCopy := make(map[string]string, len(deterministicCategories))
+	for k, v := range deterministicCategories {
+		detCopy[k] = v
+	}
+	candidateCopy := make(map[string]InferenceCandidate, len(candidates))
+	for k, v := range candidates {
+		candidateCopy[k] = v
+	}
+	return &AIInferenceClassifier{
+		deterministicCategories: detCopy,
+		candidates:              candidateCopy,
+	}
+}
+
+// Classify returns an AI-backed classification result only when the message is
+// still deterministic-unknown and a validated candidate exists for its message
+// ID.
+func (c *AIInferenceClassifier) Classify(_ context.Context, msg models.MessageMeta) (ClassificationResult, error) {
+	if category, ok := c.deterministicCategories[msg.ProviderID]; ok && category != CategoryUnknown {
+		return ClassificationResult{
+			Category:    CategoryUnknown,
+			MatchedRule: "deterministic classification already resolved",
+			Source:      SourceAI,
+		}, nil
+	}
+
+	candidate, ok := c.candidates[msg.ProviderID]
+	if !ok {
+		return ClassificationResult{
+			Category:    CategoryUnknown,
+			MatchedRule: "no inference candidate",
+			Source:      SourceAI,
+		}, nil
+	}
+
+	return ClassificationResult{
+		Category:    candidate.Category,
+		MatchedRule: "ai:" + candidate.ConfidenceBand,
+		Source:      SourceAI,
+	}, nil
 }
 
 // specificityRank returns a sort rank for a pattern type. Lower = more specific.
@@ -197,6 +342,57 @@ func tokenizeSubject(subject string) []string {
 		tokens = append(tokens, strings.ToLower(token))
 	}
 	return tokens
+}
+
+// InferenceConfidenceBand derives the canonical confidence band for one
+// confidence score.
+func InferenceConfidenceBand(confidence float64) string {
+	switch {
+	case confidence >= 0.80:
+		return "high"
+	case confidence >= 0.55:
+		return "medium"
+	default:
+		return "low"
+	}
+}
+
+// ValidateInferenceCandidate enforces the accepted inference contract for a
+// provider-returned candidate against the submitted request set.
+func ValidateInferenceCandidate(candidate InferenceCandidate, requests map[string]InferenceRequest) error {
+	if _, ok := requests[candidate.MessageID]; !ok {
+		return fmt.Errorf("unknown inference message_id %q", candidate.MessageID)
+	}
+	if !isKnownCategory(candidate.Category) {
+		return fmt.Errorf("unsupported inference category %q", candidate.Category)
+	}
+	if candidate.Confidence < 0 || candidate.Confidence > 1 {
+		return fmt.Errorf("invalid inference confidence %.3f", candidate.Confidence)
+	}
+	expectedBand := InferenceConfidenceBand(candidate.Confidence)
+	if candidate.ConfidenceBand != expectedBand {
+		return fmt.Errorf("inference confidence band %q does not match confidence %.3f", candidate.ConfidenceBand, candidate.Confidence)
+	}
+	if candidate.ReviewRequired != (expectedBand == "medium") {
+		return fmt.Errorf("inference review_required %t does not match confidence band %q", candidate.ReviewRequired, candidate.ConfidenceBand)
+	}
+	return nil
+}
+
+func isKnownCategory(category string) bool {
+	switch category {
+	case CategoryInternal,
+		CategoryClient,
+		CategoryVendor,
+		CategoryGovernment,
+		CategorySystemGenerated,
+		CategoryNewsletterMarketing,
+		CategorySocial,
+		CategoryUnknown:
+		return true
+	default:
+		return false
+	}
 }
 
 // ChainClassifier implements Classifier by delegating to an ordered list of

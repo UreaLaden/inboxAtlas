@@ -3,6 +3,7 @@ package engine
 import (
 	"context"
 	"math"
+	"os/exec"
 	"path/filepath"
 	"testing"
 	"time"
@@ -324,6 +325,9 @@ func TestListMailboxSeeds(t *testing.T) {
 	if len(seeds) != 1 {
 		t.Fatalf("expected 1 mailbox-scoped seed, got %d", len(seeds))
 	}
+	if seeds[0].ID == 0 {
+		t.Fatalf("expected mailbox seed ID to be populated, got %+v", seeds[0])
+	}
 	if seeds[0].MailboxID != "user@example.com" || seeds[0].PatternValue != "mailbox.example" {
 		t.Fatalf("unexpected seed: %+v", seeds[0])
 	}
@@ -349,6 +353,15 @@ func TestListMailboxSeeds_MailboxNotFound(t *testing.T) {
 	_, err := ListMailboxSeeds(context.Background(), cfg, "missing@example.com")
 	if err == nil {
 		t.Fatal("expected mailbox resolution error")
+	}
+}
+
+func TestListMailboxSeeds_OpenStorageError(t *testing.T) {
+	cfg := config.Default()
+	cfg.StoragePath = "/dev/null/inboxatlas.db"
+
+	if _, err := ListMailboxSeeds(context.Background(), cfg, "user@example.com"); err == nil {
+		t.Fatal("expected open storage error")
 	}
 }
 
@@ -430,6 +443,15 @@ func TestDeleteMailboxSeed_MailboxNotFound(t *testing.T) {
 	}
 }
 
+func TestDeleteMailboxSeed_OpenStorageError(t *testing.T) {
+	cfg := config.Default()
+	cfg.StoragePath = "/dev/null/inboxatlas.db"
+
+	if err := DeleteMailboxSeed(context.Background(), cfg, "user@example.com", 1); err == nil {
+		t.Fatal("expected open storage error")
+	}
+}
+
 func TestGetClassificationSummary(t *testing.T) {
 	cfg := engineTestConfig(t)
 	st := engineTestStore(t, cfg)
@@ -501,6 +523,330 @@ func TestGetClassificationSummary_MailboxNotFound(t *testing.T) {
 	_, err := GetClassificationSummary(context.Background(), cfg, "missing@example.com")
 	if err == nil {
 		t.Fatal("expected mailbox resolution error")
+	}
+}
+
+func TestRunInference_PersistsHighAndMediumCandidates(t *testing.T) {
+	cfg := engineTestConfig(t)
+	st := engineTestStore(t, cfg)
+	createEngineMailbox(t, st, "user@example.com")
+	now := time.Now().UTC()
+
+	engineSeedMessage(t, st, models.MessageMeta{
+		ProviderID: "m1",
+		MailboxID:  "user@example.com",
+		Provider:   "gmail",
+		FromEmail:  "groupupdates@facebookmail.com",
+		Domain:     "facebookmail.com",
+		ReceivedAt: now,
+	})
+	engineSeedMessage(t, st, models.MessageMeta{
+		ProviderID: "m2",
+		MailboxID:  "user@example.com",
+		Provider:   "gmail",
+		FromEmail:  "ai@healthymd.com",
+		Domain:     "healthymd.com",
+		Subject:    "Invoice review",
+		ReceivedAt: now.Add(time.Minute),
+	})
+	engineSeedMessage(t, st, models.MessageMeta{
+		ProviderID: "m3",
+		MailboxID:  "user@example.com",
+		Provider:   "gmail",
+		FromEmail:  "reply@client.example",
+		Domain:     "client.example",
+		Subject:    "Client follow-up",
+		ReceivedAt: now.Add(2 * time.Minute),
+	})
+	if err := st.UpsertSenderStat(context.Background(), "user@example.com", "ai@healthymd.com", "", "healthymd.com", 4); err != nil {
+		t.Fatalf("UpsertSenderStat m2: %v", err)
+	}
+	if err := st.UpsertDomainStat(context.Background(), "user@example.com", "healthymd.com", 4); err != nil {
+		t.Fatalf("UpsertDomainStat m2: %v", err)
+	}
+	if err := st.UpsertSenderStat(context.Background(), "user@example.com", "reply@client.example", "", "client.example", 2); err != nil {
+		t.Fatalf("UpsertSenderStat m3: %v", err)
+	}
+	if err := st.UpsertDomainStat(context.Background(), "user@example.com", "client.example", 2); err != nil {
+		t.Fatalf("UpsertDomainStat m3: %v", err)
+	}
+
+	result, err := RunInference(context.Background(), cfg, "user@example.com", inferenceTestProviderCommand(), inferenceTestProviderArgs("persisted"))
+	if err != nil {
+		t.Fatalf("RunInference: %v", err)
+	}
+	if result.Submitted != 2 || result.High != 1 || result.Medium != 1 || result.Persisted != 2 {
+		t.Fatalf("unexpected inference summary: %+v", result)
+	}
+
+	suggestions, err := st.ListInferenceSuggestions(context.Background(), "user@example.com")
+	if err != nil {
+		t.Fatalf("ListInferenceSuggestions: %v", err)
+	}
+	if len(suggestions) != 2 {
+		t.Fatalf("expected 2 persisted suggestions, got %d", len(suggestions))
+	}
+	if suggestions[0].PatternValue != "healthymd.com" && suggestions[1].PatternValue != "healthymd.com" {
+		t.Fatalf("expected healthymd.com inference suggestion, got %+v", suggestions)
+	}
+}
+
+func TestRunInference_RejectsInvalidAndLowCandidates(t *testing.T) {
+	cfg := engineTestConfig(t)
+	st := engineTestStore(t, cfg)
+	createEngineMailbox(t, st, "user@example.com")
+	now := time.Now().UTC()
+
+	for _, msg := range []models.MessageMeta{
+		{ProviderID: "m1", MailboxID: "user@example.com", Provider: "gmail", FromEmail: "a@x.com", Domain: "x.com", ReceivedAt: now},
+		{ProviderID: "m2", MailboxID: "user@example.com", Provider: "gmail", FromEmail: "b@y.com", Domain: "y.com", ReceivedAt: now.Add(time.Minute)},
+	} {
+		engineSeedMessage(t, st, msg)
+	}
+	if err := st.UpsertDomainStat(context.Background(), "user@example.com", "x.com", 1); err != nil {
+		t.Fatalf("UpsertDomainStat x: %v", err)
+	}
+	if err := st.UpsertDomainStat(context.Background(), "user@example.com", "y.com", 1); err != nil {
+		t.Fatalf("UpsertDomainStat y: %v", err)
+	}
+
+	result, err := RunInference(context.Background(), cfg, "user@example.com", inferenceTestProviderCommand(), inferenceTestProviderArgs("mixed"))
+	if err != nil {
+		t.Fatalf("RunInference: %v", err)
+	}
+	if result.Submitted != 2 || result.Low != 1 || result.Rejected != 1 || result.Persisted != 0 {
+		t.Fatalf("unexpected inference summary: %+v", result)
+	}
+}
+
+func TestRunInference_NoUnknownMessages(t *testing.T) {
+	cfg := engineTestConfig(t)
+	st := engineTestStore(t, cfg)
+	createEngineMailbox(t, st, "user@example.com")
+	engineSeedMessage(t, st, models.MessageMeta{
+		ProviderID: "m1",
+		MailboxID:  "user@example.com",
+		Provider:   "gmail",
+		FromEmail:  "groupupdates@facebookmail.com",
+		Domain:     "facebookmail.com",
+		ReceivedAt: time.Now().UTC(),
+	})
+
+	result, err := RunInference(context.Background(), cfg, "user@example.com", inferenceTestProviderCommand(), inferenceTestProviderArgs("persisted"))
+	if err != nil {
+		t.Fatalf("RunInference: %v", err)
+	}
+	if result.Submitted != 0 || result.Persisted != 0 {
+		t.Fatalf("expected no submitted inference requests, got %+v", result)
+	}
+}
+
+func TestRunInference_UsesSenderEmailFallbackPattern(t *testing.T) {
+	cfg := engineTestConfig(t)
+	st := engineTestStore(t, cfg)
+	createEngineMailbox(t, st, "user@example.com")
+	engineSeedMessage(t, st, models.MessageMeta{
+		ProviderID: "m1",
+		MailboxID:  "user@example.com",
+		Provider:   "gmail",
+		FromEmail:  "ai@example.com",
+		Subject:    "Needs review",
+		ReceivedAt: time.Now().UTC(),
+	})
+	if err := st.UpsertSenderStat(context.Background(), "user@example.com", "ai@example.com", "", "", 3); err != nil {
+		t.Fatalf("UpsertSenderStat: %v", err)
+	}
+
+	result, err := RunInference(context.Background(), cfg, "user@example.com", inferenceTestProviderCommand(), inferenceTestProviderArgs("sender-fallback"))
+	if err != nil {
+		t.Fatalf("RunInference: %v", err)
+	}
+	if result.Persisted != 1 {
+		t.Fatalf("expected one persisted suggestion, got %+v", result)
+	}
+
+	got, err := st.ListInferenceSuggestions(context.Background(), "user@example.com")
+	if err != nil {
+		t.Fatalf("ListInferenceSuggestions: %v", err)
+	}
+	if len(got) != 1 || got[0].PatternType != classification.PatternSenderEmail || got[0].PatternValue != "ai@example.com" {
+		t.Fatalf("unexpected sender fallback suggestion: %+v", got)
+	}
+}
+
+func TestRunInference_RejectsCandidateWithoutPromotablePattern(t *testing.T) {
+	cfg := engineTestConfig(t)
+	st := engineTestStore(t, cfg)
+	createEngineMailbox(t, st, "user@example.com")
+	engineSeedMessage(t, st, models.MessageMeta{
+		ProviderID: "m1",
+		MailboxID:  "user@example.com",
+		Provider:   "gmail",
+		Subject:    "Needs review",
+		ReceivedAt: time.Now().UTC(),
+	})
+
+	result, err := RunInference(context.Background(), cfg, "user@example.com", inferenceTestProviderCommand(), inferenceTestProviderArgs("sender-fallback"))
+	if err != nil {
+		t.Fatalf("RunInference: %v", err)
+	}
+	if result.Submitted != 1 || result.High != 1 || result.Rejected != 1 || result.Persisted != 0 {
+		t.Fatalf("unexpected inference summary: %+v", result)
+	}
+}
+
+func TestRunInference_EmptyMailbox(t *testing.T) {
+	cfg := engineTestConfig(t)
+	st := engineTestStore(t, cfg)
+	createEngineMailbox(t, st, "user@example.com")
+
+	if _, err := RunInference(context.Background(), cfg, "user@example.com", inferenceTestProviderCommand(), inferenceTestProviderArgs("persisted")); err == nil {
+		t.Fatal("expected empty mailbox error")
+	}
+}
+
+func TestRunInference_MailboxNotFound(t *testing.T) {
+	cfg := engineTestConfig(t)
+	if _, err := RunInference(context.Background(), cfg, "missing@example.com", inferenceTestProviderCommand(), inferenceTestProviderArgs("persisted")); err == nil {
+		t.Fatal("expected mailbox resolution error")
+	}
+}
+
+func TestRunInference_OpenStorageError(t *testing.T) {
+	cfg := config.Default()
+	cfg.StoragePath = "/dev/null/inboxatlas.db"
+
+	if _, err := RunInference(context.Background(), cfg, "user@example.com", inferenceTestProviderCommand(), inferenceTestProviderArgs("persisted")); err == nil {
+		t.Fatal("expected open storage error")
+	}
+}
+
+func TestRunInference_ProviderError(t *testing.T) {
+	cfg := engineTestConfig(t)
+	st := engineTestStore(t, cfg)
+	createEngineMailbox(t, st, "user@example.com")
+	engineSeedMessage(t, st, models.MessageMeta{
+		ProviderID: "m1",
+		MailboxID:  "user@example.com",
+		Provider:   "gmail",
+		FromEmail:  "ai@example.com",
+		Domain:     "example.com",
+		ReceivedAt: time.Now().UTC(),
+	})
+	if err := st.UpsertDomainStat(context.Background(), "user@example.com", "example.com", 1); err != nil {
+		t.Fatalf("UpsertDomainStat: %v", err)
+	}
+
+	if _, err := RunInference(context.Background(), cfg, "user@example.com", inferenceTestProviderCommand(), inferenceTestProviderArgs("stderr-exit")); err == nil {
+		t.Fatal("expected provider error")
+	}
+}
+
+func TestRunInference_PropagatesDeterministicClassificationError(t *testing.T) {
+	cfg := engineTestConfig(t)
+	st := engineTestStore(t, cfg)
+	createEngineMailbox(t, st, "user@example.com")
+	engineSeedMessage(t, st, models.MessageMeta{
+		MailboxID:  "user@example.com",
+		Provider:   "gmail",
+		FromEmail:  "ai@example.com",
+		Domain:     "example.com",
+		ReceivedAt: time.Now().UTC(),
+	})
+
+	if _, err := RunInference(context.Background(), cfg, "user@example.com", inferenceTestProviderCommand(), inferenceTestProviderArgs("persisted")); err == nil {
+		t.Fatal("expected deterministic classification error")
+	}
+}
+
+func TestListInferenceSuggestions(t *testing.T) {
+	cfg := engineTestConfig(t)
+	st := engineTestStore(t, cfg)
+	createEngineMailbox(t, st, "user@example.com")
+	engineSeedMessage(t, st, models.MessageMeta{
+		ProviderID: "m1",
+		MailboxID:  "user@example.com",
+		Provider:   "gmail",
+		FromEmail:  "ai@healthymd.com",
+		Domain:     "healthymd.com",
+		ReceivedAt: time.Now().UTC(),
+	})
+	if err := st.SaveInferenceCandidate(context.Background(), storage.InferenceSuggestion{
+		MailboxID:      "user@example.com",
+		MessageID:      "m1",
+		PatternType:    classification.PatternDomain,
+		PatternValue:   "healthymd.com",
+		Category:       classification.CategoryClient,
+		Confidence:     0.81,
+		ConfidenceBand: "high",
+		ReviewRequired: false,
+	}); err != nil {
+		t.Fatalf("SaveInferenceCandidate: %v", err)
+	}
+
+	result, err := ListInferenceSuggestions(context.Background(), cfg, "user@example.com")
+	if err != nil {
+		t.Fatalf("ListInferenceSuggestions: %v", err)
+	}
+	if len(result.Suggestions) != 1 || result.Suggestions[0].PatternValue != "healthymd.com" {
+		t.Fatalf("unexpected inference suggestions: %+v", result.Suggestions)
+	}
+}
+
+func TestListInferenceSuggestions_MailboxNotFound(t *testing.T) {
+	cfg := engineTestConfig(t)
+	if _, err := ListInferenceSuggestions(context.Background(), cfg, "missing@example.com"); err == nil {
+		t.Fatal("expected mailbox resolution error")
+	}
+}
+
+func TestPromoteClassifySuggestion_PromotesInferenceSuggestion(t *testing.T) {
+	cfg := engineTestConfig(t)
+	st := engineTestStore(t, cfg)
+	createEngineMailbox(t, st, "user@example.com")
+	engineSeedMessage(t, st, models.MessageMeta{
+		ProviderID: "m1",
+		MailboxID:  "user@example.com",
+		Provider:   "gmail",
+		FromEmail:  "ai@healthymd.com",
+		Domain:     "healthymd.com",
+		ReceivedAt: time.Now().UTC(),
+	})
+	if err := st.SaveInferenceCandidate(context.Background(), storage.InferenceSuggestion{
+		MailboxID:      "user@example.com",
+		MessageID:      "m1",
+		PatternType:    classification.PatternDomain,
+		PatternValue:   "healthymd.com",
+		Category:       classification.CategoryClient,
+		Confidence:     0.81,
+		ConfidenceBand: "high",
+		ReviewRequired: false,
+	}); err != nil {
+		t.Fatalf("SaveInferenceCandidate: %v", err)
+	}
+
+	result, err := PromoteClassifySuggestion(context.Background(), cfg, "user@example.com", PromoteSuggestionRequest{
+		PatternType:  classification.PatternDomain,
+		PatternValue: "healthymd.com",
+		Category:     classification.CategoryClient,
+	})
+	if err != nil {
+		t.Fatalf("PromoteClassifySuggestion: %v", err)
+	}
+	if !result.Created {
+		t.Fatal("expected inference suggestion promotion to create seed")
+	}
+}
+
+func TestInferencePatternForMessage(t *testing.T) {
+	if gotType, gotValue, ok := inferencePatternForMessage(models.MessageMeta{Domain: "Example.COM"}); !ok || gotType != classification.PatternDomain || gotValue != "example.com" {
+		t.Fatalf("domain pattern: got type=%q value=%q ok=%v", gotType, gotValue, ok)
+	}
+	if gotType, gotValue, ok := inferencePatternForMessage(models.MessageMeta{FromEmail: "User@Example.com"}); !ok || gotType != classification.PatternSenderEmail || gotValue != "user@example.com" {
+		t.Fatalf("sender pattern: got type=%q value=%q ok=%v", gotType, gotValue, ok)
+	}
+	if _, _, ok := inferencePatternForMessage(models.MessageMeta{}); ok {
+		t.Fatal("expected no pattern for empty message")
 	}
 }
 
@@ -829,5 +1175,55 @@ func engineSeedMessage(t *testing.T, st *storage.Store, msg models.MessageMeta) 
 	t.Helper()
 	if err := st.UpsertMessage(context.Background(), msg); err != nil {
 		t.Fatalf("UpsertMessage(%q): %v", msg.ProviderID, err)
+	}
+}
+
+func inferenceTestProviderCommand() string {
+	if _, err := exec.LookPath("sh"); err == nil {
+		return "sh"
+	}
+	return "cmd"
+}
+
+func inferenceTestProviderArgs(mode string) []string {
+	if _, err := exec.LookPath("sh"); err == nil {
+		return []string{"-c", inferenceTestProviderScript(mode)}
+	}
+	return []string{"/d", "/c", inferenceTestProviderWindows(mode)}
+}
+
+func inferenceTestProviderScript(mode string) string {
+	switch mode {
+	case "persisted":
+		return `cat >/dev/null; cat <<'EOF'
+[{"message_id":"m2","category":"client","confidence":0.84,"confidence_band":"high","review_required":false,"evidence":{"domain_signal":"known domain"}},{"message_id":"m3","category":"vendor","confidence":0.62,"confidence_band":"medium","review_required":true,"evidence":{"sender_signal":"repeat sender"}}]
+EOF`
+	case "mixed":
+		return `cat >/dev/null; cat <<'EOF'
+[{"message_id":"m1","category":"client","confidence":0.20,"confidence_band":"low","review_required":false,"evidence":{}},{"message_id":"missing","category":"vendor","confidence":0.82,"confidence_band":"high","review_required":false,"evidence":{}}]
+EOF`
+	case "sender-fallback":
+		return `cat >/dev/null; cat <<'EOF'
+[{"message_id":"m1","category":"client","confidence":0.84,"confidence_band":"high","review_required":false,"evidence":{"sender_signal":"known sender"}}]
+EOF`
+	case "stderr-exit":
+		return `cat >/dev/null; printf 'debug trace\n' >&2; exit 9`
+	default:
+		panic("unknown mode: " + mode)
+	}
+}
+
+func inferenceTestProviderWindows(mode string) string {
+	switch mode {
+	case "persisted":
+		return `more >nul & echo [{"message_id":"m2","category":"client","confidence":0.84,"confidence_band":"high","review_required":false,"evidence":{"domain_signal":"known domain"}},{"message_id":"m3","category":"vendor","confidence":0.62,"confidence_band":"medium","review_required":true,"evidence":{"sender_signal":"repeat sender"}}]`
+	case "mixed":
+		return `more >nul & echo [{"message_id":"m1","category":"client","confidence":0.20,"confidence_band":"low","review_required":false,"evidence":{}},{"message_id":"missing","category":"vendor","confidence":0.82,"confidence_band":"high","review_required":false,"evidence":{}}]`
+	case "sender-fallback":
+		return `more >nul & echo [{"message_id":"m1","category":"client","confidence":0.84,"confidence_band":"high","review_required":false,"evidence":{"sender_signal":"known sender"}}]`
+	case "stderr-exit":
+		return `more >nul & >&2 echo debug trace & exit /b 9`
+	default:
+		panic("unknown mode: " + mode)
 	}
 }

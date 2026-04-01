@@ -637,6 +637,110 @@ func TestRun_GetMetaBackoffRetryable(t *testing.T) {
 	}
 }
 
+func TestRun_MessageLimit(t *testing.T) {
+	st := newTestStore(t)
+	p := &mock.Provider{Messages: newMessages(20), PageSize: 10}
+	var out strings.Builder
+
+	opts := defaultOpts(p, st, &out)
+	opts.MessageLimit = 5
+
+	if err := Run(context.Background(), opts); err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+
+	cp, err := st.GetCheckpoint(context.Background(), "user@example.com", "gmail")
+	if err != nil || cp == nil {
+		t.Fatalf("GetCheckpoint: %v / %v", cp, err)
+	}
+	if cp.Status != "completed" {
+		t.Errorf("Status = %q, want completed", cp.Status)
+	}
+	if cp.MessagesSynced != 5 {
+		t.Errorf("MessagesSynced = %d, want 5", cp.MessagesSynced)
+	}
+	if !strings.Contains(out.String(), "Message limit reached (5)") {
+		t.Errorf("expected limit message in output, got:\n%s", out.String())
+	}
+}
+
+func TestRun_StatsPopulated(t *testing.T) {
+	st := newTestStore(t)
+
+	msgs := []*models.MessageMeta{
+		{ProviderID: "m1", MailboxID: "user@example.com", Provider: "gmail", FromEmail: "alice@acme.com", Domain: "acme.com"},
+		{ProviderID: "m2", MailboxID: "user@example.com", Provider: "gmail", FromEmail: "alice@acme.com", Domain: "acme.com"},
+		{ProviderID: "m3", MailboxID: "user@example.com", Provider: "gmail", FromEmail: "bob@other.com", Domain: "other.com"},
+	}
+	p := &mock.Provider{Messages: msgs, PageSize: 10}
+	var out strings.Builder
+
+	if err := Run(context.Background(), defaultOpts(p, st, &out)); err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+
+	senders, err := st.QuerySenderStatsByMailbox(context.Background(), "user@example.com", 1)
+	if err != nil {
+		t.Fatalf("QuerySenderStatsByMailbox: %v", err)
+	}
+	senderCounts := make(map[string]int, len(senders))
+	for _, s := range senders {
+		senderCounts[s.Email] = s.Count
+	}
+	if senderCounts["alice@acme.com"] != 2 {
+		t.Errorf("alice@acme.com count = %d, want 2", senderCounts["alice@acme.com"])
+	}
+	if senderCounts["bob@other.com"] != 1 {
+		t.Errorf("bob@other.com count = %d, want 1", senderCounts["bob@other.com"])
+	}
+
+	domains, err := st.QueryDomainStatsByMailbox(context.Background(), "user@example.com", 1)
+	if err != nil {
+		t.Fatalf("QueryDomainStatsByMailbox: %v", err)
+	}
+	domainCounts := make(map[string]int, len(domains))
+	for _, d := range domains {
+		domainCounts[d.Domain] = d.Count
+	}
+	if domainCounts["acme.com"] != 2 {
+		t.Errorf("acme.com count = %d, want 2", domainCounts["acme.com"])
+	}
+	if domainCounts["other.com"] != 1 {
+		t.Errorf("other.com count = %d, want 1", domainCounts["other.com"])
+	}
+}
+
+func TestRun_StatsIdempotent(t *testing.T) {
+	st := newTestStore(t)
+
+	msgs := []*models.MessageMeta{
+		{ProviderID: "m1", MailboxID: "user@example.com", Provider: "gmail", FromEmail: "alice@acme.com", Domain: "acme.com"},
+		{ProviderID: "m2", MailboxID: "user@example.com", Provider: "gmail", FromEmail: "alice@acme.com", Domain: "acme.com"},
+	}
+
+	// Run twice — second run should not double-count.
+	for i := 0; i < 2; i++ {
+		p := &mock.Provider{Messages: msgs, PageSize: 10}
+		var out strings.Builder
+		if err := Run(context.Background(), defaultOpts(p, st, &out)); err != nil {
+			t.Fatalf("Run %d: %v", i+1, err)
+		}
+	}
+
+	senders, err := st.QuerySenderStatsByMailbox(context.Background(), "user@example.com", 1)
+	if err != nil {
+		t.Fatalf("QuerySenderStatsByMailbox: %v", err)
+	}
+	if len(senders) != 1 || senders[0].Count != 2 {
+		t.Errorf("alice@acme.com count = %d (len=%d), want 2 (len=1)", func() int {
+			if len(senders) > 0 {
+				return senders[0].Count
+			}
+			return 0
+		}(), len(senders))
+	}
+}
+
 // TestSleepCtx_ZeroDelay exercises the d<=0 branch of sleepCtx directly.
 func TestSleepCtx_ZeroDelay(t *testing.T) {
 	// With zero delay and a live context, sleepCtx should return nil.
