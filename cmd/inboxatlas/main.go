@@ -866,9 +866,9 @@ func runClassifySeedsList(ctx context.Context, w io.Writer, cfg config.Config, a
 	}
 
 	tw := tabwriter.NewWriter(w, 0, 0, 3, ' ', 0)
-	_, _ = fmt.Fprintln(tw, "MAILBOX\tPATTERN TYPE\tPATTERN VALUE\tCATEGORY\tSOURCE\tPRIORITY")
+	_, _ = fmt.Fprintln(tw, "ID\tMAILBOX\tPATTERN TYPE\tPATTERN VALUE\tCATEGORY\tSOURCE\tPRIORITY")
 	for _, seed := range seeds {
-		_, _ = fmt.Fprintf(tw, "%s\t%s\t%s\t%s\t%s\t%d\n", seed.MailboxID, seed.PatternType, seed.PatternValue, seed.Category, seed.Source, seed.Priority)
+		_, _ = fmt.Fprintf(tw, "%d\t%s\t%s\t%s\t%s\t%s\t%d\n", seed.ID, seed.MailboxID, seed.PatternType, seed.PatternValue, seed.Category, seed.Source, seed.Priority)
 	}
 	return tw.Flush()
 }

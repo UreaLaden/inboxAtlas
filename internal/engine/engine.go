@@ -24,6 +24,7 @@ type ClassifyRunSummary struct {
 // ClassifySuggestion is a mailbox-scoped candidate classification seed shown
 // to operators for review.
 type ClassifySuggestion struct {
+	ID           int64  `json:"id,omitempty"`
 	MailboxID    string `json:"mailbox_id"`
 	PatternType  string `json:"pattern_type"`
 	PatternValue string `json:"pattern_value"`
@@ -89,6 +90,7 @@ func ListMailboxSeeds(ctx context.Context, cfg config.Config, account string) ([
 			continue
 		}
 		out = append(out, ClassifySuggestion{
+			ID:           seed.ID,
 			MailboxID:    seed.MailboxID,
 			PatternType:  seed.PatternType,
 			PatternValue: seed.PatternValue,

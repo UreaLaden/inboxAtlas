@@ -1669,7 +1669,7 @@ func TestRunClassifySeedsList_Table(t *testing.T) {
 	if err := runClassifySeedsList(context.Background(), &buf, cfg, "user@example.com", "table"); err != nil {
 		t.Fatalf("runClassifySeedsList: %v", err)
 	}
-	if !strings.Contains(buf.String(), "MAILBOX") || !strings.Contains(buf.String(), "mailbox.example") {
+	if !strings.Contains(buf.String(), "ID") || !strings.Contains(buf.String(), "mailbox.example") {
 		t.Fatalf("unexpected output: %q", buf.String())
 	}
 }
@@ -1702,7 +1702,7 @@ func TestRunClassifySeedsList_JSON(t *testing.T) {
 	if err := runClassifySeedsList(context.Background(), &buf, cfg, "user@example.com", "json"); err != nil {
 		t.Fatalf("runClassifySeedsList: %v", err)
 	}
-	if !strings.Contains(buf.String(), "\"pattern_value\": \"mailbox.example\"") {
+	if !strings.Contains(buf.String(), "\"id\": ") || !strings.Contains(buf.String(), "\"pattern_value\": \"mailbox.example\"") {
 		t.Fatalf("unexpected json output: %q", buf.String())
 	}
 }

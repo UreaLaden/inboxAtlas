@@ -324,6 +324,9 @@ func TestListMailboxSeeds(t *testing.T) {
 	if len(seeds) != 1 {
 		t.Fatalf("expected 1 mailbox-scoped seed, got %d", len(seeds))
 	}
+	if seeds[0].ID == 0 {
+		t.Fatalf("expected mailbox seed ID to be populated, got %+v", seeds[0])
+	}
 	if seeds[0].MailboxID != "user@example.com" || seeds[0].PatternValue != "mailbox.example" {
 		t.Fatalf("unexpected seed: %+v", seeds[0])
 	}
