@@ -91,14 +91,15 @@ type ClassifiedMessagesFilter struct {
 // ClassifiedMessageRow is one per-message classification result for operator
 // review or automation consumption.
 type ClassifiedMessageRow struct {
-	MessageID   string    `json:"message_id"`
-	FromEmail   string    `json:"from_email"`
-	Domain      string    `json:"domain"`
-	Subject     string    `json:"subject"`
-	ReceivedAt  time.Time `json:"received_at"`
-	Category    string    `json:"category"`
-	Intent      string    `json:"intent"`
-	MatchedRule string    `json:"matched_rule"`
+	MessageID     string    `json:"message_id"`
+	FromEmail     string    `json:"from_email"`
+	Domain        string    `json:"domain"`
+	Subject       string    `json:"subject"`
+	ReceivedAt    time.Time `json:"received_at"`
+	HasAttachment bool      `json:"has_attachment"`
+	Category      string    `json:"category"`
+	Intent        string    `json:"intent"`
+	MatchedRule   string    `json:"matched_rule"`
 }
 
 // ClassifiedMessagesSummary is the result of ListClassifiedMessages.
@@ -359,14 +360,15 @@ func ListClassifiedMessages(ctx context.Context, cfg config.Config, account stri
 	out := make([]ClassifiedMessageRow, len(rows))
 	for i, row := range rows {
 		out[i] = ClassifiedMessageRow{
-			MessageID:   row.MessageID,
-			FromEmail:   row.FromEmail,
-			Domain:      row.Domain,
-			Subject:     row.Subject,
-			ReceivedAt:  row.ReceivedAt,
-			Category:    row.Category,
-			Intent:      row.Intent,
-			MatchedRule: row.MatchedRule,
+			MessageID:     row.MessageID,
+			FromEmail:     row.FromEmail,
+			Domain:        row.Domain,
+			Subject:       row.Subject,
+			ReceivedAt:    row.ReceivedAt,
+			HasAttachment: row.HasAttachment,
+			Category:      row.Category,
+			Intent:        row.Intent,
+			MatchedRule:   row.MatchedRule,
 		}
 	}
 

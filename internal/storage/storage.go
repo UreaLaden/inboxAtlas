@@ -495,14 +495,15 @@ type ClassificationCount struct {
 // ClassifiedMessage is one per-message row returned by QueryClassifiedMessages,
 // joining messages with their classification result.
 type ClassifiedMessage struct {
-	MessageID   string    `json:"message_id"`
-	FromEmail   string    `json:"from_email"`
-	Domain      string    `json:"domain"`
-	Subject     string    `json:"subject"`
-	ReceivedAt  time.Time `json:"received_at"`
-	Category    string    `json:"category"`
-	Intent      string    `json:"intent"`
-	MatchedRule string    `json:"matched_rule"`
+	MessageID     string    `json:"message_id"`
+	FromEmail     string    `json:"from_email"`
+	Domain        string    `json:"domain"`
+	Subject       string    `json:"subject"`
+	ReceivedAt    time.Time `json:"received_at"`
+	HasAttachment bool      `json:"has_attachment"`
+	Category      string    `json:"category"`
+	Intent        string    `json:"intent"`
+	MatchedRule   string    `json:"matched_rule"`
 }
 
 // ClassifiedMessagesFilter constrains QueryClassifiedMessages results.
@@ -853,7 +854,7 @@ func (s *Store) ListMessageMetaByMailbox(ctx context.Context, mailboxID string) 
 // optionally filtered by category and intent. Results are ordered by received_at desc.
 func (s *Store) QueryClassifiedMessages(ctx context.Context, mailboxID string, filter ClassifiedMessagesFilter) ([]ClassifiedMessage, error) {
 	query := `
-		SELECT m.provider_id, m.from_email, m.domain, m.subject, m.received_at,
+		SELECT m.provider_id, m.from_email, m.domain, m.subject, m.received_at, m.has_attachment,
 		       mc.category, mc.intent, mc.matched_rule
 		FROM messages m
 		JOIN message_classifications mc ON m.id = mc.message_id AND m.mailbox_id = mc.mailbox_id
@@ -880,6 +881,7 @@ func (s *Store) QueryClassifiedMessages(ctx context.Context, mailboxID string, f
 		var domain sql.NullString
 		var subject sql.NullString
 		var receivedAt string
+		var hasAttachment bool
 		var matchedRule sql.NullString
 
 		if err := rows.Scan(
@@ -888,6 +890,7 @@ func (s *Store) QueryClassifiedMessages(ctx context.Context, mailboxID string, f
 			&domain,
 			&subject,
 			&receivedAt,
+			&hasAttachment,
 			&row.Category,
 			&row.Intent,
 			&matchedRule,
@@ -906,6 +909,7 @@ func (s *Store) QueryClassifiedMessages(ctx context.Context, mailboxID string, f
 		if matchedRule.Valid {
 			row.MatchedRule = matchedRule.String
 		}
+		row.HasAttachment = hasAttachment
 		row.ReceivedAt, err = parseStoredTimestamp(receivedAt)
 		if err != nil {
 			return nil, fmt.Errorf("parse classified message received_at %q: %w", receivedAt, err)

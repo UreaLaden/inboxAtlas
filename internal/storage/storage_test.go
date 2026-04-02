@@ -2269,9 +2269,9 @@ func TestQueryClassifiedMessages(t *testing.T) {
 
 	now := time.Date(2026, 4, 2, 10, 0, 0, 0, time.UTC)
 	for _, msg := range []models.MessageMeta{
-		{ProviderID: "gmail-1", MailboxID: "user@example.com", Provider: "gmail", FromEmail: "acct1@client.example", Domain: "client.example", Subject: "Invoice April", ReceivedAt: now},
+		{ProviderID: "gmail-1", MailboxID: "user@example.com", Provider: "gmail", FromEmail: "acct1@client.example", Domain: "client.example", Subject: "Invoice April", HasAttachment: true, ReceivedAt: now},
 		{ProviderID: "gmail-2", MailboxID: "user@example.com", Provider: "gmail", FromEmail: "acct2@client.example", Domain: "client.example", Subject: "Project update", ReceivedAt: now.Add(1 * time.Hour)},
-		{ProviderID: "gmail-3", MailboxID: "user@example.com", Provider: "gmail", FromEmail: "ops@vendor.example", Domain: "vendor.example", Subject: "Statement", ReceivedAt: now.Add(2 * time.Hour)},
+		{ProviderID: "gmail-3", MailboxID: "user@example.com", Provider: "gmail", FromEmail: "ops@vendor.example", Domain: "vendor.example", Subject: "Statement", HasAttachment: true, ReceivedAt: now.Add(2 * time.Hour)},
 	} {
 		if err := st.UpsertMessage(ctx, msg); err != nil {
 			t.Fatalf("UpsertMessage(%s): %v", msg.ProviderID, err)
@@ -2297,6 +2297,9 @@ func TestQueryClassifiedMessages(t *testing.T) {
 	}
 	if rows[0].MessageID != "gmail-3" || rows[1].MessageID != "gmail-2" || rows[2].MessageID != "gmail-1" {
 		t.Fatalf("unexpected ordering/provider ids: %+v", rows)
+	}
+	if !rows[0].HasAttachment || rows[1].HasAttachment || !rows[2].HasAttachment {
+		t.Fatalf("unexpected attachment flags: %+v", rows)
 	}
 
 	clientRows, err := st.QueryClassifiedMessages(ctx, "user@example.com", ClassifiedMessagesFilter{Category: "client"})
