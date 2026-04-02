@@ -602,6 +602,7 @@ func TestListClassifiedMessages(t *testing.T) {
 		Category: classification.CategoryClient,
 		Intent:   classification.IntentInvoice,
 		Limit:    5,
+		Since:    ptrTime(now.Add(-1 * time.Minute)),
 	})
 	if err != nil {
 		t.Fatalf("ListClassifiedMessages: %v", err)
@@ -612,6 +613,9 @@ func TestListClassifiedMessages(t *testing.T) {
 	if result.Filter.Category != classification.CategoryClient || result.Filter.Intent != classification.IntentInvoice || result.Filter.Limit != 5 {
 		t.Fatalf("unexpected filter echo: %+v", result.Filter)
 	}
+	if result.Filter.Since == nil || !result.Filter.Since.Equal(now.Add(-1*time.Minute)) {
+		t.Fatalf("unexpected since echo: %+v", result.Filter)
+	}
 	if len(result.Messages) != 1 {
 		t.Fatalf("expected 1 message, got %d", len(result.Messages))
 	}
@@ -621,6 +625,10 @@ func TestListClassifiedMessages(t *testing.T) {
 	if !result.Messages[0].HasAttachment {
 		t.Fatalf("expected attachment flag on classified message row: %+v", result.Messages[0])
 	}
+}
+
+func ptrTime(t time.Time) *time.Time {
+	return &t
 }
 
 func TestListClassifiedMessages_Empty(t *testing.T) {

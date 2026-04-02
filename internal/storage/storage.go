@@ -512,6 +512,7 @@ type ClassifiedMessagesFilter struct {
 	Category string
 	Intent   string
 	Limit    int
+	Since    time.Time
 }
 
 // ClassificationSeed is a single rule stored in the classification_seeds table.
@@ -860,9 +861,15 @@ func (s *Store) QueryClassifiedMessages(ctx context.Context, mailboxID string, f
 		JOIN message_classifications mc ON m.id = mc.message_id AND m.mailbox_id = mc.mailbox_id
 		WHERE mc.mailbox_id = ?
 		  AND (? = '' OR mc.category = ?)
-		  AND (? = '' OR mc.intent = ?)
-		ORDER BY m.received_at DESC, m.provider_id ASC`
+		  AND (? = '' OR mc.intent = ?)`
 	args := []any{mailboxID, filter.Category, filter.Category, filter.Intent, filter.Intent}
+	if !filter.Since.IsZero() {
+		query += `
+		  AND m.received_at >= ?`
+		args = append(args, filter.Since.UTC().Format(time.RFC3339))
+	}
+	query += `
+		ORDER BY m.received_at DESC, m.provider_id ASC`
 	if filter.Limit > 0 {
 		query += " LIMIT ?"
 		args = append(args, filter.Limit)
