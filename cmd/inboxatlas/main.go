@@ -891,13 +891,15 @@ func runClassifyMessages(ctx context.Context, w io.Writer, cfg config.Config, ac
 	}
 	if f == "csv" {
 		cw := csv.NewWriter(w)
-		if err := cw.Write([]string{"Timestamp", "Sender", "Intent", "Category", "HasAttachment"}); err != nil {
+		if err := cw.Write([]string{"MessageID", "Timestamp", "Sender", "Domain", "Intent", "Category", "HasAttachment"}); err != nil {
 			return err
 		}
 		for _, msg := range result.Messages {
 			if err := cw.Write([]string{
+				msg.MessageID,
 				msg.ReceivedAt.Format(time.RFC3339),
 				msg.FromEmail,
+				msg.Domain,
 				msg.Intent,
 				msg.Category,
 				fmt.Sprintf("%t", msg.HasAttachment),

@@ -137,8 +137,9 @@ inboxatlas classify promote \
 
 **5. Review classified messages directly when you need automation-friendly output.**
 Use `classify messages` when you need per-message rows instead of aggregate counts. Combine
-`--category` and `--intent` to narrow to combinations such as `client + invoice`, and use
-`--format csv` when you want a spreadsheet-friendly export with attachment presence.
+`--category` and `--intent` to narrow to combinations such as `client + invoice`. JSON
+includes `message_id`, and `--format csv` exports
+`MessageID,Timestamp,Sender,Domain,Intent,Category,HasAttachment`.
 
 ```bash
 inboxatlas classify messages --account your@email.com --category client --intent invoice --format json

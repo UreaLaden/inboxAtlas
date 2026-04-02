@@ -1838,10 +1838,10 @@ func TestRunClassifyMessages_CSV(t *testing.T) {
 		t.Fatalf("runClassifyMessages: %v", err)
 	}
 	output := buf.String()
-	if !strings.Contains(output, "Timestamp,Sender,Intent,Category,HasAttachment") {
+	if !strings.Contains(output, "MessageID,Timestamp,Sender,Domain,Intent,Category,HasAttachment") {
 		t.Fatalf("unexpected csv header: %q", output)
 	}
-	if !strings.Contains(output, "acct1@client.example,invoice,client,true") {
+	if !strings.Contains(output, "gmail-1,") || !strings.Contains(output, "acct1@client.example,client.example,invoice,client,true") {
 		t.Fatalf("unexpected csv body: %q", output)
 	}
 }
