@@ -2334,6 +2334,25 @@ func TestQueryClassifiedMessages(t *testing.T) {
 		t.Fatalf("unexpected limited rows: %+v", limitedRows)
 	}
 
+	sinceRows, err := st.QueryClassifiedMessages(ctx, "user@example.com", ClassifiedMessagesFilter{Since: now.Add(90 * time.Minute)})
+	if err != nil {
+		t.Fatalf("QueryClassifiedMessages since: %v", err)
+	}
+	if len(sinceRows) != 1 || sinceRows[0].MessageID != "gmail-3" {
+		t.Fatalf("unexpected since rows: %+v", sinceRows)
+	}
+
+	sinceIntentRows, err := st.QueryClassifiedMessages(ctx, "user@example.com", ClassifiedMessagesFilter{
+		Intent: "invoice",
+		Since:  now.Add(-1 * time.Minute),
+	})
+	if err != nil {
+		t.Fatalf("QueryClassifiedMessages since+intent: %v", err)
+	}
+	if len(sinceIntentRows) != 1 || sinceIntentRows[0].MessageID != "gmail-1" {
+		t.Fatalf("unexpected since+intent rows: %+v", sinceIntentRows)
+	}
+
 	emptyRows, err := st.QueryClassifiedMessages(ctx, "user@example.com", ClassifiedMessagesFilter{Category: "government"})
 	if err != nil {
 		t.Fatalf("QueryClassifiedMessages empty: %v", err)

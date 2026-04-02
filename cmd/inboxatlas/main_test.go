@@ -1799,7 +1799,7 @@ func TestRunClassifyMessages_Table(t *testing.T) {
 	seedClassifiedMessagesData(t, cfg.StoragePath)
 
 	var buf bytes.Buffer
-	if err := runClassifyMessages(context.Background(), &buf, cfg, "user@example.com", "client", "invoice", "table", 100); err != nil {
+	if err := runClassifyMessages(context.Background(), &buf, cfg, "user@example.com", "client", "invoice", "", "table", 100); err != nil {
 		t.Fatalf("runClassifyMessages: %v", err)
 	}
 
@@ -1816,7 +1816,7 @@ func TestRunClassifyMessages_JSON(t *testing.T) {
 	seedClassifiedMessagesData(t, cfg.StoragePath)
 
 	var buf bytes.Buffer
-	if err := runClassifyMessages(context.Background(), &buf, cfg, "user@example.com", "", "", "json", 100); err != nil {
+	if err := runClassifyMessages(context.Background(), &buf, cfg, "user@example.com", "", "", "", "json", 100); err != nil {
 		t.Fatalf("runClassifyMessages: %v", err)
 	}
 	if !strings.Contains(buf.String(), "\"message_id\": \"gmail-2\"") || !strings.Contains(buf.String(), "\"intent\": \"invoice\"") {
@@ -1834,34 +1834,60 @@ func TestRunClassifyMessages_CSV(t *testing.T) {
 	seedClassifiedMessagesData(t, cfg.StoragePath)
 
 	var buf bytes.Buffer
-	if err := runClassifyMessages(context.Background(), &buf, cfg, "user@example.com", "", "", "csv", 100); err != nil {
+	if err := runClassifyMessages(context.Background(), &buf, cfg, "user@example.com", "", "", "", "csv", 100); err != nil {
 		t.Fatalf("runClassifyMessages: %v", err)
 	}
 	output := buf.String()
-	if !strings.Contains(output, "MessageID,Timestamp,Sender,Domain,Intent,Category,HasAttachment") {
+	if !strings.Contains(output, "MessageID,Timestamp,Sender,Domain,Subject,Intent,Category,HasAttachment") {
 		t.Fatalf("unexpected csv header: %q", output)
 	}
-	if !strings.Contains(output, "gmail-1,") || !strings.Contains(output, "acct1@client.example,client.example,invoice,client,true") {
+	if !strings.Contains(output, "gmail-1,") || !strings.Contains(output, "acct1@client.example,client.example,Invoice for April services with more text,invoice,client,true") {
 		t.Fatalf("unexpected csv body: %q", output)
 	}
 }
 
+func TestRunClassifyMessages_Since(t *testing.T) {
+	dir := t.TempDir()
+	cfg := config.Default()
+	cfg.StoragePath = filepath.Join(dir, "test.db")
+	seedClassifiedMessagesData(t, cfg.StoragePath)
+
+	var buf bytes.Buffer
+	if err := runClassifyMessages(context.Background(), &buf, cfg, "user@example.com", "", "", "2026-04-02T10:30:00Z", "json", 100); err != nil {
+		t.Fatalf("runClassifyMessages: %v", err)
+	}
+	output := buf.String()
+	if strings.Contains(output, "\"message_id\": \"gmail-1\"") {
+		t.Fatalf("expected since-filtered output, got %q", output)
+	}
+	if !strings.Contains(output, "\"message_id\": \"gmail-2\"") {
+		t.Fatalf("expected newest message in since-filtered output, got %q", output)
+	}
+}
+
+func TestRunClassifyMessages_InvalidSince(t *testing.T) {
+	err := runClassifyMessages(context.Background(), io.Discard, config.Default(), "user@example.com", "", "", "2026-04-02", "json", 100)
+	if err == nil || !strings.Contains(err.Error(), "must be RFC3339") {
+		t.Fatalf("expected since validation error, got %v", err)
+	}
+}
+
 func TestRunClassifyMessages_UnknownCategory(t *testing.T) {
-	err := runClassifyMessages(context.Background(), io.Discard, config.Default(), "user@example.com", "bogus", "", "table", 100)
+	err := runClassifyMessages(context.Background(), io.Discard, config.Default(), "user@example.com", "bogus", "", "", "table", 100)
 	if err == nil || !strings.Contains(err.Error(), "classify categories") {
 		t.Fatalf("expected category validation error, got %v", err)
 	}
 }
 
 func TestRunClassifyMessages_UnknownIntent(t *testing.T) {
-	err := runClassifyMessages(context.Background(), io.Discard, config.Default(), "user@example.com", "", "bogus", "table", 100)
+	err := runClassifyMessages(context.Background(), io.Discard, config.Default(), "user@example.com", "", "bogus", "", "table", 100)
 	if err == nil || !strings.Contains(err.Error(), "classify intents") {
 		t.Fatalf("expected intent validation error, got %v", err)
 	}
 }
 
 func TestRunClassifyMessages_UnknownFormat(t *testing.T) {
-	err := runClassifyMessages(context.Background(), io.Discard, config.Default(), "user@example.com", "", "", "xml", 100)
+	err := runClassifyMessages(context.Background(), io.Discard, config.Default(), "user@example.com", "", "", "", "xml", 100)
 	if err == nil || !strings.Contains(err.Error(), "table, csv, json") {
 		t.Fatalf("expected format validation error, got %v", err)
 	}
@@ -1882,7 +1908,7 @@ func TestRunClassifyMessages_Empty(t *testing.T) {
 	_ = st.Close()
 
 	var buf bytes.Buffer
-	if err := runClassifyMessages(context.Background(), &buf, cfg, "user@example.com", "", "", "table", 100); err != nil {
+	if err := runClassifyMessages(context.Background(), &buf, cfg, "user@example.com", "", "", "", "table", 100); err != nil {
 		t.Fatalf("runClassifyMessages: %v", err)
 	}
 	if !strings.Contains(buf.String(), "No classified messages found for user@example.com.") {

@@ -640,6 +640,7 @@ func buildClassifyMessagesCmd(cfg config.Config) *cobra.Command {
 	var account string
 	var category string
 	var intent string
+	var since string
 	var format string
 	var limit int
 
@@ -647,13 +648,14 @@ func buildClassifyMessagesCmd(cfg config.Config) *cobra.Command {
 		Use:   "messages",
 		Short: "List classified messages with optional category and intent filters",
 		RunE: func(cmd *cobra.Command, _ []string) error {
-			return runClassifyMessages(cmd.Context(), cmd.OutOrStdout(), cfg, account, category, intent, format, limit)
+			return runClassifyMessages(cmd.Context(), cmd.OutOrStdout(), cfg, account, category, intent, since, format, limit)
 		},
 	}
 	cmd.Flags().StringVar(&account, "account", "", "mailbox email or alias")
 	cmd.Flags().StringVar(&category, "category", "", "filter by relationship category (optional)")
 	cmd.Flags().StringVar(&intent, "intent", "", "filter by intent (optional)")
-	cmd.Flags().StringVar(&format, "format", "table", "output format: table, json")
+	cmd.Flags().StringVar(&since, "since", "", "only include messages on or after this RFC3339 timestamp (e.g. 2026-04-01T00:00:00Z)")
+	cmd.Flags().StringVar(&format, "format", "table", "output format: table, csv, json")
 	cmd.Flags().IntVar(&limit, "limit", 100, "maximum rows to return (0 = no limit)")
 	_ = cmd.MarkFlagRequired("account")
 	return cmd
@@ -863,7 +865,7 @@ func runClassifyRun(ctx context.Context, w io.Writer, cfg config.Config, account
 
 // runClassifyMessages renders per-message classification rows with optional
 // category and intent filters for one mailbox.
-func runClassifyMessages(ctx context.Context, w io.Writer, cfg config.Config, account, category, intent, format string, limit int) error {
+func runClassifyMessages(ctx context.Context, w io.Writer, cfg config.Config, account, category, intent, since, format string, limit int) error {
 	f, err := validateClassifyMessagesFormat(format)
 	if err != nil {
 		return err
@@ -874,11 +876,20 @@ func runClassifyMessages(ctx context.Context, w io.Writer, cfg config.Config, ac
 	if err := validateClassificationIntent(intent); err != nil {
 		return err
 	}
+	var sinceTime *time.Time
+	if since != "" {
+		parsed, err := time.Parse(time.RFC3339, since)
+		if err != nil {
+			return fmt.Errorf("invalid --since value %q: must be RFC3339 (e.g. 2026-04-01T00:00:00Z)", since)
+		}
+		sinceTime = &parsed
+	}
 
 	result, err := engine.ListClassifiedMessages(ctx, cfg, account, engine.ClassifiedMessagesFilter{
 		Category: category,
 		Intent:   intent,
 		Limit:    limit,
+		Since:    sinceTime,
 	})
 	if err != nil {
 		return err
@@ -891,7 +902,7 @@ func runClassifyMessages(ctx context.Context, w io.Writer, cfg config.Config, ac
 	}
 	if f == "csv" {
 		cw := csv.NewWriter(w)
-		if err := cw.Write([]string{"MessageID", "Timestamp", "Sender", "Domain", "Intent", "Category", "HasAttachment"}); err != nil {
+		if err := cw.Write([]string{"MessageID", "Timestamp", "Sender", "Domain", "Subject", "Intent", "Category", "HasAttachment"}); err != nil {
 			return err
 		}
 		for _, msg := range result.Messages {
@@ -900,6 +911,7 @@ func runClassifyMessages(ctx context.Context, w io.Writer, cfg config.Config, ac
 				msg.ReceivedAt.Format(time.RFC3339),
 				msg.FromEmail,
 				msg.Domain,
+				msg.Subject,
 				msg.Intent,
 				msg.Category,
 				fmt.Sprintf("%t", msg.HasAttachment),

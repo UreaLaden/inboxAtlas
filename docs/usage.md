@@ -87,7 +87,7 @@ inboxatlas classify promote --account <id|alias> \
 
 # Run and review
 inboxatlas classify run     --account <id|alias>
-inboxatlas classify messages --account <id|alias> [--category <category>] [--intent <intent>] [--format table|csv|json] [--limit 100]
+inboxatlas classify messages --account <id|alias> [--category <category>] [--intent <intent>] [--since <RFC3339>] [--format table|csv|json] [--limit 100]
 inboxatlas classify results --account <id|alias> [--format table|json]
 
 # Manage active seeds
@@ -139,10 +139,13 @@ inboxatlas classify promote \
 Use `classify messages` when you need per-message rows instead of aggregate counts. Combine
 `--category` and `--intent` to narrow to combinations such as `client + invoice`. JSON
 includes `message_id`, and `--format csv` exports
-`MessageID,Timestamp,Sender,Domain,Intent,Category,HasAttachment`.
+`MessageID,Timestamp,Sender,Domain,Subject,Intent,Category,HasAttachment`.
+
+For automation, always add `--intent` and a bounded `--since` window so reruns
+do not replay mailbox history. Use `MessageID` as the downstream dedup key.
 
 ```bash
-inboxatlas classify messages --account your@email.com --category client --intent invoice --format json
+inboxatlas classify messages --account your@email.com --intent invoice --since 2026-04-01T00:00:00Z --format csv
 ```
 
 inboxatlas classify promote \

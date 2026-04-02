@@ -83,9 +83,10 @@ type ClassificationSummary struct {
 
 // ClassifiedMessagesFilter constrains ListClassifiedMessages results.
 type ClassifiedMessagesFilter struct {
-	Category string `json:"category,omitempty"`
-	Intent   string `json:"intent,omitempty"`
-	Limit    int    `json:"limit,omitempty"`
+	Category string     `json:"category,omitempty"`
+	Intent   string     `json:"intent,omitempty"`
+	Limit    int        `json:"limit,omitempty"`
+	Since    *time.Time `json:"since,omitempty"`
 }
 
 // ClassifiedMessageRow is one per-message classification result for operator
@@ -352,6 +353,7 @@ func ListClassifiedMessages(ctx context.Context, cfg config.Config, account stri
 		Category: filter.Category,
 		Intent:   filter.Intent,
 		Limit:    filter.Limit,
+		Since:    derefTime(filter.Since),
 	})
 	if err != nil {
 		return ClassifiedMessagesSummary{}, fmt.Errorf("query classified messages: %w", err)
@@ -377,6 +379,13 @@ func ListClassifiedMessages(ctx context.Context, cfg config.Config, account stri
 		Filter:    filter,
 		Messages:  out,
 	}, nil
+}
+
+func derefTime(t *time.Time) time.Time {
+	if t == nil {
+		return time.Time{}
+	}
+	return *t
 }
 
 // RunInference executes mailbox-scoped AI inference over messages that remain
