@@ -34,6 +34,12 @@ func openMemStore(t *testing.T) *storage.Store {
 	return st
 }
 
+type alwaysErrorWriter struct{}
+
+func (alwaysErrorWriter) Write([]byte) (int, error) {
+	return 0, errors.New("write failed")
+}
+
 // --- initLogger ---
 
 func TestInitLogger(t *testing.T) {
@@ -1255,9 +1261,42 @@ func seedClassifyResultsData(t *testing.T, dbPath string) {
 	}
 
 	for _, c := range []storage.Classification{
-		{MessageID: "r1", MailboxID: "user@example.com", Category: "vendor", Source: "seed", ClassifiedAt: now},
+		{MessageID: "r1", MailboxID: "user@example.com", Category: "vendor", Intent: "invoice", Source: "seed", ClassifiedAt: now},
 		{MessageID: "r2", MailboxID: "user@example.com", Category: "vendor", Source: "seed", ClassifiedAt: now},
 		{MessageID: "r3", MailboxID: "user@example.com", Category: "unknown", Source: "seed", ClassifiedAt: now},
+	} {
+		if err := st.SaveClassification(ctx, c); err != nil {
+			t.Fatalf("SaveClassification(%s): %v", c.MessageID, err)
+		}
+	}
+}
+
+func seedClassifyResultsNoIntentData(t *testing.T, dbPath string) {
+	t.Helper()
+	st, err := storage.Open(dbPath)
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	defer func() { _ = st.Close() }()
+
+	ctx := context.Background()
+	if err := st.CreateMailbox(ctx, models.Mailbox{ID: "user@example.com", Provider: "gmail"}); err != nil {
+		t.Fatalf("CreateMailbox: %v", err)
+	}
+
+	now := time.Date(2025, 2, 4, 0, 0, 0, 0, time.UTC)
+	for _, msg := range []models.MessageMeta{
+		{ProviderID: "r1", MailboxID: "user@example.com", Provider: "gmail", ReceivedAt: now},
+		{ProviderID: "r2", MailboxID: "user@example.com", Provider: "gmail", ReceivedAt: now},
+	} {
+		if err := st.UpsertMessage(ctx, msg); err != nil {
+			t.Fatalf("UpsertMessage(%s): %v", msg.ProviderID, err)
+		}
+	}
+
+	for _, c := range []storage.Classification{
+		{MessageID: "r1", MailboxID: "user@example.com", Category: "vendor", Source: "seed", ClassifiedAt: now},
+		{MessageID: "r2", MailboxID: "user@example.com", Category: "unknown", Source: "seed", ClassifiedAt: now},
 	} {
 		if err := st.SaveClassification(ctx, c); err != nil {
 			t.Fatalf("SaveClassification(%s): %v", c.MessageID, err)
@@ -1675,7 +1714,7 @@ func TestRunClassifyResults_Table(t *testing.T) {
 	}
 
 	output := buf.String()
-	if !strings.Contains(output, "CATEGORY") || !strings.Contains(output, "vendor") || !strings.Contains(output, "unknown") {
+	if !strings.Contains(output, "CATEGORY") || !strings.Contains(output, "INTENT") || !strings.Contains(output, "vendor") || !strings.Contains(output, "invoice") || !strings.Contains(output, "unknown") {
 		t.Fatalf("unexpected table output: %q", output)
 	}
 	if !strings.Contains(output, "Total: 3") || !strings.Contains(output, "Unknown: 33.3%") {
@@ -1697,8 +1736,26 @@ func TestRunClassifyResults_JSON(t *testing.T) {
 	output := buf.String()
 	if !strings.Contains(output, "\"mailbox_id\": \"user@example.com\"") ||
 		!strings.Contains(output, "\"total\": 3") ||
+		!strings.Contains(output, "\"intent\": \"invoice\"") ||
 		!strings.Contains(output, "\"unknown_pct\": 33.333333333333336") {
 		t.Fatalf("unexpected json output: %q", output)
+	}
+}
+
+func TestRunClassifyResults_Table_NoIntentColumn(t *testing.T) {
+	dir := t.TempDir()
+	cfg := config.Default()
+	cfg.StoragePath = filepath.Join(dir, "test.db")
+	seedClassifyResultsNoIntentData(t, cfg.StoragePath)
+
+	var buf bytes.Buffer
+	if err := runClassifyResults(context.Background(), &buf, cfg, "user@example.com", "table"); err != nil {
+		t.Fatalf("runClassifyResults: %v", err)
+	}
+
+	output := buf.String()
+	if !strings.Contains(output, "CATEGORY") || strings.Contains(output, "INTENT") {
+		t.Fatalf("unexpected no-intent table output: %q", output)
 	}
 }
 
@@ -1967,6 +2024,12 @@ func TestRunClassifyCategories(t *testing.T) {
 	}
 }
 
+func TestRunClassifyCategories_WriteError(t *testing.T) {
+	if err := runClassifyCategories(alwaysErrorWriter{}); err == nil {
+		t.Fatal("expected write error")
+	}
+}
+
 func TestBuildClassifyCategoriesCmd_Executes(t *testing.T) {
 	cmd := buildClassifyCategoriesCmd()
 	var buf bytes.Buffer
@@ -1980,6 +2043,35 @@ func TestBuildClassifyCategoriesCmd_Executes(t *testing.T) {
 	}
 }
 
+func TestRunClassifyIntents(t *testing.T) {
+	var buf bytes.Buffer
+	if err := runClassifyIntents(&buf); err != nil {
+		t.Fatalf("runClassifyIntents: %v", err)
+	}
+	if !strings.Contains(buf.String(), "invoice") || !strings.Contains(buf.String(), "request-for-information") {
+		t.Fatalf("unexpected intents output: %q", buf.String())
+	}
+}
+
+func TestRunClassifyIntents_WriteError(t *testing.T) {
+	if err := runClassifyIntents(alwaysErrorWriter{}); err == nil {
+		t.Fatal("expected write error")
+	}
+}
+
+func TestBuildClassifyIntentsCmd_Executes(t *testing.T) {
+	cmd := buildClassifyIntentsCmd()
+	var buf bytes.Buffer
+	cmd.SetOut(&buf)
+	cmd.SetArgs(nil)
+	if err := cmd.Execute(); err != nil {
+		t.Fatalf("Execute: %v", err)
+	}
+	if !strings.Contains(buf.String(), "invoice") {
+		t.Fatalf("unexpected output: %q", buf.String())
+	}
+}
+
 func TestRunClassifyPatternTypes(t *testing.T) {
 	var buf bytes.Buffer
 	if err := runClassifyPatternTypes(&buf); err != nil {
@@ -1987,6 +2079,12 @@ func TestRunClassifyPatternTypes(t *testing.T) {
 	}
 	if !strings.Contains(buf.String(), "domain") || !strings.Contains(buf.String(), "subject_term") {
 		t.Fatalf("unexpected pattern types output: %q", buf.String())
+	}
+}
+
+func TestRunClassifyPatternTypes_WriteError(t *testing.T) {
+	if err := runClassifyPatternTypes(alwaysErrorWriter{}); err == nil {
+		t.Fatal("expected write error")
 	}
 }
 

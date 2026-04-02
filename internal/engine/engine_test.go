@@ -95,6 +95,51 @@ func TestRunClassify_PopulatesBreakdownAndUnknownPct(t *testing.T) {
 	}
 }
 
+func TestRunClassify_PersistsIntentAlongsideCategory(t *testing.T) {
+	cfg := engineTestConfig(t)
+	st := engineTestStore(t, cfg)
+	createEngineMailbox(t, st, "user@example.com")
+	engineSeedMessage(t, st, models.MessageMeta{
+		ProviderID: "m1",
+		MailboxID:  "user@example.com",
+		Provider:   "gmail",
+		FromEmail:  "billing@vendor.example",
+		Domain:     "vendor.example",
+		Subject:    "Invoice #2041",
+		ReceivedAt: time.Now().UTC(),
+	})
+
+	result, err := RunClassify(context.Background(), cfg, "user@example.com")
+	if err != nil {
+		t.Fatalf("RunClassify: %v", err)
+	}
+	if len(result.Breakdown) != 1 {
+		t.Fatalf("expected 1 breakdown row, got %d", len(result.Breakdown))
+	}
+	if result.Breakdown[0] != (storage.ClassificationCount{
+		Category: classification.CategoryUnknown,
+		Intent:   classification.IntentInvoice,
+		Count:    1,
+	}) {
+		t.Fatalf("unexpected breakdown row: %+v", result.Breakdown[0])
+	}
+
+	got, err := st.GetClassification(context.Background(), "m1", "user@example.com")
+	if err != nil {
+		t.Fatalf("GetClassification: %v", err)
+	}
+	if got == nil {
+		t.Fatal("expected persisted classification")
+		return
+	}
+	if got.Category != classification.CategoryUnknown {
+		t.Fatalf("Category: got %q, want %q", got.Category, classification.CategoryUnknown)
+	}
+	if got.Intent != classification.IntentInvoice {
+		t.Fatalf("Intent: got %q, want %q", got.Intent, classification.IntentInvoice)
+	}
+}
+
 func TestEnsureDefaultSeeds_UpdatesExistingSeed(t *testing.T) {
 	cfg := engineTestConfig(t)
 	st := engineTestStore(t, cfg)
@@ -470,7 +515,7 @@ func TestGetClassificationSummary(t *testing.T) {
 
 	for _, c := range []storage.Classification{
 		{MessageID: "m1", MailboxID: "user@example.com", Category: classification.CategoryUnknown, Source: classification.SourceSeed, ClassifiedAt: now},
-		{MessageID: "m2", MailboxID: "user@example.com", Category: classification.CategoryVendor, Source: classification.SourceSeed, ClassifiedAt: now},
+		{MessageID: "m2", MailboxID: "user@example.com", Category: classification.CategoryVendor, Intent: classification.IntentInvoice, Source: classification.SourceSeed, ClassifiedAt: now},
 		{MessageID: "m3", MailboxID: "user@example.com", Category: classification.CategoryVendor, Source: classification.SourceSeed, ClassifiedAt: now},
 		{MessageID: "m4", MailboxID: "other@example.com", Category: classification.CategoryClient, Source: classification.SourceSeed, ClassifiedAt: now},
 	} {
@@ -489,14 +534,17 @@ func TestGetClassificationSummary(t *testing.T) {
 	if result.Total != 3 {
 		t.Fatalf("Total: got %d, want 3", result.Total)
 	}
-	if len(result.Breakdown) != 2 {
-		t.Fatalf("expected 2 breakdown rows, got %d", len(result.Breakdown))
+	if len(result.Breakdown) != 3 {
+		t.Fatalf("expected 3 breakdown rows, got %d", len(result.Breakdown))
 	}
-	if result.Breakdown[0] != (storage.ClassificationCount{Category: classification.CategoryVendor, Count: 2}) {
+	if result.Breakdown[0] != (storage.ClassificationCount{Category: classification.CategoryUnknown, Count: 1}) {
 		t.Fatalf("first row: got %+v", result.Breakdown[0])
 	}
-	if result.Breakdown[1] != (storage.ClassificationCount{Category: classification.CategoryUnknown, Count: 1}) {
+	if result.Breakdown[1] != (storage.ClassificationCount{Category: classification.CategoryVendor, Count: 1}) {
 		t.Fatalf("second row: got %+v", result.Breakdown[1])
+	}
+	if result.Breakdown[2] != (storage.ClassificationCount{Category: classification.CategoryVendor, Intent: classification.IntentInvoice, Count: 1}) {
+		t.Fatalf("third row: got %+v", result.Breakdown[2])
 	}
 	if math.Abs(result.UnknownPct-33.333333333333336) > 0.000001 {
 		t.Fatalf("UnknownPct: got %v", result.UnknownPct)
@@ -575,7 +623,7 @@ func TestRunInference_PersistsHighAndMediumCandidates(t *testing.T) {
 	if err != nil {
 		t.Fatalf("RunInference: %v", err)
 	}
-	if result.Submitted != 2 || result.High != 1 || result.Medium != 1 || result.Persisted != 2 {
+	if result.Submitted != 2 || result.High != 1 || result.Medium != 1 || result.Rejected != 0 || result.Persisted != 2 {
 		t.Fatalf("unexpected inference summary: %+v", result)
 	}
 
@@ -586,8 +634,11 @@ func TestRunInference_PersistsHighAndMediumCandidates(t *testing.T) {
 	if len(suggestions) != 2 {
 		t.Fatalf("expected 2 persisted suggestions, got %d", len(suggestions))
 	}
-	if suggestions[0].PatternValue != "healthymd.com" && suggestions[1].PatternValue != "healthymd.com" {
-		t.Fatalf("expected healthymd.com inference suggestion, got %+v", suggestions)
+	if suggestions[0].PatternValue != "healthymd.com" {
+		t.Fatalf("expected first suggestion for healthymd.com, got %+v", suggestions)
+	}
+	if suggestions[1].PatternValue != "client.example" {
+		t.Fatalf("expected second suggestion for client.example, got %+v", suggestions)
 	}
 }
 
@@ -1101,12 +1152,25 @@ func TestClassificationCategories(t *testing.T) {
 	if len(got) == 0 || got[0] != classification.CategoryInternal || got[len(got)-1] != classification.CategoryUnknown {
 		t.Fatalf("unexpected categories: %+v", got)
 	}
+	if containsString(got, classification.IntentInvoice) || containsString(got, classification.IntentRequestForInformation) {
+		t.Fatalf("intent values should not be exposed as categories: %+v", got)
+	}
+}
+
+func TestClassificationIntents(t *testing.T) {
+	got := ClassificationIntents()
+	if len(got) == 0 || got[0] != classification.IntentInvoice || got[len(got)-1] != classification.IntentRequestForInformation {
+		t.Fatalf("unexpected intents: %+v", got)
+	}
 }
 
 func TestClassificationPatternTypes(t *testing.T) {
 	got := ClassificationPatternTypes()
 	if len(got) == 0 || got[0] != classification.PatternDomain || got[len(got)-1] != classification.PatternSubjectTerm {
 		t.Fatalf("unexpected pattern types: %+v", got)
+	}
+	if !containsString(got, classification.PatternHasAttachment) {
+		t.Fatalf("missing has_attachment pattern type: %+v", got)
 	}
 }
 
@@ -1176,6 +1240,15 @@ func engineSeedMessage(t *testing.T, st *storage.Store, msg models.MessageMeta) 
 	if err := st.UpsertMessage(context.Background(), msg); err != nil {
 		t.Fatalf("UpsertMessage(%q): %v", msg.ProviderID, err)
 	}
+}
+
+func containsString(values []string, want string) bool {
+	for _, value := range values {
+		if value == want {
+			return true
+		}
+	}
+	return false
 }
 
 func inferenceTestProviderCommand() string {

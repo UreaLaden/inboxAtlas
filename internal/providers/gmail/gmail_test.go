@@ -181,6 +181,36 @@ func TestParseMessageMeta_Standard(t *testing.T) {
 	}
 }
 
+func TestParseMessageMeta_ExtractsAttachmentMetadata(t *testing.T) {
+	msg := &gmailapi.Message{
+		Id: "msg-attach",
+		Payload: &gmailapi.MessagePart{
+			Headers: []*gmailapi.MessagePartHeader{
+				{Name: "From", Value: "John Doe <john@example.com>"},
+			},
+			Parts: []*gmailapi.MessagePart{
+				{
+					MimeType: "multipart/alternative",
+					Parts: []*gmailapi.MessagePart{
+						{MimeType: "text/plain"},
+						{Filename: "invoice.pdf", MimeType: "application/pdf"},
+					},
+				},
+				{Filename: "receipt.PNG", MimeType: "image/png"},
+				{Filename: "duplicate.pdf", MimeType: "application/pdf"},
+			},
+		},
+	}
+
+	meta := parseMessageMeta("account@example.com", msg)
+	if !meta.HasAttachment {
+		t.Fatal("HasAttachment: got false, want true")
+	}
+	if len(meta.AttachmentTypes) != 2 || meta.AttachmentTypes[0] != "application/pdf" || meta.AttachmentTypes[1] != "image/png" {
+		t.Fatalf("AttachmentTypes: got %v", meta.AttachmentTypes)
+	}
+}
+
 func TestParseMessageMeta_MissingFromHeader(t *testing.T) {
 	msg := &gmailapi.Message{
 		Id: "msg2",
@@ -365,6 +395,13 @@ func TestListMessages_APIError(t *testing.T) {
 
 func TestGetMessageMeta_Success(t *testing.T) {
 	svc, cleanup := newTestService(t, func(w http.ResponseWriter, r *http.Request) {
+		if got := r.URL.Query().Get("format"); got != "full" {
+			t.Fatalf("format: got %q want %q", got, "full")
+		}
+		fields := r.URL.Query().Get("fields")
+		if !strings.Contains(fields, "payload") || strings.Contains(fields, "body/data") {
+			t.Fatalf("unexpected fields filter: %q", fields)
+		}
 		msg := map[string]interface{}{
 			"id":       "msgX",
 			"threadId": "threadX",
@@ -375,6 +412,9 @@ func TestGetMessageMeta_Success(t *testing.T) {
 					{"name": "From", "value": "Sender <sender@example.com>"},
 					{"name": "Subject", "value": "Test"},
 					{"name": "Date", "value": "Mon, 01 Jan 2024 12:00:00 +0000"},
+				},
+				"parts": []map[string]interface{}{
+					{"filename": "invoice.pdf", "mimeType": "application/pdf"},
 				},
 			},
 		}
@@ -396,6 +436,9 @@ func TestGetMessageMeta_Success(t *testing.T) {
 	}
 	if meta.FromEmail != "sender@example.com" {
 		t.Errorf("FromEmail = %q, want %q", meta.FromEmail, "sender@example.com")
+	}
+	if !meta.HasAttachment || len(meta.AttachmentTypes) != 1 || meta.AttachmentTypes[0] != "application/pdf" {
+		t.Fatalf("attachment metadata: %+v", meta)
 	}
 }
 

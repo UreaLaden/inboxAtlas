@@ -183,6 +183,15 @@ func ClassificationCategories() []string {
 	}
 }
 
+// ClassificationIntents returns the supported deterministic intent names in
+// CLI display order.
+func ClassificationIntents() []string {
+	return []string{
+		classification.IntentInvoice,
+		classification.IntentRequestForInformation,
+	}
+}
+
 // ClassificationPatternTypes returns the supported deterministic pattern types
 // in CLI display order.
 func ClassificationPatternTypes() []string {
@@ -190,6 +199,7 @@ func ClassificationPatternTypes() []string {
 		classification.PatternDomain,
 		classification.PatternSenderEmail,
 		classification.PatternSenderPrefix,
+		classification.PatternHasAttachment,
 		classification.PatternSubjectTerm,
 	}
 }

@@ -10,7 +10,8 @@ import (
 
 // NormalizeMessage returns a normalized copy of msg per spec §8.3.
 // The input is not mutated. Labels are preserved verbatim (canonical
-// mapping is deferred to Epic 6).
+// mapping is deferred to Epic 6). HasAttachment and AttachmentTypes are
+// preserved verbatim from the provider.
 func NormalizeMessage(msg models.MessageMeta) models.MessageMeta {
 	name, email := ParseFrom(msg.FromEmail)
 	msg.FromName = strings.TrimSpace(name)
