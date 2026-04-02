@@ -154,7 +154,10 @@ func (s *Store) migrate() error {
 	if err := s.migrateAttachmentColumns(); err != nil {
 		return err
 	}
-	return s.migrateClassificationIntentColumn()
+	if err := s.migrateClassificationIntentColumn(); err != nil {
+		return err
+	}
+	return s.migrateClassificationMessagesIndex()
 }
 
 func (s *Store) migrateAttachmentColumns() error {
@@ -189,6 +192,16 @@ func (s *Store) migrateClassificationIntentColumn() error {
 	}
 	if _, err := s.db.Exec(`ALTER TABLE message_classifications ADD COLUMN intent TEXT NOT NULL DEFAULT ''`); err != nil {
 		return fmt.Errorf("add message_classifications.intent: %w", err)
+	}
+	return nil
+}
+
+func (s *Store) migrateClassificationMessagesIndex() error {
+	_, err := s.db.Exec(`
+		CREATE INDEX IF NOT EXISTS idx_message_classifications_mailbox_category_intent
+		ON message_classifications (mailbox_id, category, intent)`)
+	if err != nil {
+		return fmt.Errorf("add message_classifications index: %w", err)
 	}
 	return nil
 }
@@ -477,6 +490,27 @@ type ClassificationCount struct {
 	Category string `json:"category"`
 	Intent   string `json:"intent"`
 	Count    int    `json:"count"`
+}
+
+// ClassifiedMessage is one per-message row returned by QueryClassifiedMessages,
+// joining messages with their classification result.
+type ClassifiedMessage struct {
+	MessageID   string    `json:"message_id"`
+	FromEmail   string    `json:"from_email"`
+	Domain      string    `json:"domain"`
+	Subject     string    `json:"subject"`
+	ReceivedAt  time.Time `json:"received_at"`
+	Category    string    `json:"category"`
+	Intent      string    `json:"intent"`
+	MatchedRule string    `json:"matched_rule"`
+}
+
+// ClassifiedMessagesFilter constrains QueryClassifiedMessages results.
+// Empty string fields disable the corresponding filter. Limit 0 disables limit.
+type ClassifiedMessagesFilter struct {
+	Category string
+	Intent   string
+	Limit    int
 }
 
 // ClassificationSeed is a single rule stored in the classification_seeds table.
@@ -798,7 +832,7 @@ func (s *Store) ListMessageMetaByMailbox(ctx context.Context, mailboxID string) 
 			msg.Snippet = snippet.String
 		}
 
-		msg.ReceivedAt, err = time.Parse(time.RFC3339, receivedAt)
+		msg.ReceivedAt, err = parseStoredTimestamp(receivedAt)
 		if err != nil {
 			return nil, fmt.Errorf("parse message received_at %q: %w", receivedAt, err)
 		}
@@ -811,6 +845,72 @@ func (s *Store) ListMessageMetaByMailbox(ctx context.Context, mailboxID string) 
 		}
 
 		out = append(out, msg)
+	}
+	return out, rows.Err()
+}
+
+// QueryClassifiedMessages returns per-message classification rows for mailboxID,
+// optionally filtered by category and intent. Results are ordered by received_at desc.
+func (s *Store) QueryClassifiedMessages(ctx context.Context, mailboxID string, filter ClassifiedMessagesFilter) ([]ClassifiedMessage, error) {
+	query := `
+		SELECT m.provider_id, m.from_email, m.domain, m.subject, m.received_at,
+		       mc.category, mc.intent, mc.matched_rule
+		FROM messages m
+		JOIN message_classifications mc ON m.id = mc.message_id AND m.mailbox_id = mc.mailbox_id
+		WHERE mc.mailbox_id = ?
+		  AND (? = '' OR mc.category = ?)
+		  AND (? = '' OR mc.intent = ?)
+		ORDER BY m.received_at DESC, m.provider_id ASC`
+	args := []any{mailboxID, filter.Category, filter.Category, filter.Intent, filter.Intent}
+	if filter.Limit > 0 {
+		query += " LIMIT ?"
+		args = append(args, filter.Limit)
+	}
+
+	rows, err := s.db.QueryContext(ctx, query, args...)
+	if err != nil {
+		return nil, fmt.Errorf("query classified messages: %w", err)
+	}
+	defer func() { _ = rows.Close() }()
+
+	var out []ClassifiedMessage
+	for rows.Next() {
+		var row ClassifiedMessage
+		var fromEmail sql.NullString
+		var domain sql.NullString
+		var subject sql.NullString
+		var receivedAt string
+		var matchedRule sql.NullString
+
+		if err := rows.Scan(
+			&row.MessageID,
+			&fromEmail,
+			&domain,
+			&subject,
+			&receivedAt,
+			&row.Category,
+			&row.Intent,
+			&matchedRule,
+		); err != nil {
+			return nil, fmt.Errorf("scan classified message row: %w", err)
+		}
+		if fromEmail.Valid {
+			row.FromEmail = fromEmail.String
+		}
+		if domain.Valid {
+			row.Domain = domain.String
+		}
+		if subject.Valid {
+			row.Subject = subject.String
+		}
+		if matchedRule.Valid {
+			row.MatchedRule = matchedRule.String
+		}
+		row.ReceivedAt, err = parseStoredTimestamp(receivedAt)
+		if err != nil {
+			return nil, fmt.Errorf("parse classified message received_at %q: %w", receivedAt, err)
+		}
+		out = append(out, row)
 	}
 	return out, rows.Err()
 }
@@ -1307,6 +1407,16 @@ func boolToInt(value bool) int {
 		return 1
 	}
 	return 0
+}
+
+func parseStoredTimestamp(value string) (time.Time, error) {
+	if parsed, err := time.Parse(time.RFC3339, value); err == nil {
+		return parsed, nil
+	}
+	if parsed, err := time.Parse("2006-01-02 15:04:05", value); err == nil {
+		return parsed, nil
+	}
+	return time.Time{}, fmt.Errorf("unsupported timestamp format %q", value)
 }
 
 // scanClassification reads one message_classifications row from s.

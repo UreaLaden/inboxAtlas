@@ -1304,6 +1304,39 @@ func seedClassifyResultsNoIntentData(t *testing.T, dbPath string) {
 	}
 }
 
+func seedClassifiedMessagesData(t *testing.T, dbPath string) {
+	t.Helper()
+	st, err := storage.Open(dbPath)
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	defer func() { _ = st.Close() }()
+
+	ctx := context.Background()
+	if err := st.CreateMailbox(ctx, models.Mailbox{ID: "user@example.com", Provider: "gmail"}); err != nil {
+		t.Fatalf("CreateMailbox: %v", err)
+	}
+
+	now := time.Date(2026, 4, 2, 10, 0, 0, 0, time.UTC)
+	for _, msg := range []models.MessageMeta{
+		{ProviderID: "gmail-1", MailboxID: "user@example.com", Provider: "gmail", FromEmail: "acct1@client.example", Domain: "client.example", Subject: "Invoice for April services with more text", ReceivedAt: now},
+		{ProviderID: "gmail-2", MailboxID: "user@example.com", Provider: "gmail", FromEmail: "acct2@client.example", Domain: "client.example", Subject: "Project update", ReceivedAt: now.Add(1 * time.Hour)},
+	} {
+		if err := st.UpsertMessage(ctx, msg); err != nil {
+			t.Fatalf("UpsertMessage(%s): %v", msg.ProviderID, err)
+		}
+	}
+
+	for _, c := range []storage.Classification{
+		{MessageID: "gmail-1", MailboxID: "user@example.com", Category: "client", Intent: "invoice", MatchedRule: "subject_term:invoice", Source: "seed", ClassifiedAt: now},
+		{MessageID: "gmail-2", MailboxID: "user@example.com", Category: "client", MatchedRule: "domain:client.example", Source: "seed", ClassifiedAt: now},
+	} {
+		if err := st.SaveClassification(ctx, c); err != nil {
+			t.Fatalf("SaveClassification(%s): %v", c.MessageID, err)
+		}
+	}
+}
+
 // --- buildReportCmd ---
 
 func TestBuildReportCmd_HasSubcommands(t *testing.T) {
@@ -1756,6 +1789,75 @@ func TestRunClassifyResults_Table_NoIntentColumn(t *testing.T) {
 	output := buf.String()
 	if !strings.Contains(output, "CATEGORY") || strings.Contains(output, "INTENT") {
 		t.Fatalf("unexpected no-intent table output: %q", output)
+	}
+}
+
+func TestRunClassifyMessages_Table(t *testing.T) {
+	dir := t.TempDir()
+	cfg := config.Default()
+	cfg.StoragePath = filepath.Join(dir, "test.db")
+	seedClassifiedMessagesData(t, cfg.StoragePath)
+
+	var buf bytes.Buffer
+	if err := runClassifyMessages(context.Background(), &buf, cfg, "user@example.com", "client", "invoice", "table", 100); err != nil {
+		t.Fatalf("runClassifyMessages: %v", err)
+	}
+
+	output := buf.String()
+	if !strings.Contains(output, "MESSAGE ID") || !strings.Contains(output, "gmail-1") || !strings.Contains(output, "client") || !strings.Contains(output, "invoice") {
+		t.Fatalf("unexpected table output: %q", output)
+	}
+}
+
+func TestRunClassifyMessages_JSON(t *testing.T) {
+	dir := t.TempDir()
+	cfg := config.Default()
+	cfg.StoragePath = filepath.Join(dir, "test.db")
+	seedClassifiedMessagesData(t, cfg.StoragePath)
+
+	var buf bytes.Buffer
+	if err := runClassifyMessages(context.Background(), &buf, cfg, "user@example.com", "", "", "json", 100); err != nil {
+		t.Fatalf("runClassifyMessages: %v", err)
+	}
+	if !strings.Contains(buf.String(), "\"message_id\": \"gmail-2\"") || !strings.Contains(buf.String(), "\"intent\": \"invoice\"") {
+		t.Fatalf("unexpected json output: %q", buf.String())
+	}
+}
+
+func TestRunClassifyMessages_UnknownCategory(t *testing.T) {
+	err := runClassifyMessages(context.Background(), io.Discard, config.Default(), "user@example.com", "bogus", "", "table", 100)
+	if err == nil || !strings.Contains(err.Error(), "classify categories") {
+		t.Fatalf("expected category validation error, got %v", err)
+	}
+}
+
+func TestRunClassifyMessages_UnknownIntent(t *testing.T) {
+	err := runClassifyMessages(context.Background(), io.Discard, config.Default(), "user@example.com", "", "bogus", "table", 100)
+	if err == nil || !strings.Contains(err.Error(), "classify intents") {
+		t.Fatalf("expected intent validation error, got %v", err)
+	}
+}
+
+func TestRunClassifyMessages_Empty(t *testing.T) {
+	dir := t.TempDir()
+	cfg := config.Default()
+	cfg.StoragePath = filepath.Join(dir, "test.db")
+
+	st, err := storage.Open(cfg.StoragePath)
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	if err := st.CreateMailbox(context.Background(), models.Mailbox{ID: "user@example.com", Provider: "gmail"}); err != nil {
+		t.Fatalf("CreateMailbox: %v", err)
+	}
+	_ = st.Close()
+
+	var buf bytes.Buffer
+	if err := runClassifyMessages(context.Background(), &buf, cfg, "user@example.com", "", "", "table", 100); err != nil {
+		t.Fatalf("runClassifyMessages: %v", err)
+	}
+	if !strings.Contains(buf.String(), "No classified messages found for user@example.com.") {
+		t.Fatalf("unexpected empty output: %q", buf.String())
 	}
 }
 

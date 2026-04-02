@@ -574,6 +574,78 @@ func TestGetClassificationSummary_MailboxNotFound(t *testing.T) {
 	}
 }
 
+func TestListClassifiedMessages(t *testing.T) {
+	cfg := engineTestConfig(t)
+	st := engineTestStore(t, cfg)
+	createEngineMailbox(t, st, "user@example.com")
+
+	now := time.Date(2026, 4, 2, 10, 0, 0, 0, time.UTC)
+	for _, msg := range []models.MessageMeta{
+		{ProviderID: "gmail-1", MailboxID: "user@example.com", Provider: "gmail", FromEmail: "acct1@client.example", Domain: "client.example", Subject: "Invoice April", ReceivedAt: now},
+		{ProviderID: "gmail-2", MailboxID: "user@example.com", Provider: "gmail", FromEmail: "acct2@client.example", Domain: "client.example", Subject: "Project update", ReceivedAt: now.Add(1 * time.Hour)},
+		{ProviderID: "gmail-3", MailboxID: "user@example.com", Provider: "gmail", FromEmail: "ops@vendor.example", Domain: "vendor.example", Subject: "Statement", ReceivedAt: now.Add(2 * time.Hour)},
+	} {
+		engineSeedMessage(t, st, msg)
+	}
+
+	for _, c := range []storage.Classification{
+		{MessageID: "gmail-1", MailboxID: "user@example.com", Category: classification.CategoryClient, Intent: classification.IntentInvoice, MatchedRule: "subject_term:invoice", Source: classification.SourceSeed, ClassifiedAt: now},
+		{MessageID: "gmail-2", MailboxID: "user@example.com", Category: classification.CategoryClient, MatchedRule: "domain:client.example", Source: classification.SourceSeed, ClassifiedAt: now},
+		{MessageID: "gmail-3", MailboxID: "user@example.com", Category: classification.CategoryVendor, MatchedRule: "domain:vendor.example", Source: classification.SourceSeed, ClassifiedAt: now},
+	} {
+		if err := st.SaveClassification(context.Background(), c); err != nil {
+			t.Fatalf("SaveClassification(%s): %v", c.MessageID, err)
+		}
+	}
+
+	result, err := ListClassifiedMessages(context.Background(), cfg, "user@example.com", ClassifiedMessagesFilter{
+		Category: classification.CategoryClient,
+		Intent:   classification.IntentInvoice,
+		Limit:    5,
+	})
+	if err != nil {
+		t.Fatalf("ListClassifiedMessages: %v", err)
+	}
+	if result.MailboxID != "user@example.com" {
+		t.Fatalf("MailboxID: got %q, want %q", result.MailboxID, "user@example.com")
+	}
+	if result.Filter.Category != classification.CategoryClient || result.Filter.Intent != classification.IntentInvoice || result.Filter.Limit != 5 {
+		t.Fatalf("unexpected filter echo: %+v", result.Filter)
+	}
+	if len(result.Messages) != 1 {
+		t.Fatalf("expected 1 message, got %d", len(result.Messages))
+	}
+	if result.Messages[0].MessageID != "gmail-1" || result.Messages[0].Intent != classification.IntentInvoice {
+		t.Fatalf("unexpected classified message row: %+v", result.Messages[0])
+	}
+}
+
+func TestListClassifiedMessages_Empty(t *testing.T) {
+	cfg := engineTestConfig(t)
+	st := engineTestStore(t, cfg)
+	createEngineMailbox(t, st, "user@example.com")
+
+	result, err := ListClassifiedMessages(context.Background(), cfg, "user@example.com", ClassifiedMessagesFilter{Limit: 10})
+	if err != nil {
+		t.Fatalf("ListClassifiedMessages: %v", err)
+	}
+	if result.MailboxID != "user@example.com" {
+		t.Fatalf("MailboxID: got %q, want %q", result.MailboxID, "user@example.com")
+	}
+	if len(result.Messages) != 0 {
+		t.Fatalf("expected no messages, got %d", len(result.Messages))
+	}
+}
+
+func TestListClassifiedMessages_MailboxNotFound(t *testing.T) {
+	cfg := engineTestConfig(t)
+
+	_, err := ListClassifiedMessages(context.Background(), cfg, "missing@example.com", ClassifiedMessagesFilter{})
+	if err == nil {
+		t.Fatal("expected mailbox resolution error")
+	}
+}
+
 func TestRunInference_PersistsHighAndMediumCandidates(t *testing.T) {
 	cfg := engineTestConfig(t)
 	st := engineTestStore(t, cfg)

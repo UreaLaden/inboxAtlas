@@ -341,6 +341,9 @@ inboxatlas classify results --account <id|alias> [--format table|json]
 # Review mailbox bootstrap suggestions
 inboxatlas classify suggestions --account <id|alias> [--format table|json]
 
+# Review classified messages with optional filters
+inboxatlas classify messages --account <id|alias> [--category <category>] [--intent <intent>] [--format table|json] [--limit 100]
+
 # Run AI-assisted inference over still-unknown messages
 inboxatlas classify infer --account <id|alias> --provider-command <cmd> [--provider-arg <arg>...]
 
@@ -369,6 +372,7 @@ inboxatlas classify promote --account <id|alias> \
 | Command | Purpose |
 |---|---|
 | `classify run` | Loads synced message metadata for one mailbox, persists mailbox-scoped classifications, and prints a per-category breakdown with unknown percentage |
+| `classify messages` | Lists per-message classification rows with optional category and intent filters for automation or operator review |
 | `classify results` | Shows mailbox-scoped classification totals, per-category counts, and unknown percentage |
 | `classify suggestions` | Shows read-only mailbox bootstrap suggestions derived from observed mailbox discovery data, excluding patterns already covered by global defaults |
 | `classify infer` | Runs AI-assisted inference only for messages still classified as `unknown` and stages valid medium/high-confidence suggestions for review |
@@ -384,6 +388,7 @@ Notes:
 
 - `--account` is required for mailbox-scoped classify commands.
 - `classify run` does not trigger sync; it operates on messages already stored locally and prints the post-run category breakdown immediately.
+- `classify messages` is the per-message review surface; use `--category`, `--intent`, and `--format json` for automation-friendly filtering.
 - `classify results` is read-only and reports on classifications already stored locally.
 - `classify suggestions` is read-only and does not activate any seed.
 - `classify infer` requires `--provider-command` or `INBOXATLAS_INFERENCE_PROVIDER_CMD`; it only submits messages that remain `unknown` after deterministic classification.

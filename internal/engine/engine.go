@@ -81,6 +81,33 @@ type ClassificationSummary struct {
 	UnknownPct float64                       `json:"unknown_pct"`
 }
 
+// ClassifiedMessagesFilter constrains ListClassifiedMessages results.
+type ClassifiedMessagesFilter struct {
+	Category string `json:"category,omitempty"`
+	Intent   string `json:"intent,omitempty"`
+	Limit    int    `json:"limit,omitempty"`
+}
+
+// ClassifiedMessageRow is one per-message classification result for operator
+// review or automation consumption.
+type ClassifiedMessageRow struct {
+	MessageID   string    `json:"message_id"`
+	FromEmail   string    `json:"from_email"`
+	Domain      string    `json:"domain"`
+	Subject     string    `json:"subject"`
+	ReceivedAt  time.Time `json:"received_at"`
+	Category    string    `json:"category"`
+	Intent      string    `json:"intent"`
+	MatchedRule string    `json:"matched_rule"`
+}
+
+// ClassifiedMessagesSummary is the result of ListClassifiedMessages.
+type ClassifiedMessagesSummary struct {
+	MailboxID string                   `json:"mailbox_id"`
+	Filter    ClassifiedMessagesFilter `json:"filter,omitempty"`
+	Messages  []ClassifiedMessageRow   `json:"messages"`
+}
+
 // PromoteSuggestionRequest identifies a mailbox bootstrap suggestion to promote
 // into the active mailbox-scoped seed set.
 type PromoteSuggestionRequest struct {
@@ -308,6 +335,45 @@ func GetClassificationSummary(ctx context.Context, cfg config.Config, account st
 		Total:      total,
 		Breakdown:  breakdown,
 		UnknownPct: unknownPct,
+	}, nil
+}
+
+// ListClassifiedMessages returns mailbox-scoped per-message classification rows
+// with optional category and intent filtering for operator review and automation.
+func ListClassifiedMessages(ctx context.Context, cfg config.Config, account string, filter ClassifiedMessagesFilter) (ClassifiedMessagesSummary, error) {
+	st, mb, err := openResolvedStore(ctx, cfg, account)
+	if err != nil {
+		return ClassifiedMessagesSummary{}, err
+	}
+	defer func() { _ = st.Close() }()
+
+	rows, err := st.QueryClassifiedMessages(ctx, mb.ID, storage.ClassifiedMessagesFilter{
+		Category: filter.Category,
+		Intent:   filter.Intent,
+		Limit:    filter.Limit,
+	})
+	if err != nil {
+		return ClassifiedMessagesSummary{}, fmt.Errorf("query classified messages: %w", err)
+	}
+
+	out := make([]ClassifiedMessageRow, len(rows))
+	for i, row := range rows {
+		out[i] = ClassifiedMessageRow{
+			MessageID:   row.MessageID,
+			FromEmail:   row.FromEmail,
+			Domain:      row.Domain,
+			Subject:     row.Subject,
+			ReceivedAt:  row.ReceivedAt,
+			Category:    row.Category,
+			Intent:      row.Intent,
+			MatchedRule: row.MatchedRule,
+		}
+	}
+
+	return ClassifiedMessagesSummary{
+		MailboxID: mb.ID,
+		Filter:    filter,
+		Messages:  out,
 	}, nil
 }
 
