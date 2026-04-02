@@ -87,6 +87,7 @@ inboxatlas classify promote --account <id|alias> \
 
 # Run and review
 inboxatlas classify run     --account <id|alias>
+inboxatlas classify messages --account <id|alias> [--category <category>] [--intent <intent>] [--format table|json] [--limit 100]
 inboxatlas classify results --account <id|alias> [--format table|json]
 
 # Manage active seeds
@@ -133,6 +134,14 @@ inboxatlas classify promote \
   --pattern-type domain \
   --pattern-value law360.com \
   --category newsletter/marketing
+
+**5. Review classified messages directly when you need automation-friendly output.**
+Use `classify messages` when you need per-message rows instead of aggregate counts. Combine
+`--category` and `--intent` to narrow to combinations such as `client + invoice`.
+
+```bash
+inboxatlas classify messages --account your@email.com --category client --intent invoice --format json
+```
 
 inboxatlas classify promote \
   --account your@email.com \

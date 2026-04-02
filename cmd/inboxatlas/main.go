@@ -567,6 +567,7 @@ func buildClassifyCmd(cfg config.Config) *cobra.Command {
 		Short: "Run and manage mailbox classification workflows",
 	}
 	cmd.AddCommand(buildClassifyRunCmd(cfg))
+	cmd.AddCommand(buildClassifyMessagesCmd(cfg))
 	cmd.AddCommand(buildClassifyResultsCmd(cfg))
 	cmd.AddCommand(buildClassifySuggestionsCmd(cfg))
 	cmd.AddCommand(buildClassifyInferCmd(cfg))
@@ -629,6 +630,30 @@ func buildClassifyRunCmd(cfg config.Config) *cobra.Command {
 		},
 	}
 	cmd.Flags().StringVar(&account, "account", "", "mailbox email or alias")
+	_ = cmd.MarkFlagRequired("account")
+	return cmd
+}
+
+// buildClassifyMessagesCmd returns the "classify messages" subcommand.
+func buildClassifyMessagesCmd(cfg config.Config) *cobra.Command {
+	var account string
+	var category string
+	var intent string
+	var format string
+	var limit int
+
+	cmd := &cobra.Command{
+		Use:   "messages",
+		Short: "List classified messages with optional category and intent filters",
+		RunE: func(cmd *cobra.Command, _ []string) error {
+			return runClassifyMessages(cmd.Context(), cmd.OutOrStdout(), cfg, account, category, intent, format, limit)
+		},
+	}
+	cmd.Flags().StringVar(&account, "account", "", "mailbox email or alias")
+	cmd.Flags().StringVar(&category, "category", "", "filter by relationship category (optional)")
+	cmd.Flags().StringVar(&intent, "intent", "", "filter by intent (optional)")
+	cmd.Flags().StringVar(&format, "format", "table", "output format: table, json")
+	cmd.Flags().IntVar(&limit, "limit", 100, "maximum rows to return (0 = no limit)")
 	_ = cmd.MarkFlagRequired("account")
 	return cmd
 }
@@ -824,6 +849,64 @@ func runClassifyRun(ctx context.Context, w io.Writer, cfg config.Config, account
 	}
 	_, _ = fmt.Fprintf(w, "Unknown: %.1f%%\n", result.UnknownPct)
 	return nil
+}
+
+// runClassifyMessages renders per-message classification rows with optional
+// category and intent filters for one mailbox.
+func runClassifyMessages(ctx context.Context, w io.Writer, cfg config.Config, account, category, intent, format string, limit int) error {
+	f, err := validateClassifyFormat(format)
+	if err != nil {
+		return err
+	}
+	if err := validateClassificationCategory(category); err != nil {
+		return err
+	}
+	if err := validateClassificationIntent(intent); err != nil {
+		return err
+	}
+
+	result, err := engine.ListClassifiedMessages(ctx, cfg, account, engine.ClassifiedMessagesFilter{
+		Category: category,
+		Intent:   intent,
+		Limit:    limit,
+	})
+	if err != nil {
+		return err
+	}
+
+	if f == "json" {
+		enc := json.NewEncoder(w)
+		enc.SetIndent("", "  ")
+		return enc.Encode(result.Messages)
+	}
+
+	if len(result.Messages) == 0 {
+		_, _ = fmt.Fprintf(w, "No classified messages found for %s.\n", result.MailboxID)
+		return nil
+	}
+
+	tw := tabwriter.NewWriter(w, 0, 0, 3, ' ', 0)
+	_, _ = fmt.Fprintln(tw, "MESSAGE ID\tFROM\tDOMAIN\tSUBJECT\tCATEGORY\tINTENT\tRECEIVED")
+	for _, msg := range result.Messages {
+		renderedIntent := msg.Intent
+		if renderedIntent == "" {
+			renderedIntent = "-"
+		}
+		subject := msg.Subject
+		if len(subject) > 40 {
+			subject = subject[:37] + "..."
+		}
+		_, _ = fmt.Fprintf(tw, "%s\t%s\t%s\t%s\t%s\t%s\t%s\n",
+			msg.MessageID,
+			msg.FromEmail,
+			msg.Domain,
+			subject,
+			msg.Category,
+			renderedIntent,
+			msg.ReceivedAt.Format("2006-01-02"),
+		)
+	}
+	return tw.Flush()
 }
 
 // runClassifySuggestions renders mailbox bootstrap suggestions for one mailbox.
@@ -1026,6 +1109,30 @@ func runClassifyCategories(w io.Writer) error {
 		}
 	}
 	return nil
+}
+
+func validateClassificationCategory(category string) error {
+	if category == "" {
+		return nil
+	}
+	for _, known := range engine.ClassificationCategories() {
+		if category == known {
+			return nil
+		}
+	}
+	return fmt.Errorf("unknown category %q — run 'inboxatlas classify categories' for valid values", category)
+}
+
+func validateClassificationIntent(intent string) error {
+	if intent == "" {
+		return nil
+	}
+	for _, known := range engine.ClassificationIntents() {
+		if intent == known {
+			return nil
+		}
+	}
+	return fmt.Errorf("unknown intent %q — run 'inboxatlas classify intents' for valid values", intent)
 }
 
 // runClassifyIntents writes the supported deterministic intent names.

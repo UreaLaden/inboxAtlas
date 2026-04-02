@@ -2262,6 +2262,84 @@ func TestQueryClassificationsByMailbox_Empty(t *testing.T) {
 	}
 }
 
+func TestQueryClassifiedMessages(t *testing.T) {
+	st := newTestStore(t)
+	ctx := context.Background()
+	createTestMailbox(t, st, "user@example.com")
+
+	now := time.Date(2026, 4, 2, 10, 0, 0, 0, time.UTC)
+	for _, msg := range []models.MessageMeta{
+		{ProviderID: "gmail-1", MailboxID: "user@example.com", Provider: "gmail", FromEmail: "acct1@client.example", Domain: "client.example", Subject: "Invoice April", ReceivedAt: now},
+		{ProviderID: "gmail-2", MailboxID: "user@example.com", Provider: "gmail", FromEmail: "acct2@client.example", Domain: "client.example", Subject: "Project update", ReceivedAt: now.Add(1 * time.Hour)},
+		{ProviderID: "gmail-3", MailboxID: "user@example.com", Provider: "gmail", FromEmail: "ops@vendor.example", Domain: "vendor.example", Subject: "Statement", ReceivedAt: now.Add(2 * time.Hour)},
+	} {
+		if err := st.UpsertMessage(ctx, msg); err != nil {
+			t.Fatalf("UpsertMessage(%s): %v", msg.ProviderID, err)
+		}
+	}
+
+	for _, c := range []Classification{
+		{MessageID: "gmail-1", MailboxID: "user@example.com", Category: "client", Intent: "invoice", MatchedRule: "subject_term:invoice", Source: "seed", ClassifiedAt: now},
+		{MessageID: "gmail-2", MailboxID: "user@example.com", Category: "client", MatchedRule: "domain:client.example", Source: "seed", ClassifiedAt: now},
+		{MessageID: "gmail-3", MailboxID: "user@example.com", Category: "vendor", MatchedRule: "domain:vendor.example", Source: "seed", ClassifiedAt: now},
+	} {
+		if err := st.SaveClassification(ctx, c); err != nil {
+			t.Fatalf("SaveClassification(%s): %v", c.MessageID, err)
+		}
+	}
+
+	rows, err := st.QueryClassifiedMessages(ctx, "user@example.com", ClassifiedMessagesFilter{})
+	if err != nil {
+		t.Fatalf("QueryClassifiedMessages all: %v", err)
+	}
+	if len(rows) != 3 {
+		t.Fatalf("expected 3 rows, got %d", len(rows))
+	}
+	if rows[0].MessageID != "gmail-3" || rows[1].MessageID != "gmail-2" || rows[2].MessageID != "gmail-1" {
+		t.Fatalf("unexpected ordering/provider ids: %+v", rows)
+	}
+
+	clientRows, err := st.QueryClassifiedMessages(ctx, "user@example.com", ClassifiedMessagesFilter{Category: "client"})
+	if err != nil {
+		t.Fatalf("QueryClassifiedMessages client: %v", err)
+	}
+	if len(clientRows) != 2 {
+		t.Fatalf("expected 2 client rows, got %d", len(clientRows))
+	}
+
+	invoiceRows, err := st.QueryClassifiedMessages(ctx, "user@example.com", ClassifiedMessagesFilter{Intent: "invoice"})
+	if err != nil {
+		t.Fatalf("QueryClassifiedMessages invoice: %v", err)
+	}
+	if len(invoiceRows) != 1 || invoiceRows[0].MessageID != "gmail-1" {
+		t.Fatalf("unexpected invoice rows: %+v", invoiceRows)
+	}
+
+	combinedRows, err := st.QueryClassifiedMessages(ctx, "user@example.com", ClassifiedMessagesFilter{Category: "client", Intent: "invoice"})
+	if err != nil {
+		t.Fatalf("QueryClassifiedMessages combined: %v", err)
+	}
+	if len(combinedRows) != 1 || combinedRows[0].MessageID != "gmail-1" {
+		t.Fatalf("unexpected combined rows: %+v", combinedRows)
+	}
+
+	limitedRows, err := st.QueryClassifiedMessages(ctx, "user@example.com", ClassifiedMessagesFilter{Limit: 1})
+	if err != nil {
+		t.Fatalf("QueryClassifiedMessages limit: %v", err)
+	}
+	if len(limitedRows) != 1 || limitedRows[0].MessageID != "gmail-3" {
+		t.Fatalf("unexpected limited rows: %+v", limitedRows)
+	}
+
+	emptyRows, err := st.QueryClassifiedMessages(ctx, "user@example.com", ClassifiedMessagesFilter{Category: "government"})
+	if err != nil {
+		t.Fatalf("QueryClassifiedMessages empty: %v", err)
+	}
+	if len(emptyRows) != 0 {
+		t.Fatalf("expected empty rows, got %d", len(emptyRows))
+	}
+}
+
 func TestSaveAndListInferenceSuggestions(t *testing.T) {
 	st := newTestStore(t)
 	ctx := context.Background()
