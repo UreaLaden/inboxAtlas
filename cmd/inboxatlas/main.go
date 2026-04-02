@@ -4,6 +4,7 @@ package main
 import (
 	"bufio"
 	"context"
+	"encoding/csv"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -813,6 +814,15 @@ func validateClassifyFormat(f string) (string, error) {
 	}
 }
 
+func validateClassifyMessagesFormat(f string) (string, error) {
+	switch f {
+	case "table", "csv", "json":
+		return f, nil
+	default:
+		return "", fmt.Errorf("unknown format %q — valid values: table, csv, json", f)
+	}
+}
+
 // runClassifyRun executes mailbox-scoped classification for one mailbox.
 func runClassifyRun(ctx context.Context, w io.Writer, cfg config.Config, account string) error {
 	result, err := runClassify(ctx, cfg, account)
@@ -854,7 +864,7 @@ func runClassifyRun(ctx context.Context, w io.Writer, cfg config.Config, account
 // runClassifyMessages renders per-message classification rows with optional
 // category and intent filters for one mailbox.
 func runClassifyMessages(ctx context.Context, w io.Writer, cfg config.Config, account, category, intent, format string, limit int) error {
-	f, err := validateClassifyFormat(format)
+	f, err := validateClassifyMessagesFormat(format)
 	if err != nil {
 		return err
 	}
@@ -879,6 +889,25 @@ func runClassifyMessages(ctx context.Context, w io.Writer, cfg config.Config, ac
 		enc.SetIndent("", "  ")
 		return enc.Encode(result.Messages)
 	}
+	if f == "csv" {
+		cw := csv.NewWriter(w)
+		if err := cw.Write([]string{"Timestamp", "Sender", "Intent", "Category", "HasAttachment"}); err != nil {
+			return err
+		}
+		for _, msg := range result.Messages {
+			if err := cw.Write([]string{
+				msg.ReceivedAt.Format(time.RFC3339),
+				msg.FromEmail,
+				msg.Intent,
+				msg.Category,
+				fmt.Sprintf("%t", msg.HasAttachment),
+			}); err != nil {
+				return err
+			}
+		}
+		cw.Flush()
+		return cw.Error()
+	}
 
 	if len(result.Messages) == 0 {
 		_, _ = fmt.Fprintf(w, "No classified messages found for %s.\n", result.MailboxID)
@@ -886,7 +915,7 @@ func runClassifyMessages(ctx context.Context, w io.Writer, cfg config.Config, ac
 	}
 
 	tw := tabwriter.NewWriter(w, 0, 0, 3, ' ', 0)
-	_, _ = fmt.Fprintln(tw, "MESSAGE ID\tFROM\tDOMAIN\tSUBJECT\tCATEGORY\tINTENT\tRECEIVED")
+	_, _ = fmt.Fprintln(tw, "MESSAGE ID\tFROM\tDOMAIN\tSUBJECT\tCATEGORY\tINTENT\tHAS ATTACHMENT\tRECEIVED")
 	for _, msg := range result.Messages {
 		renderedIntent := msg.Intent
 		if renderedIntent == "" {
@@ -896,13 +925,14 @@ func runClassifyMessages(ctx context.Context, w io.Writer, cfg config.Config, ac
 		if len(subject) > 40 {
 			subject = subject[:37] + "..."
 		}
-		_, _ = fmt.Fprintf(tw, "%s\t%s\t%s\t%s\t%s\t%s\t%s\n",
+		_, _ = fmt.Fprintf(tw, "%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n",
 			msg.MessageID,
 			msg.FromEmail,
 			msg.Domain,
 			subject,
 			msg.Category,
 			renderedIntent,
+			fmt.Sprintf("%t", msg.HasAttachment),
 			msg.ReceivedAt.Format("2006-01-02"),
 		)
 	}

@@ -581,7 +581,7 @@ func TestListClassifiedMessages(t *testing.T) {
 
 	now := time.Date(2026, 4, 2, 10, 0, 0, 0, time.UTC)
 	for _, msg := range []models.MessageMeta{
-		{ProviderID: "gmail-1", MailboxID: "user@example.com", Provider: "gmail", FromEmail: "acct1@client.example", Domain: "client.example", Subject: "Invoice April", ReceivedAt: now},
+		{ProviderID: "gmail-1", MailboxID: "user@example.com", Provider: "gmail", FromEmail: "acct1@client.example", Domain: "client.example", Subject: "Invoice April", HasAttachment: true, ReceivedAt: now},
 		{ProviderID: "gmail-2", MailboxID: "user@example.com", Provider: "gmail", FromEmail: "acct2@client.example", Domain: "client.example", Subject: "Project update", ReceivedAt: now.Add(1 * time.Hour)},
 		{ProviderID: "gmail-3", MailboxID: "user@example.com", Provider: "gmail", FromEmail: "ops@vendor.example", Domain: "vendor.example", Subject: "Statement", ReceivedAt: now.Add(2 * time.Hour)},
 	} {
@@ -617,6 +617,9 @@ func TestListClassifiedMessages(t *testing.T) {
 	}
 	if result.Messages[0].MessageID != "gmail-1" || result.Messages[0].Intent != classification.IntentInvoice {
 		t.Fatalf("unexpected classified message row: %+v", result.Messages[0])
+	}
+	if !result.Messages[0].HasAttachment {
+		t.Fatalf("expected attachment flag on classified message row: %+v", result.Messages[0])
 	}
 }
 
