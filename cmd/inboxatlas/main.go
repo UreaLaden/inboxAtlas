@@ -573,6 +573,7 @@ func buildClassifyCmd(cfg config.Config) *cobra.Command {
 	cmd.AddCommand(buildClassifyPromoteCmd(cfg))
 	cmd.AddCommand(buildClassifySeedsCmd(cfg))
 	cmd.AddCommand(buildClassifyCategoriesCmd())
+	cmd.AddCommand(buildClassifyIntentsCmd())
 	cmd.AddCommand(buildClassifyPatternTypesCmd())
 	return cmd
 }
@@ -767,6 +768,17 @@ func buildClassifyPatternTypesCmd() *cobra.Command {
 	}
 }
 
+// buildClassifyIntentsCmd returns the "classify intents" subcommand.
+func buildClassifyIntentsCmd() *cobra.Command {
+	return &cobra.Command{
+		Use:   "intents",
+		Short: "List valid deterministic classification intents",
+		RunE: func(cmd *cobra.Command, _ []string) error {
+			return runClassifyIntents(cmd.OutOrStdout())
+		},
+	}
+}
+
 func validateClassifyFormat(f string) (string, error) {
 	switch f {
 	case "table", "json":
@@ -788,8 +800,23 @@ func runClassifyRun(ctx context.Context, w io.Writer, cfg config.Config, account
 	}
 
 	tw := tabwriter.NewWriter(w, 0, 0, 3, ' ', 0)
-	_, _ = fmt.Fprintln(tw, "CATEGORY\tCOUNT")
+	showIntent := false
 	for _, row := range result.Breakdown {
+		if row.Intent != "" {
+			showIntent = true
+			break
+		}
+	}
+	if showIntent {
+		_, _ = fmt.Fprintln(tw, "CATEGORY\tINTENT\tCOUNT")
+	} else {
+		_, _ = fmt.Fprintln(tw, "CATEGORY\tCOUNT")
+	}
+	for _, row := range result.Breakdown {
+		if showIntent {
+			_, _ = fmt.Fprintf(tw, "%s\t%s\t%d\n", row.Category, row.Intent, row.Count)
+			continue
+		}
 		_, _ = fmt.Fprintf(tw, "%s\t%d\n", row.Category, row.Count)
 	}
 	if err := tw.Flush(); err != nil {
@@ -906,8 +933,23 @@ func runClassifyResults(ctx context.Context, w io.Writer, cfg config.Config, acc
 	}
 
 	tw := tabwriter.NewWriter(w, 0, 0, 3, ' ', 0)
-	_, _ = fmt.Fprintln(tw, "CATEGORY\tCOUNT")
+	showIntent := false
 	for _, row := range result.Breakdown {
+		if row.Intent != "" {
+			showIntent = true
+			break
+		}
+	}
+	if showIntent {
+		_, _ = fmt.Fprintln(tw, "CATEGORY\tINTENT\tCOUNT")
+	} else {
+		_, _ = fmt.Fprintln(tw, "CATEGORY\tCOUNT")
+	}
+	for _, row := range result.Breakdown {
+		if showIntent {
+			_, _ = fmt.Fprintf(tw, "%s\t%s\t%d\n", row.Category, row.Intent, row.Count)
+			continue
+		}
 		_, _ = fmt.Fprintf(tw, "%s\t%d\n", row.Category, row.Count)
 	}
 	if err := tw.Flush(); err != nil {
@@ -980,6 +1022,16 @@ func runClassifySeedsDelete(ctx context.Context, w io.Writer, cfg config.Config,
 func runClassifyCategories(w io.Writer) error {
 	for _, category := range engine.ClassificationCategories() {
 		if _, err := fmt.Fprintln(w, category); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// runClassifyIntents writes the supported deterministic intent names.
+func runClassifyIntents(w io.Writer) error {
+	for _, intent := range engine.ClassificationIntents() {
+		if _, err := fmt.Fprintln(w, intent); err != nil {
 			return err
 		}
 	}

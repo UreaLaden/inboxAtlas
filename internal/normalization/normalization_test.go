@@ -124,6 +124,18 @@ func TestNormalizeMessage(t *testing.T) {
 				}
 			},
 		},
+		{
+			name:  "attachment metadata preserved verbatim",
+			input: models.MessageMeta{HasAttachment: true, AttachmentTypes: []string{"application/pdf", "image/png"}},
+			check: func(t *testing.T, got models.MessageMeta) {
+				if !got.HasAttachment {
+					t.Fatal("HasAttachment: got false, want true")
+				}
+				if len(got.AttachmentTypes) != 2 || got.AttachmentTypes[0] != "application/pdf" || got.AttachmentTypes[1] != "image/png" {
+					t.Errorf("AttachmentTypes = %v, want [application/pdf image/png]", got.AttachmentTypes)
+				}
+			},
+		},
 	}
 
 	for _, tc := range cases {

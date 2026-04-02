@@ -77,6 +77,7 @@ sync → review suggestions → promote rules → run → review results → rep
 ```bash
 # Discover valid values
 inboxatlas classify categories
+inboxatlas classify intents
 inboxatlas classify pattern-types
 
 # Review and promote
@@ -93,9 +94,11 @@ inboxatlas classify seeds list   --account <id|alias> [--format table|json]
 inboxatlas classify seeds delete --account <id|alias> --id <seed-id>
 ```
 
-Valid `--pattern-type` values: `domain`, `sender_email`, `sender_prefix`, `subject_term`
+Valid `--pattern-type` values: `domain`, `sender_email`, `sender_prefix`, `has_attachment`, `subject_term`
 
 Valid `--category` values: `internal`, `client`, `vendor`, `government`, `system-generated`, `newsletter/marketing`, `social`, `unknown`
+
+Deterministic intent values: `invoice`, `request-for-information`
 
 ### Step-by-step walkthrough
 
@@ -110,6 +113,7 @@ inboxatlas sync gmail --account your@email.com
 
 ```bash
 inboxatlas classify categories
+inboxatlas classify intents
 inboxatlas classify pattern-types
 ```
 

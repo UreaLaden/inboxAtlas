@@ -100,7 +100,13 @@ func (p *Provider) GetMessageMeta(ctx context.Context, id string) (*models.Messa
 	if p.svc == nil {
 		return nil, fmt.Errorf("gmail: not authenticated")
 	}
-	msg, err := p.svc.Users.Messages.Get(p.email, id).Format("metadata").Context(ctx).Do()
+	msg, err := p.svc.Users.Messages.Get(p.email, id).
+		Format("full").
+		Fields(
+			"id,threadId,snippet,labelIds,internalDate," +
+				"payload(headers,filename,mimeType,parts(filename,mimeType,body/size,parts(filename,mimeType,body/size,parts(filename,mimeType,body/size,parts(filename,mimeType,body/size,parts(filename,mimeType,body/size))))))",
+		).
+		Context(ctx).Do()
 	if err != nil {
 		return nil, fmt.Errorf("gmail: get message %s: %w", id, wrapIfRetryable(err))
 	}
@@ -124,6 +130,7 @@ func parseMessageMeta(accountEmail string, msg *gmailapi.Message) *models.Messag
 	if msg.InternalDate > 0 {
 		meta.ReceivedAt = time.UnixMilli(msg.InternalDate)
 	}
+	meta.HasAttachment, meta.AttachmentTypes = extractAttachments(msg.Payload)
 
 	if msg.Payload == nil || msg.Payload.Headers == nil {
 		return meta
@@ -150,4 +157,37 @@ func parseMessageMeta(accountEmail string, msg *gmailapi.Message) *models.Messag
 	}
 
 	return meta
+}
+
+// extractAttachments walks payload and nested MIME parts recursively, collecting
+// deduplicated MIME types for any part with a non-empty filename.
+func extractAttachments(payload *gmailapi.MessagePart) (bool, []string) {
+	if payload == nil {
+		return false, nil
+	}
+
+	seenTypes := make(map[string]struct{})
+	types := make([]string, 0, 4)
+
+	var walk func(part *gmailapi.MessagePart, depth int)
+	walk = func(part *gmailapi.MessagePart, depth int) {
+		if part == nil || depth > 10 {
+			return
+		}
+		if strings.TrimSpace(part.Filename) != "" {
+			mimeType := strings.TrimSpace(strings.ToLower(part.MimeType))
+			if mimeType != "" {
+				if _, ok := seenTypes[mimeType]; !ok {
+					seenTypes[mimeType] = struct{}{}
+					types = append(types, mimeType)
+				}
+			}
+		}
+		for _, child := range part.Parts {
+			walk(child, depth+1)
+		}
+	}
+
+	walk(payload, 0)
+	return len(types) > 0, types
 }

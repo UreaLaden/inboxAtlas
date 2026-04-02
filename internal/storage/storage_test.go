@@ -2,6 +2,8 @@ package storage
 
 import (
 	"context"
+	"database/sql"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -49,6 +51,193 @@ func TestOpen_InvalidPath(t *testing.T) {
 	_, err := Open("/dev/null/inboxatlas.db")
 	if err == nil {
 		t.Fatal("expected error for invalid database path")
+	}
+}
+
+func TestOpen_MigratesAttachmentColumns(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "legacy.db")
+	db, err := sql.Open("sqlite", path)
+	if err != nil {
+		t.Fatalf("sql.Open: %v", err)
+	}
+	legacySchema := `
+CREATE TABLE mailboxes (
+	id TEXT PRIMARY KEY,
+	alias TEXT UNIQUE,
+	provider TEXT NOT NULL,
+	created_at TEXT NOT NULL,
+	last_synced_at TEXT
+);
+CREATE TABLE messages (
+	id TEXT PRIMARY KEY,
+	mailbox_id TEXT NOT NULL REFERENCES mailboxes(id),
+	provider TEXT NOT NULL,
+	provider_id TEXT NOT NULL,
+	thread_id TEXT,
+	from_email TEXT,
+	from_name TEXT,
+	domain TEXT,
+	subject TEXT,
+	snippet TEXT,
+	received_at TEXT,
+	labels TEXT,
+	UNIQUE (provider_id, mailbox_id)
+);
+CREATE TABLE message_classifications (
+	message_id TEXT NOT NULL REFERENCES messages(id),
+	mailbox_id TEXT NOT NULL REFERENCES mailboxes(id),
+	category TEXT NOT NULL,
+	matched_rule TEXT,
+	source TEXT NOT NULL,
+	classified_at TEXT NOT NULL,
+	PRIMARY KEY (message_id, mailbox_id)
+);`
+	if _, err := db.Exec(legacySchema); err != nil {
+		t.Fatalf("Exec legacy schema: %v", err)
+	}
+	if err := db.Close(); err != nil {
+		t.Fatalf("Close legacy db: %v", err)
+	}
+
+	st, err := Open(path)
+	if err != nil {
+		t.Fatalf("Open migrated store: %v", err)
+	}
+	t.Cleanup(func() { _ = st.Close() })
+
+	columns, err := st.messageColumns()
+	if err != nil {
+		t.Fatalf("messageColumns: %v", err)
+	}
+	if _, ok := columns["has_attachment"]; !ok {
+		t.Fatal("expected has_attachment column after migration")
+	}
+	if _, ok := columns["attachment_types"]; !ok {
+		t.Fatal("expected attachment_types column after migration")
+	}
+
+	classificationColumns, err := st.tableColumns("message_classifications")
+	if err != nil {
+		t.Fatalf("tableColumns(message_classifications): %v", err)
+	}
+	if _, ok := classificationColumns["intent"]; !ok {
+		t.Fatal("expected intent column after migration")
+	}
+}
+
+func TestMigrations_AreIdempotentOnCurrentSchema(t *testing.T) {
+	st := newTestStore(t)
+
+	if err := st.migrateAttachmentColumns(); err != nil {
+		t.Fatalf("migrateAttachmentColumns: %v", err)
+	}
+	if err := st.migrateClassificationIntentColumn(); err != nil {
+		t.Fatalf("migrateClassificationIntentColumn: %v", err)
+	}
+	if err := st.migrate(); err != nil {
+		t.Fatalf("migrate: %v", err)
+	}
+
+	messageColumns, err := st.tableColumns("messages")
+	if err != nil {
+		t.Fatalf("tableColumns(messages): %v", err)
+	}
+	if _, ok := messageColumns["has_attachment"]; !ok {
+		t.Fatal("expected has_attachment column on current schema")
+	}
+	if _, ok := messageColumns["attachment_types"]; !ok {
+		t.Fatal("expected attachment_types column on current schema")
+	}
+
+	classificationColumns, err := st.tableColumns("message_classifications")
+	if err != nil {
+		t.Fatalf("tableColumns(message_classifications): %v", err)
+	}
+	if _, ok := classificationColumns["intent"]; !ok {
+		t.Fatal("expected intent column on current schema")
+	}
+}
+
+func TestOpen_MigratesLegacyClassificationRowsWithEmptyIntent(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "legacy-classifications.db")
+	db, err := sql.Open("sqlite", path)
+	if err != nil {
+		t.Fatalf("sql.Open: %v", err)
+	}
+	legacySchema := `
+CREATE TABLE mailboxes (
+	id TEXT PRIMARY KEY,
+	alias TEXT UNIQUE,
+	provider TEXT NOT NULL,
+	created_at TEXT NOT NULL,
+	last_synced_at TEXT
+);
+CREATE TABLE messages (
+	id TEXT PRIMARY KEY,
+	mailbox_id TEXT NOT NULL REFERENCES mailboxes(id),
+	provider TEXT NOT NULL,
+	provider_id TEXT NOT NULL,
+	thread_id TEXT,
+	from_email TEXT,
+	from_name TEXT,
+	domain TEXT,
+	subject TEXT,
+	snippet TEXT,
+	received_at TEXT,
+	labels TEXT,
+	UNIQUE (provider_id, mailbox_id)
+);
+CREATE TABLE message_classifications (
+	message_id TEXT NOT NULL REFERENCES messages(id),
+	mailbox_id TEXT NOT NULL REFERENCES mailboxes(id),
+	category TEXT NOT NULL,
+	matched_rule TEXT,
+	source TEXT NOT NULL,
+	classified_at TEXT NOT NULL,
+	PRIMARY KEY (message_id, mailbox_id)
+);`
+	if _, err := db.Exec(legacySchema); err != nil {
+		t.Fatalf("Exec legacy schema: %v", err)
+	}
+	if _, err := db.Exec(
+		`INSERT INTO mailboxes (id, provider, created_at) VALUES (?, ?, ?)`,
+		"user@example.com", "gmail", time.Now().UTC().Format(time.RFC3339),
+	); err != nil {
+		t.Fatalf("insert mailbox: %v", err)
+	}
+	if _, err := db.Exec(
+		`INSERT INTO messages (id, mailbox_id, provider, provider_id) VALUES (?, ?, ?, ?)`,
+		"msg1", "user@example.com", "gmail", "msg1",
+	); err != nil {
+		t.Fatalf("insert message: %v", err)
+	}
+	if _, err := db.Exec(
+		`INSERT INTO message_classifications (message_id, mailbox_id, category, matched_rule, source, classified_at)
+		 VALUES (?, ?, ?, ?, ?, ?)`,
+		"msg1", "user@example.com", "vendor", "domain:x.com", "seed", time.Now().UTC().Format(time.RFC3339),
+	); err != nil {
+		t.Fatalf("insert classification: %v", err)
+	}
+	if err := db.Close(); err != nil {
+		t.Fatalf("Close legacy db: %v", err)
+	}
+
+	st, err := Open(path)
+	if err != nil {
+		t.Fatalf("Open migrated store: %v", err)
+	}
+	t.Cleanup(func() { _ = st.Close() })
+
+	got, err := st.GetClassification(context.Background(), "msg1", "user@example.com")
+	if err != nil {
+		t.Fatalf("GetClassification: %v", err)
+	}
+	if got == nil {
+		t.Fatal("expected migrated classification row")
+		return
+	}
+	if got.Intent != "" {
+		t.Fatalf("Intent: got %q, want empty", got.Intent)
 	}
 }
 
@@ -814,6 +1003,52 @@ func TestUpsertMessage_NilLabels(t *testing.T) {
 	}
 }
 
+func TestUpsertMessage_UpdatesAttachmentFieldsOnConflict(t *testing.T) {
+	st := newTestStore(t)
+	ctx := context.Background()
+	createTestMailbox(t, st, "user@example.com")
+
+	original := models.MessageMeta{
+		ProviderID: "gm-attach",
+		MailboxID:  "user@example.com",
+		Provider:   "gmail",
+		Subject:    "Original subject",
+		ReceivedAt: time.Date(2024, 1, 1, 12, 0, 0, 0, time.UTC),
+	}
+	if err := st.UpsertMessage(ctx, original); err != nil {
+		t.Fatalf("first UpsertMessage: %v", err)
+	}
+
+	updated := original
+	updated.Subject = "Updated subject should not overwrite existing row"
+	updated.HasAttachment = true
+	updated.AttachmentTypes = []string{"application/pdf"}
+	if err := st.UpsertMessage(ctx, updated); err != nil {
+		t.Fatalf("second UpsertMessage: %v", err)
+	}
+
+	var (
+		subject             string
+		hasAttachment       bool
+		attachmentTypesJSON string
+	)
+	if err := st.db.QueryRowContext(ctx,
+		`SELECT subject, has_attachment, attachment_types FROM messages WHERE provider_id = ? AND mailbox_id = ?`,
+		"gm-attach", "user@example.com",
+	).Scan(&subject, &hasAttachment, &attachmentTypesJSON); err != nil {
+		t.Fatalf("QueryRow: %v", err)
+	}
+	if subject != "Original subject" {
+		t.Fatalf("subject overwritten: got %q", subject)
+	}
+	if !hasAttachment {
+		t.Fatal("has_attachment: got false, want true")
+	}
+	if attachmentTypesJSON != `["application/pdf"]` {
+		t.Fatalf("attachment_types: got %q", attachmentTypesJSON)
+	}
+}
+
 // --- GetCheckpoint / SaveCheckpoint / DeleteCheckpoint ---
 
 func TestGetCheckpoint_NotFound(t *testing.T) {
@@ -1413,6 +1648,36 @@ func TestListMessageMetaByMailbox_ScopedOrdered(t *testing.T) {
 	}
 }
 
+func TestListMessageMetaByMailbox_IncludesAttachmentMetadata(t *testing.T) {
+	st := newTestStore(t)
+	createTestMailbox(t, st, "user@example.com")
+
+	if err := st.UpsertMessage(context.Background(), models.MessageMeta{
+		ProviderID:      "m1",
+		MailboxID:       "user@example.com",
+		Provider:        "gmail",
+		ReceivedAt:      time.Date(2025, 1, 1, 0, 0, 0, 0, time.UTC),
+		HasAttachment:   true,
+		AttachmentTypes: []string{"application/pdf", "image/png"},
+	}); err != nil {
+		t.Fatalf("UpsertMessage: %v", err)
+	}
+
+	messages, err := st.ListMessageMetaByMailbox(context.Background(), "user@example.com")
+	if err != nil {
+		t.Fatalf("ListMessageMetaByMailbox: %v", err)
+	}
+	if len(messages) != 1 {
+		t.Fatalf("expected 1 message, got %d", len(messages))
+	}
+	if !messages[0].HasAttachment {
+		t.Fatal("HasAttachment: got false, want true")
+	}
+	if len(messages[0].AttachmentTypes) != 2 || messages[0].AttachmentTypes[0] != "application/pdf" || messages[0].AttachmentTypes[1] != "image/png" {
+		t.Fatalf("AttachmentTypes: got %v", messages[0].AttachmentTypes)
+	}
+}
+
 func TestListMessageMetaByMailbox_NoMessages(t *testing.T) {
 	st := newTestStore(t)
 	createTestMailbox(t, st, "user@example.com")
@@ -1738,6 +2003,7 @@ func TestSaveAndGetClassification(t *testing.T) {
 		MessageID:    "msg1",
 		MailboxID:    "user@example.com",
 		Category:     "vendor",
+		Intent:       "invoice",
 		MatchedRule:  "domain:x.com",
 		Source:       "seed",
 		ClassifiedAt: now,
@@ -1759,6 +2025,9 @@ func TestSaveAndGetClassification(t *testing.T) {
 	}
 	if got.MatchedRule != "domain:x.com" {
 		t.Errorf("MatchedRule: got %q, want %q", got.MatchedRule, "domain:x.com")
+	}
+	if got.Intent != "invoice" {
+		t.Errorf("Intent: got %q, want %q", got.Intent, "invoice")
 	}
 	if !got.ClassifiedAt.Equal(now) {
 		t.Errorf("ClassifiedAt: got %v, want %v", got.ClassifiedAt, now)
@@ -1838,9 +2107,9 @@ func TestGetClassification_InvalidClassifiedAt(t *testing.T) {
 	seedMessage(t, st, "msg1", "user@example.com", "a@x.com", "", "x.com", "", time.Now())
 
 	if _, err := st.db.ExecContext(ctx,
-		`INSERT INTO message_classifications (message_id, mailbox_id, category, matched_rule, source, classified_at)
-		 VALUES (?, ?, ?, ?, ?, ?)`,
-		"msg1", "user@example.com", "vendor", "domain:x.com", "seed", "not-valid-rfc3339",
+		`INSERT INTO message_classifications (message_id, mailbox_id, category, intent, matched_rule, source, classified_at)
+		 VALUES (?, ?, ?, ?, ?, ?, ?)`,
+		"msg1", "user@example.com", "vendor", "", "domain:x.com", "seed", "not-valid-rfc3339",
 	); err != nil {
 		t.Fatal(err)
 	}
@@ -1866,7 +2135,7 @@ func TestBulkSaveClassifications(t *testing.T) {
 	}
 
 	classifications := []Classification{
-		{MessageID: "m1", MailboxID: "user@example.com", Category: "vendor", Source: "seed", ClassifiedAt: now},
+		{MessageID: "m1", MailboxID: "user@example.com", Category: "vendor", Intent: "invoice", Source: "seed", ClassifiedAt: now},
 		{MessageID: "m2", MailboxID: "user@example.com", Category: "client", Source: "seed", ClassifiedAt: now},
 		{MessageID: "m3", MailboxID: "user@example.com", Category: "social", Source: "seed", ClassifiedAt: now},
 	}
@@ -1885,6 +2154,9 @@ func TestBulkSaveClassifications(t *testing.T) {
 		}
 		if got.Category != c.Category {
 			t.Errorf("%q: Category: got %q, want %q", c.MessageID, got.Category, c.Category)
+		}
+		if got.Intent != c.Intent {
+			t.Errorf("%q: Intent: got %q, want %q", c.MessageID, got.Intent, c.Intent)
 		}
 	}
 }
@@ -1944,7 +2216,7 @@ func TestQueryClassificationsByMailbox(t *testing.T) {
 
 	for _, c := range []Classification{
 		{MessageID: "m1", MailboxID: "user@example.com", Category: "unknown", Source: "seed", ClassifiedAt: now},
-		{MessageID: "m2", MailboxID: "user@example.com", Category: "vendor", Source: "seed", ClassifiedAt: now},
+		{MessageID: "m2", MailboxID: "user@example.com", Category: "vendor", Intent: "invoice", Source: "seed", ClassifiedAt: now},
 		{MessageID: "m3", MailboxID: "user@example.com", Category: "vendor", Source: "seed", ClassifiedAt: now},
 		{MessageID: "m4", MailboxID: "user@example.com", Category: "client", Source: "seed", ClassifiedAt: now},
 		{MessageID: "m5", MailboxID: "user@example.com", Category: "client", Source: "seed", ClassifiedAt: now},
@@ -1959,17 +2231,20 @@ func TestQueryClassificationsByMailbox(t *testing.T) {
 	if err != nil {
 		t.Fatalf("QueryClassificationsByMailbox: %v", err)
 	}
-	if len(counts) != 3 {
-		t.Fatalf("expected 3 category rows, got %d", len(counts))
+	if len(counts) != 4 {
+		t.Fatalf("expected 4 category rows, got %d", len(counts))
 	}
 	if counts[0] != (ClassificationCount{Category: "client", Count: 2}) {
 		t.Fatalf("first row: got %+v", counts[0])
 	}
-	if counts[1] != (ClassificationCount{Category: "vendor", Count: 2}) {
+	if counts[1] != (ClassificationCount{Category: "unknown", Count: 1}) {
 		t.Fatalf("second row: got %+v", counts[1])
 	}
-	if counts[2] != (ClassificationCount{Category: "unknown", Count: 1}) {
+	if counts[2] != (ClassificationCount{Category: "vendor", Count: 1}) {
 		t.Fatalf("third row: got %+v", counts[2])
+	}
+	if counts[3] != (ClassificationCount{Category: "vendor", Intent: "invoice", Count: 1}) {
+		t.Fatalf("fourth row: got %+v", counts[3])
 	}
 }
 

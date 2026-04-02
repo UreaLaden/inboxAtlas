@@ -67,6 +67,8 @@ CREATE TABLE IF NOT EXISTS messages (
     snippet         TEXT,
     received_at     TEXT,
     labels          TEXT,
+    has_attachment  INTEGER NOT NULL DEFAULT 0,
+    attachment_types TEXT NOT NULL DEFAULT '[]',
     UNIQUE (provider_id, mailbox_id)
 );
 
@@ -123,6 +125,7 @@ CREATE TABLE IF NOT EXISTS message_classifications (
     message_id    TEXT NOT NULL REFERENCES messages(id),
     mailbox_id    TEXT NOT NULL REFERENCES mailboxes(id),
     category      TEXT NOT NULL,
+    intent        TEXT NOT NULL DEFAULT '',
     matched_rule  TEXT,
     source        TEXT NOT NULL,
     classified_at TEXT NOT NULL,
@@ -145,8 +148,77 @@ CREATE TABLE IF NOT EXISTS ai_inference_suggestions (
 `
 
 func (s *Store) migrate() error {
-	_, err := s.db.Exec(schema)
-	return err
+	if _, err := s.db.Exec(schema); err != nil {
+		return err
+	}
+	if err := s.migrateAttachmentColumns(); err != nil {
+		return err
+	}
+	return s.migrateClassificationIntentColumn()
+}
+
+func (s *Store) migrateAttachmentColumns() error {
+	columns, err := s.messageColumns()
+	if err != nil {
+		return err
+	}
+	if _, ok := columns["has_attachment"]; !ok {
+		if _, err := s.db.Exec(`ALTER TABLE messages ADD COLUMN has_attachment INTEGER NOT NULL DEFAULT 0`); err != nil {
+			return fmt.Errorf("add messages.has_attachment: %w", err)
+		}
+	}
+	if _, ok := columns["attachment_types"]; !ok {
+		if _, err := s.db.Exec(`ALTER TABLE messages ADD COLUMN attachment_types TEXT NOT NULL DEFAULT '[]'`); err != nil {
+			return fmt.Errorf("add messages.attachment_types: %w", err)
+		}
+	}
+	return nil
+}
+
+func (s *Store) messageColumns() (map[string]struct{}, error) {
+	return s.tableColumns("messages")
+}
+
+func (s *Store) migrateClassificationIntentColumn() error {
+	columns, err := s.tableColumns("message_classifications")
+	if err != nil {
+		return err
+	}
+	if _, ok := columns["intent"]; ok {
+		return nil
+	}
+	if _, err := s.db.Exec(`ALTER TABLE message_classifications ADD COLUMN intent TEXT NOT NULL DEFAULT ''`); err != nil {
+		return fmt.Errorf("add message_classifications.intent: %w", err)
+	}
+	return nil
+}
+
+func (s *Store) tableColumns(table string) (map[string]struct{}, error) {
+	rows, err := s.db.Query(fmt.Sprintf("PRAGMA table_info(%s)", table))
+	if err != nil {
+		return nil, fmt.Errorf("pragma table_info(%s): %w", table, err)
+	}
+	defer func() { _ = rows.Close() }()
+
+	columns := make(map[string]struct{})
+	for rows.Next() {
+		var (
+			cid        int
+			name       string
+			typ        string
+			notNull    int
+			defaultV   sql.NullString
+			primaryKey int
+		)
+		if err := rows.Scan(&cid, &name, &typ, &notNull, &defaultV, &primaryKey); err != nil {
+			return nil, fmt.Errorf("scan table_info(%s): %w", table, err)
+		}
+		columns[name] = struct{}{}
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("iterate table_info(%s): %w", table, err)
+	}
+	return columns, nil
 }
 
 func validateMailboxAlias(alias string) error {
@@ -402,8 +474,9 @@ type VolumeCount struct {
 // ClassificationCount is a single category aggregate row returned by
 // QueryClassificationsByMailbox.
 type ClassificationCount struct {
-	Category string
-	Count    int
+	Category string `json:"category"`
+	Intent   string `json:"intent"`
+	Count    int    `json:"count"`
 }
 
 // ClassificationSeed is a single rule stored in the classification_seeds table.
@@ -424,6 +497,7 @@ type Classification struct {
 	MessageID    string
 	MailboxID    string
 	Category     string
+	Intent       string
 	MatchedRule  string
 	Source       string
 	ClassifiedAt time.Time
@@ -661,7 +735,7 @@ func (s *Store) QuerySubjects(ctx context.Context, mailboxID string) ([]string, 
 // Results are ordered by received_at ASC, then provider_id ASC.
 func (s *Store) ListMessageMetaByMailbox(ctx context.Context, mailboxID string) ([]models.MessageMeta, error) {
 	rows, err := s.db.QueryContext(ctx,
-		`SELECT id, provider, mailbox_id, thread_id, from_email, from_name, domain, subject, snippet, received_at, labels, provider_id
+		`SELECT id, provider, mailbox_id, thread_id, from_email, from_name, domain, subject, snippet, received_at, labels, has_attachment, attachment_types, provider_id
 		 FROM messages
 		 WHERE mailbox_id = ?
 		 ORDER BY received_at ASC, provider_id ASC`,
@@ -683,6 +757,8 @@ func (s *Store) ListMessageMetaByMailbox(ctx context.Context, mailboxID string) 
 		var snippet sql.NullString
 		var receivedAt string
 		var labelsJSON string
+		var hasAttachment bool
+		var attachmentTypesJSON string
 
 		if err := rows.Scan(
 			&msg.ID,
@@ -696,6 +772,8 @@ func (s *Store) ListMessageMetaByMailbox(ctx context.Context, mailboxID string) 
 			&snippet,
 			&receivedAt,
 			&labelsJSON,
+			&hasAttachment,
+			&attachmentTypesJSON,
 			&msg.ProviderID,
 		); err != nil {
 			return nil, fmt.Errorf("scan message meta row: %w", err)
@@ -727,14 +805,19 @@ func (s *Store) ListMessageMetaByMailbox(ctx context.Context, mailboxID string) 
 		if err := json.Unmarshal([]byte(labelsJSON), &msg.Labels); err != nil {
 			return nil, fmt.Errorf("unmarshal message labels: %w", err)
 		}
+		msg.HasAttachment = hasAttachment
+		if err := json.Unmarshal([]byte(attachmentTypesJSON), &msg.AttachmentTypes); err != nil {
+			return nil, fmt.Errorf("unmarshal attachment types: %w", err)
+		}
 
 		out = append(out, msg)
 	}
 	return out, rows.Err()
 }
 
-// UpsertMessage inserts msg into the messages table. Duplicate inserts (same
-// provider_id + mailbox_id) are silently ignored — re-syncing is idempotent.
+// UpsertMessage inserts msg into the messages table. On conflict, only
+// attachment metadata is updated so re-syncing can backfill attachment fields
+// without overwriting existing sender or subject metadata.
 func (s *Store) UpsertMessage(ctx context.Context, msg models.MessageMeta) error {
 	labels := msg.Labels
 	if labels == nil {
@@ -744,10 +827,21 @@ func (s *Store) UpsertMessage(ctx context.Context, msg models.MessageMeta) error
 	if err != nil {
 		return fmt.Errorf("marshal labels: %w", err)
 	}
+	attachmentTypes := msg.AttachmentTypes
+	if attachmentTypes == nil {
+		attachmentTypes = []string{}
+	}
+	attachmentTypesJSON, err := json.Marshal(attachmentTypes)
+	if err != nil {
+		return fmt.Errorf("marshal attachment types: %w", err)
+	}
 	_, err = s.db.ExecContext(ctx,
-		`INSERT OR IGNORE INTO messages
-		 (id, mailbox_id, provider, provider_id, thread_id, from_email, from_name, domain, subject, snippet, received_at, labels)
-		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		`INSERT INTO messages
+		 (id, mailbox_id, provider, provider_id, thread_id, from_email, from_name, domain, subject, snippet, received_at, labels, has_attachment, attachment_types)
+		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+		 ON CONFLICT(provider_id, mailbox_id) DO UPDATE SET
+		 has_attachment = excluded.has_attachment,
+		 attachment_types = excluded.attachment_types`,
 		msg.ProviderID,
 		msg.MailboxID,
 		msg.Provider,
@@ -760,6 +854,8 @@ func (s *Store) UpsertMessage(ctx context.Context, msg models.MessageMeta) error
 		msg.Snippet,
 		msg.ReceivedAt.UTC().Format(time.RFC3339),
 		string(labelsJSON),
+		msg.HasAttachment,
+		string(attachmentTypesJSON),
 	)
 	if err != nil {
 		return fmt.Errorf("upsert message: %w", err)
@@ -1056,11 +1152,12 @@ func (s *Store) DeleteInferenceSuggestion(ctx context.Context, mailboxID, messag
 func (s *Store) SaveClassification(ctx context.Context, c Classification) error {
 	_, err := s.db.ExecContext(ctx,
 		`INSERT OR REPLACE INTO message_classifications
-		 (message_id, mailbox_id, category, matched_rule, source, classified_at)
-		 VALUES (?, ?, ?, ?, ?, ?)`,
+		 (message_id, mailbox_id, category, intent, matched_rule, source, classified_at)
+		 VALUES (?, ?, ?, ?, ?, ?, ?)`,
 		c.MessageID,
 		c.MailboxID,
 		c.Category,
+		c.Intent,
 		c.MatchedRule,
 		c.Source,
 		c.ClassifiedAt.UTC().Format(time.RFC3339),
@@ -1072,14 +1169,14 @@ func (s *Store) SaveClassification(ctx context.Context, c Classification) error 
 }
 
 // QueryClassificationsByMailbox returns mailbox-scoped classification counts by
-// category ordered by count descending, then category ascending.
+// category and intent ordered by count descending, then category and intent ascending.
 func (s *Store) QueryClassificationsByMailbox(ctx context.Context, mailboxID string) ([]ClassificationCount, error) {
 	rows, err := s.db.QueryContext(ctx,
-		`SELECT category, COUNT(*)
+		`SELECT category, intent, COUNT(*)
 		 FROM message_classifications
 		 WHERE mailbox_id = ?
-		 GROUP BY category
-		 ORDER BY COUNT(*) DESC, category ASC`,
+		 GROUP BY category, intent
+		 ORDER BY COUNT(*) DESC, category ASC, intent ASC`,
 		mailboxID,
 	)
 	if err != nil {
@@ -1090,7 +1187,7 @@ func (s *Store) QueryClassificationsByMailbox(ctx context.Context, mailboxID str
 	var out []ClassificationCount
 	for rows.Next() {
 		var count ClassificationCount
-		if err := rows.Scan(&count.Category, &count.Count); err != nil {
+		if err := rows.Scan(&count.Category, &count.Intent, &count.Count); err != nil {
 			return nil, fmt.Errorf("scan classification count row: %w", err)
 		}
 		out = append(out, count)
@@ -1108,8 +1205,8 @@ func (s *Store) BulkSaveClassifications(ctx context.Context, classifications []C
 
 	stmt, err := tx.PrepareContext(ctx,
 		`INSERT OR REPLACE INTO message_classifications
-		 (message_id, mailbox_id, category, matched_rule, source, classified_at)
-		 VALUES (?, ?, ?, ?, ?, ?)`,
+		 (message_id, mailbox_id, category, intent, matched_rule, source, classified_at)
+		 VALUES (?, ?, ?, ?, ?, ?, ?)`,
 	)
 	if err != nil {
 		return fmt.Errorf("prepare bulk save: %w", err)
@@ -1121,6 +1218,7 @@ func (s *Store) BulkSaveClassifications(ctx context.Context, classifications []C
 			c.MessageID,
 			c.MailboxID,
 			c.Category,
+			c.Intent,
 			c.MatchedRule,
 			c.Source,
 			c.ClassifiedAt.UTC().Format(time.RFC3339),
@@ -1138,7 +1236,7 @@ func (s *Store) BulkSaveClassifications(ctx context.Context, classifications []C
 // Returns (nil, nil) when no classification exists.
 func (s *Store) GetClassification(ctx context.Context, messageID, mailboxID string) (*Classification, error) {
 	row := s.db.QueryRowContext(ctx,
-		`SELECT message_id, mailbox_id, category, matched_rule, source, classified_at
+		`SELECT message_id, mailbox_id, category, intent, matched_rule, source, classified_at
 		 FROM message_classifications
 		 WHERE message_id = ? AND mailbox_id = ?`,
 		messageID, mailboxID,
@@ -1218,7 +1316,7 @@ func scanClassification(s scanner) (*Classification, error) {
 	var classifiedAt string
 
 	err := s.Scan(
-		&c.MessageID, &c.MailboxID, &c.Category, &c.MatchedRule, &c.Source, &classifiedAt,
+		&c.MessageID, &c.MailboxID, &c.Category, &c.Intent, &c.MatchedRule, &c.Source, &classifiedAt,
 	)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, nil

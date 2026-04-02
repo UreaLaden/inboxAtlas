@@ -234,6 +234,37 @@ func TestSeedRuleClassifier_SubjectTermDoesNotMatchSubstring(t *testing.T) {
 	}
 }
 
+func TestSeedRuleClassifier_HasAttachmentMatch(t *testing.T) {
+	seeds := []ClassificationSeed{
+		{ID: 1, PatternType: PatternHasAttachment, PatternValue: "true", Category: CategoryVendor, Source: SourceSeed, Priority: 100},
+	}
+	c := NewSeedRuleClassifier(seeds)
+	result, err := c.Classify(context.Background(), models.MessageMeta{HasAttachment: true})
+	if err != nil {
+		t.Fatalf("Classify: %v", err)
+	}
+	if result.Category != CategoryVendor {
+		t.Fatalf("Category: got %q, want %q", result.Category, CategoryVendor)
+	}
+}
+
+func TestIntentRuleClassifier_SubjectTermMatch(t *testing.T) {
+	seeds := []ClassificationSeed{
+		{ID: 1, PatternType: PatternSubjectTerm, PatternValue: "invoice", Category: IntentInvoice, Source: SourceSeed, Priority: 100},
+	}
+	c := NewIntentRuleClassifier(seeds)
+	result, err := c.Classify(context.Background(), makeMsg("user@example.com", "example.com", "Invoice #12345 due"))
+	if err != nil {
+		t.Fatalf("Classify: %v", err)
+	}
+	if result.Intent != IntentInvoice {
+		t.Fatalf("Intent: got %q, want %q", result.Intent, IntentInvoice)
+	}
+	if result.Category != CategoryUnknown {
+		t.Fatalf("Category: got %q, want %q", result.Category, CategoryUnknown)
+	}
+}
+
 func TestChainClassifier_FirstNonUnknown(t *testing.T) {
 	// First classifier returns unknown; second returns client
 	firstClassifier := NewSeedRuleClassifier([]ClassificationSeed{
@@ -523,7 +554,7 @@ func TestDefaultSeeds_Integrity(t *testing.T) {
 	}
 	validPatternTypes := map[string]bool{
 		PatternDomain: true, PatternSenderEmail: true,
-		PatternSenderPrefix: true, PatternSubjectTerm: true,
+		PatternSenderPrefix: true, PatternHasAttachment: true, PatternSubjectTerm: true,
 	}
 
 	for i, s := range seeds {
@@ -541,9 +572,6 @@ func TestDefaultSeeds_Integrity(t *testing.T) {
 		}
 		if !validPatternTypes[s.PatternType] {
 			t.Errorf("seed[%d]: unknown PatternType %q", i, s.PatternType)
-		}
-		if s.PatternType == PatternSubjectTerm {
-			t.Errorf("seed[%d]: DefaultSeeds() must not contain subject_term seeds", i)
 		}
 		if s.Source != SourceSeed {
 			t.Errorf("seed[%d]: Source: got %q, want %q", i, s.Source, SourceSeed)
@@ -623,6 +651,18 @@ func TestDefaultSeeds_DoNotClassifyFormerTenantSpecificDomain(t *testing.T) {
 	}
 	if result.Category != CategoryUnknown {
 		t.Fatalf("healthymd.com should not be classified by baseline defaults; got %q", result.Category)
+	}
+}
+
+func TestDefaultIntents_InvoiceSubjectTerm(t *testing.T) {
+	seeds := DefaultIntents()
+	c := NewIntentRuleClassifier(seeds)
+	result, err := c.Classify(context.Background(), makeMsg("billing@vendor.example", "vendor.example", "Invoice #2041"))
+	if err != nil {
+		t.Fatalf("Classify: %v", err)
+	}
+	if result.Intent != IntentInvoice {
+		t.Fatalf("Intent: got %q, want %q", result.Intent, IntentInvoice)
 	}
 }
 
@@ -992,8 +1032,8 @@ func TestRunMailboxClassification_RejectsMissingProviderID(t *testing.T) {
 }
 
 func TestSpecificityRank_UnknownTypeFallsBackLast(t *testing.T) {
-	if got := specificityRank("mystery"); got != 5 {
-		t.Fatalf("specificityRank: got %d, want 5", got)
+	if got := specificityRank("mystery"); got != 6 {
+		t.Fatalf("specificityRank: got %d, want 6", got)
 	}
 }
 
@@ -1005,7 +1045,8 @@ func TestSpecificityRank_KnownTypes(t *testing.T) {
 		{PatternSenderEmail, 1},
 		{PatternSenderPrefix, 2},
 		{PatternDomain, 3},
-		{PatternSubjectTerm, 4},
+		{PatternHasAttachment, 4},
+		{PatternSubjectTerm, 5},
 	}
 
 	for _, tt := range tests {

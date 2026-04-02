@@ -23,19 +23,21 @@ type Mailbox struct {
 // ProviderID is the provider's native message identifier (e.g. Gmail message ID).
 // Labels preserves provider label IDs verbatim; canonical mapping is deferred to Epic 6.
 type MessageMeta struct {
-	ID         string
-	Provider   string
-	Mailbox    string // alias or display label (for human output)
-	MailboxID  string // canonical lowercased email address (FK to mailboxes.id)
-	ThreadID   string
-	FromEmail  string
-	FromName   string
-	Domain     string
-	Subject    string
-	Snippet    string
-	ReceivedAt time.Time
-	Labels     []string
-	ProviderID string // provider's native message ID (e.g. Gmail message ID)
+	ID              string
+	Provider        string
+	Mailbox         string // alias or display label (for human output)
+	MailboxID       string // canonical lowercased email address (FK to mailboxes.id)
+	ThreadID        string
+	FromEmail       string
+	FromName        string
+	Domain          string
+	Subject         string
+	Snippet         string
+	ReceivedAt      time.Time
+	Labels          []string
+	HasAttachment   bool     // true when the provider detected any attachment-bearing MIME part
+	AttachmentTypes []string // deduplicated MIME types for detected attachments
+	ProviderID      string   // provider's native message ID (e.g. Gmail message ID)
 }
 
 // MailProvider is the abstraction all mailbox integrations must satisfy.

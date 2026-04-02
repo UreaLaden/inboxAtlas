@@ -42,6 +42,16 @@ const (
 	CategoryUnknown = "unknown"
 )
 
+// Intent constants define the supported secondary message intent namespace.
+const (
+	// IntentInvoice marks invoice and billing-intent messages.
+	IntentInvoice = "invoice"
+	// IntentRequestForInformation marks information-request intent.
+	IntentRequestForInformation = "request-for-information"
+	// IntentUnknown is the empty intent value.
+	IntentUnknown = ""
+)
+
 // Pattern type constants define how a ClassificationSeed's PatternValue is matched.
 const (
 	// PatternDomain matches when msg.Domain equals the seed value (case-insensitive).
@@ -50,6 +60,8 @@ const (
 	PatternSenderEmail = "sender_email"
 	// PatternSenderPrefix matches when the local part of msg.FromEmail has the seed value as prefix.
 	PatternSenderPrefix = "sender_prefix"
+	// PatternHasAttachment matches when msg.HasAttachment equals the string-encoded boolean pattern value.
+	PatternHasAttachment = "has_attachment"
 	// PatternSubjectTerm matches when the lowercased tokenized subject contains the seed value.
 	PatternSubjectTerm = "subject_term"
 )
@@ -69,6 +81,8 @@ const (
 type ClassificationResult struct {
 	// Category is the assigned taxonomy category. "unknown" when no rule matches.
 	Category string
+	// Intent is the assigned secondary intent. Empty string means no intent matched.
+	Intent string
 	// MatchedRule is a human-readable description of the rule that produced this result
 	// (§4.5 explainability). Non-empty on every non-unknown result.
 	// Format: "<pattern_type>:<pattern_value>".
@@ -248,10 +262,12 @@ func specificityRank(patternType string) int {
 		return 2
 	case PatternDomain:
 		return 3
-	case PatternSubjectTerm:
+	case PatternHasAttachment:
 		return 4
-	default:
+	case PatternSubjectTerm:
 		return 5
+	default:
+		return 6
 	}
 }
 
@@ -269,9 +285,25 @@ type SeedRuleClassifier struct {
 	seeds []ClassificationSeed
 }
 
+// IntentRuleClassifier implements a second-pass classifier that uses the same
+// seed matching semantics as SeedRuleClassifier but assigns Intent instead of Category.
+type IntentRuleClassifier struct {
+	seeds []ClassificationSeed
+}
+
 // NewSeedRuleClassifier creates a SeedRuleClassifier with seeds sorted by
 // (Priority ASC, specificityRank(PatternType) ASC, ID ASC).
 func NewSeedRuleClassifier(seeds []ClassificationSeed) *SeedRuleClassifier {
+	return &SeedRuleClassifier{seeds: sortedSeeds(seeds)}
+}
+
+// NewIntentRuleClassifier creates an IntentRuleClassifier with seeds sorted by
+// (Priority ASC, specificityRank(PatternType) ASC, ID ASC).
+func NewIntentRuleClassifier(seeds []ClassificationSeed) *IntentRuleClassifier {
+	return &IntentRuleClassifier{seeds: sortedSeeds(seeds)}
+}
+
+func sortedSeeds(seeds []ClassificationSeed) []ClassificationSeed {
 	sorted := make([]ClassificationSeed, len(seeds))
 	copy(sorted, seeds)
 	sort.Slice(sorted, func(i, j int) bool {
@@ -285,14 +317,14 @@ func NewSeedRuleClassifier(seeds []ClassificationSeed) *SeedRuleClassifier {
 		}
 		return a.ID < b.ID
 	})
-	return &SeedRuleClassifier{seeds: sorted}
+	return sorted
 }
 
 // Classify evaluates msg against the sorted seed list and returns the first match.
 // Returns CategoryUnknown when no seed matches.
 func (c *SeedRuleClassifier) Classify(_ context.Context, msg models.MessageMeta) (ClassificationResult, error) {
 	for _, seed := range c.seeds {
-		if c.matches(seed, msg) {
+		if matchesSeed(seed, msg) {
 			return ClassificationResult{
 				Category:    seed.Category,
 				MatchedRule: seed.PatternType + ":" + seed.PatternValue,
@@ -307,8 +339,29 @@ func (c *SeedRuleClassifier) Classify(_ context.Context, msg models.MessageMeta)
 	}, nil
 }
 
-// matches returns true when msg satisfies seed's pattern.
-func (c *SeedRuleClassifier) matches(seed ClassificationSeed, msg models.MessageMeta) bool {
+// Classify evaluates msg against the sorted intent seed list and returns the
+// first intent match. Empty intent means no intent matched.
+func (c *IntentRuleClassifier) Classify(_ context.Context, msg models.MessageMeta) (ClassificationResult, error) {
+	for _, seed := range c.seeds {
+		if matchesSeed(seed, msg) {
+			return ClassificationResult{
+				Category:    CategoryUnknown,
+				Intent:      seed.Category,
+				MatchedRule: seed.PatternType + ":" + seed.PatternValue,
+				Source:      seed.Source,
+			}, nil
+		}
+	}
+	return ClassificationResult{
+		Category:    CategoryUnknown,
+		Intent:      IntentUnknown,
+		MatchedRule: "no matching rule",
+		Source:      SourceSeed,
+	}, nil
+}
+
+// matchesSeed returns true when msg satisfies seed's pattern.
+func matchesSeed(seed ClassificationSeed, msg models.MessageMeta) bool {
 	switch seed.PatternType {
 	case PatternDomain:
 		return strings.EqualFold(msg.Domain, seed.PatternValue)
@@ -316,6 +369,8 @@ func (c *SeedRuleClassifier) matches(seed ClassificationSeed, msg models.Message
 		return strings.EqualFold(msg.FromEmail, seed.PatternValue)
 	case PatternSenderPrefix:
 		return strings.HasPrefix(localPart(msg.FromEmail), strings.ToLower(seed.PatternValue))
+	case PatternHasAttachment:
+		return msg.HasAttachment == strings.EqualFold(seed.PatternValue, "true")
 	case PatternSubjectTerm:
 		return subjectHasTerm(msg.Subject, seed.PatternValue)
 	default:
@@ -440,9 +495,9 @@ func RunMailboxClassification(ctx context.Context, st *storage.Store, mailboxID 
 		return fmt.Errorf("list seeds: %w", err)
 	}
 
-	seeds := make([]ClassificationSeed, len(storedSeeds))
-	for i, seed := range storedSeeds {
-		seeds[i] = ClassificationSeed{
+	categorySeeds := make([]ClassificationSeed, 0, len(storedSeeds))
+	for _, seed := range storedSeeds {
+		converted := ClassificationSeed{
 			ID:           seed.ID,
 			MailboxID:    seed.MailboxID,
 			PatternType:  seed.PatternType,
@@ -452,9 +507,13 @@ func RunMailboxClassification(ctx context.Context, st *storage.Store, mailboxID 
 			Priority:     seed.Priority,
 			CreatedAt:    seed.CreatedAt,
 		}
+		if isKnownCategory(converted.Category) {
+			categorySeeds = append(categorySeeds, converted)
+		}
 	}
 
-	classifier := NewSeedRuleClassifier(seeds)
+	classifier := NewSeedRuleClassifier(categorySeeds)
+	intentClassifier := NewIntentRuleClassifier(DefaultIntents())
 	classifications := make([]storage.Classification, 0, len(messages))
 	classifiedAt := time.Now().UTC()
 
@@ -470,11 +529,16 @@ func RunMailboxClassification(ctx context.Context, st *storage.Store, mailboxID 
 		if err != nil {
 			return fmt.Errorf("classify message %q: %w", msg.ProviderID, err)
 		}
+		intentResult, err := intentClassifier.Classify(ctx, msg)
+		if err != nil {
+			return fmt.Errorf("classify intent for message %q: %w", msg.ProviderID, err)
+		}
 
 		classifications = append(classifications, storage.Classification{
 			MessageID:    msg.ProviderID,
 			MailboxID:    mailboxID,
 			Category:     result.Category,
+			Intent:       intentResult.Intent,
 			MatchedRule:  result.MatchedRule,
 			Source:       result.Source,
 			ClassifiedAt: classifiedAt,
@@ -489,9 +553,7 @@ func RunMailboxClassification(ctx context.Context, st *storage.Store, mailboxID 
 
 // DefaultSeeds returns the inbox-agnostic built-in baseline classification
 // seeds. These defaults are safe to apply globally for any mailbox and exclude
-// tenant-specific sender or domain relationships. Only domain, sender_email,
-// and sender_prefix patterns are included; subject_term seeds are excluded due
-// to ambiguity.
+// tenant-specific sender or domain relationships.
 func DefaultSeeds() []ClassificationSeed {
 	return []ClassificationSeed{
 		// High-specificity baseline sender_email seeds (priority 50)
@@ -513,6 +575,16 @@ func DefaultSeeds() []ClassificationSeed {
 		{PatternType: PatternSenderPrefix, PatternValue: "noreply", Category: CategorySystemGenerated, Source: SourceSeed, Priority: 150},
 		{PatternType: PatternSenderPrefix, PatternValue: "no-reply", Category: CategorySystemGenerated, Source: SourceSeed, Priority: 150},
 		{PatternType: PatternSenderPrefix, PatternValue: "donotreply", Category: CategorySystemGenerated, Source: SourceSeed, Priority: 150},
+	}
+}
+
+// DefaultIntents returns the inbox-agnostic baseline intent rules. These are
+// evaluated independently from relationship category rules and do not change
+// the primary category assignment.
+func DefaultIntents() []ClassificationSeed {
+	return []ClassificationSeed{
+		{PatternType: PatternSubjectTerm, PatternValue: "invoice", Category: IntentInvoice, Source: SourceSeed, Priority: 50},
+		{PatternType: PatternSubjectTerm, PatternValue: "inv#", Category: IntentInvoice, Source: SourceSeed, Priority: 50},
 	}
 }
 

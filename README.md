@@ -353,13 +353,14 @@ inboxatlas classify seeds list --account <id|alias> [--format table|json]
 # Delete one active mailbox-scoped seed
 inboxatlas classify seeds delete --account <id|alias> --id <seed-id>
 
-# List valid categories and pattern types
+# List valid categories, intents, and pattern types
 inboxatlas classify categories
+inboxatlas classify intents
 inboxatlas classify pattern-types
 
 # Promote one reviewed suggestion into the active mailbox-scoped seed set
 inboxatlas classify promote --account <id|alias> \
-  --pattern-type <domain|sender_email|sender_prefix|subject_term> \
+  --pattern-type <domain|sender_email|sender_prefix|has_attachment|subject_term> \
   --pattern-value <value> \
   --category <category> \
   [--priority 100]
@@ -374,7 +375,8 @@ inboxatlas classify promote --account <id|alias> \
 | `classify infer suggestions` | Lists persisted AI inference suggestions, including promotable pattern information and confidence metadata |
 | `classify seeds list` | Lists active mailbox-scoped seeds and excludes global defaults from the mailbox operator view |
 | `classify seeds delete` | Deletes one active mailbox-scoped seed by ID and refuses to delete global defaults |
-| `classify categories` | Prints the valid deterministic classification taxonomy values |
+| `classify categories` | Prints the valid deterministic relationship-category values |
+| `classify intents` | Prints the valid deterministic intent values |
 | `classify pattern-types` | Prints the valid deterministic seed pattern types |
 | `classify promote` | Validates one suggestion for the target mailbox and persists it as an active mailbox-scoped operator seed |
 
@@ -386,6 +388,8 @@ Notes:
 - `classify suggestions` is read-only and does not activate any seed.
 - `classify infer` requires `--provider-command` or `INBOXATLAS_INFERENCE_PROVIDER_CMD`; it only submits messages that remain `unknown` after deterministic classification.
 - `classify infer suggestions` is read-only and lists staged AI candidates rather than active seeds.
+- `classify categories` lists only relationship categories; `classify intents` lists additive intent values; `classify pattern-types` includes `has_attachment`.
+- `classify results` and `classify run` now show an `INTENT` column whenever any mailbox classification rows carry a non-empty intent.
 - The first-party inference provider binary added in this repo is `cmd/ai-inference-provider`.
 - Set `OPENAI_API_KEY` before running the first-party inference provider. Optional overrides are `OPENAI_INFERENCE_MODEL`, `OPENAI_MODEL`, `OPENAI_BASE_URL`, `OPENAI_TIMEOUT_SECONDS`, and `OPENAI_DEBUG`.
 - `classify seeds list` and `classify seeds delete` operate only on mailbox-scoped active seeds; global defaults remain protected.
