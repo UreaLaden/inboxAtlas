@@ -2286,7 +2286,10 @@ func TestRunClassifyLabelAnalysis_Table(t *testing.T) {
 		t.Fatalf("runClassifyLabelAnalysis: %v", err)
 	}
 	output := buf.String()
-	if !strings.Contains(output, "LABEL") || !strings.Contains(output, "MESSAGES") || !strings.Contains(output, "INBOX") {
+	if !strings.Contains(output, "LABEL ID") || !strings.Contains(output, "NAME") || !strings.Contains(output, "MESSAGES") {
+		t.Fatalf("unexpected table header: %q", output)
+	}
+	if !strings.Contains(output, "CATEGORY_PROMOTIONS") || !strings.Contains(output, "Promotions") || !strings.Contains(output, "INBOX") || !strings.Contains(output, "Inbox") {
 		t.Fatalf("unexpected table output: %q", output)
 	}
 }
@@ -2340,6 +2343,64 @@ func TestRunClassifyLabelAnalysis_Empty(t *testing.T) {
 	}
 	if !strings.Contains(buf.String(), "No label stats found for user@example.com.") {
 		t.Fatalf("unexpected empty output: %q", buf.String())
+	}
+}
+
+func TestGmailLabelName(t *testing.T) {
+	tests := []struct {
+		id   string
+		want string
+	}{
+		{id: "CATEGORY_PROMOTIONS", want: "Promotions"},
+		{id: "INBOX", want: "Inbox"},
+		{id: "SENT", want: "Sent"},
+		{id: "TRASH", want: "Trash"},
+		{id: "SPAM", want: "Spam"},
+		{id: "STARRED", want: "Starred"},
+		{id: "YELLOW_STAR", want: "Yellow star"},
+		{id: "BLUE_STAR", want: "Blue star"},
+		{id: "RED_STAR", want: "Red star"},
+		{id: "ORANGE_STAR", want: "Orange star"},
+		{id: "GREEN_STAR", want: "Green star"},
+		{id: "PURPLE_STAR", want: "Purple star"},
+		{id: "IMPORTANT", want: "Important"},
+		{id: "YELLOW_BANG", want: "Yellow bang"},
+		{id: "RED_BANG", want: "Red bang"},
+		{id: "ORANGE_BANG", want: "Orange bang"},
+		{id: "GREEN_BANG", want: "Green bang"},
+		{id: "BLUE_INFO", want: "Blue info"},
+		{id: "PURPLE_QUESTION", want: "Purple question"},
+		{id: "UNREAD", want: "Unread"},
+		{id: "DRAFT", want: "Drafts"},
+		{id: "ALL_MAIL", want: "All mail"},
+		{id: "CHAT", want: "Chat"},
+		{id: "CATEGORY_SOCIAL", want: "Social"},
+		{id: "CATEGORY_UPDATES", want: "Updates"},
+		{id: "CATEGORY_FORUMS", want: "Forums"},
+		{id: "CATEGORY_PERSONAL", want: "Personal"},
+		{id: "Label_12345", want: "Label_12345"},
+		{id: "", want: ""},
+	}
+
+	for _, tt := range tests {
+		if got := gmailLabelName(tt.id); got != tt.want {
+			t.Fatalf("gmailLabelName(%q): got %q, want %q", tt.id, got, tt.want)
+		}
+	}
+}
+
+func TestRunClassifyLabelAnalysis_InvalidFormat(t *testing.T) {
+	err := runClassifyLabelAnalysis(context.Background(), io.Discard, config.Default(), "user@example.com", "csv", 1)
+	if err == nil || !strings.Contains(err.Error(), "table, json") {
+		t.Fatalf("expected format validation error, got %v", err)
+	}
+}
+
+func TestBuildClassifyLabelAnalysisCmd_RequiresAccount(t *testing.T) {
+	cmd := buildClassifyLabelAnalysisCmd(config.Default())
+	cmd.SetArgs(nil)
+	if err := cmd.Execute(); err == nil {
+		t.Fatal("expected missing account flag error")
 	}
 }
 

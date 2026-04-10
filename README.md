@@ -376,7 +376,7 @@ inboxatlas classify promote --account <id|alias> \
 |---|---|
 | `classify run` | Loads synced message metadata for one mailbox, persists mailbox-scoped classifications, and prints a per-category breakdown with unknown percentage |
 | `classify messages` | Lists per-message classification rows with optional category, intent, and since filters, plus message IDs, attachment presence, and table/csv/json output |
-| `classify label-analysis` | Shows mailbox-scoped Gmail label frequency so operators can author manual `pattern-type=label` seeds from observed labels |
+| `classify label-analysis` | Shows mailbox-scoped Gmail label frequency so operators can author manual `pattern-type=label` seeds from observed labels; known Gmail system labels render with friendly names in table output |
 | `classify results` | Shows mailbox-scoped classification totals, per-category counts, and unknown percentage |
 | `classify suggestions` | Shows read-only mailbox bootstrap suggestions derived from observed mailbox discovery data, excluding patterns already covered by global defaults |
 | `classify infer` | Runs AI-assisted inference only for messages still classified as `unknown` and stages valid medium/high-confidence suggestions for review |
@@ -400,6 +400,7 @@ Notes:
 - `classify infer suggestions` is read-only and lists staged AI candidates rather than active seeds.
 - `classify categories` lists only relationship categories; `classify intents` lists additive intent values; `classify pattern-types` includes `label` and `has_attachment`.
 - `classify label-analysis` is read-only and intended for manual workflow tuning rather than automatic suggestion generation.
+- `classify label-analysis` table output shows both raw Gmail label IDs and a friendly name for known system labels; user-created `Label_...` values remain raw because no label catalog is synced yet.
 - `classify results` and `classify run` now show an `INTENT` column whenever any mailbox classification rows carry a non-empty intent.
 - The first-party inference provider binary added in this repo is `cmd/ai-inference-provider`.
 - Set `OPENAI_API_KEY` before running the first-party inference provider. Optional overrides are `OPENAI_INFERENCE_MODEL`, `OPENAI_MODEL`, `OPENAI_BASE_URL`, `OPENAI_TIMEOUT_SECONDS`, and `OPENAI_DEBUG`.

@@ -151,7 +151,9 @@ inboxatlas classify messages --account your@email.com --intent invoice --since 2
 
 **6. Review Gmail labels before promoting a manual label seed.**
 Use `classify label-analysis` to see which raw Gmail labels occur often enough to
-justify a mailbox-scoped `pattern-type=label` rule.
+justify a mailbox-scoped `pattern-type=label` rule. The table shows both the raw
+label ID and a friendly name for known Gmail system labels; user-created
+`Label_...` values remain unchanged.
 
 ```bash
 inboxatlas classify label-analysis --account your@email.com --min-count 5

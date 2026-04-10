@@ -847,6 +847,67 @@ func validateClassifyMessagesFormat(f string) (string, error) {
 	}
 }
 
+func gmailLabelName(id string) string {
+	switch id {
+	case "INBOX":
+		return "Inbox"
+	case "SENT":
+		return "Sent"
+	case "TRASH":
+		return "Trash"
+	case "SPAM":
+		return "Spam"
+	case "STARRED":
+		return "Starred"
+	case "YELLOW_STAR":
+		return "Yellow star"
+	case "BLUE_STAR":
+		return "Blue star"
+	case "RED_STAR":
+		return "Red star"
+	case "ORANGE_STAR":
+		return "Orange star"
+	case "GREEN_STAR":
+		return "Green star"
+	case "PURPLE_STAR":
+		return "Purple star"
+	case "IMPORTANT":
+		return "Important"
+	case "YELLOW_BANG":
+		return "Yellow bang"
+	case "RED_BANG":
+		return "Red bang"
+	case "ORANGE_BANG":
+		return "Orange bang"
+	case "GREEN_BANG":
+		return "Green bang"
+	case "BLUE_INFO":
+		return "Blue info"
+	case "PURPLE_QUESTION":
+		return "Purple question"
+	case "UNREAD":
+		return "Unread"
+	case "DRAFT":
+		return "Drafts"
+	case "ALL_MAIL":
+		return "All mail"
+	case "CHAT":
+		return "Chat"
+	case "CATEGORY_PROMOTIONS":
+		return "Promotions"
+	case "CATEGORY_SOCIAL":
+		return "Social"
+	case "CATEGORY_UPDATES":
+		return "Updates"
+	case "CATEGORY_FORUMS":
+		return "Forums"
+	case "CATEGORY_PERSONAL":
+		return "Personal"
+	default:
+		return id
+	}
+}
+
 // runClassifyRun executes mailbox-scoped classification for one mailbox.
 func runClassifyRun(ctx context.Context, w io.Writer, cfg config.Config, account string) error {
 	result, err := runClassify(ctx, cfg, account)
@@ -1031,9 +1092,9 @@ func runClassifyLabelAnalysis(ctx context.Context, w io.Writer, cfg config.Confi
 	}
 
 	tw := tabwriter.NewWriter(w, 0, 0, 3, ' ', 0)
-	_, _ = fmt.Fprintln(tw, "LABEL\tMESSAGES")
+	_, _ = fmt.Fprintln(tw, "LABEL ID\tNAME\tMESSAGES")
 	for _, row := range result.Labels {
-		_, _ = fmt.Fprintf(tw, "%s\t%d\n", row.Label, row.MessageCount)
+		_, _ = fmt.Fprintf(tw, "%s\t%s\t%d\n", row.Label, gmailLabelName(row.Label), row.MessageCount)
 	}
 	return tw.Flush()
 }
