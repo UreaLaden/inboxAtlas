@@ -495,6 +495,15 @@ type LabelCount struct {
 	MessageCount int
 }
 
+// LabelDomainCount is a single Gmail label and domain aggregate row returned
+// by QueryLabelDomainStatsByMailbox.
+type LabelDomainCount struct {
+	Label        string
+	DisplayName  string
+	Domain       string
+	MessageCount int
+}
+
 // LabelCatalogEntry is one persisted Gmail label catalog row for a mailbox.
 type LabelCatalogEntry struct {
 	LabelID     string
@@ -788,6 +797,54 @@ func (s *Store) QueryLabelStatsByMailbox(ctx context.Context, mailboxID string, 
 			return nil, fmt.Errorf("scan label stats row: %w", err)
 		}
 		out = append(out, lc)
+	}
+	return out, rows.Err()
+}
+
+// QueryLabelDomainStatsByMailbox returns persisted Gmail label and domain
+// aggregate rows for one mailbox from the messages.labels JSON column,
+// filtered by minCount, ranked within each label, and limited to topN domains
+// per label.
+func (s *Store) QueryLabelDomainStatsByMailbox(ctx context.Context, mailboxID string, minCount, topN int) ([]LabelDomainCount, error) {
+	rows, err := s.db.QueryContext(ctx,
+		`WITH label_domain_counts AS (
+			SELECT je.value AS label,
+			       COALESCE(lc.display_name, '') AS display_name,
+			       m.domain AS domain,
+			       COUNT(*) AS message_count
+			FROM messages m
+			JOIN json_each(m.labels) je
+			LEFT JOIN label_catalog lc ON lc.mailbox_id = m.mailbox_id AND lc.label_id = je.value
+			WHERE m.mailbox_id = ? AND m.domain != ''
+			GROUP BY je.value, COALESCE(lc.display_name, ''), m.domain
+			HAVING COUNT(*) >= ?
+		),
+		ranked AS (
+			SELECT label,
+			       display_name,
+			       domain,
+			       message_count,
+			       ROW_NUMBER() OVER (PARTITION BY label ORDER BY message_count DESC, domain ASC) AS row_num
+			FROM label_domain_counts
+		)
+		SELECT label, display_name, domain, message_count
+		FROM ranked
+		WHERE row_num <= ?
+		ORDER BY label ASC, message_count DESC, domain ASC`,
+		mailboxID, minCount, topN,
+	)
+	if err != nil {
+		return nil, fmt.Errorf("query label domain stats by mailbox: %w", err)
+	}
+	defer func() { _ = rows.Close() }()
+
+	var out []LabelDomainCount
+	for rows.Next() {
+		var row LabelDomainCount
+		if err := rows.Scan(&row.Label, &row.DisplayName, &row.Domain, &row.MessageCount); err != nil {
+			return nil, fmt.Errorf("scan label domain stats row: %w", err)
+		}
+		out = append(out, row)
 	}
 	return out, rows.Err()
 }

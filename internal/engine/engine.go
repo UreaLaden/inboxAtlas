@@ -88,6 +88,28 @@ type LabelStatsSummary struct {
 	Labels    []storage.LabelCount `json:"labels"`
 }
 
+// LabelDomainEntry is one domain aggregate nested under a Gmail label in
+// label-analysis output.
+type LabelDomainEntry struct {
+	Domain       string `json:"domain"`
+	MessageCount int    `json:"message_count"`
+}
+
+// LabelDomainRow is one Gmail label with nested top-domain aggregates for
+// operator review.
+type LabelDomainRow struct {
+	Label   string             `json:"label"`
+	Name    string             `json:"name"`
+	Domains []LabelDomainEntry `json:"domains"`
+}
+
+// LabelDomainSummary describes mailbox-scoped Gmail labels expanded into top
+// domains for manual review.
+type LabelDomainSummary struct {
+	MailboxID string           `json:"mailbox_id"`
+	Labels    []LabelDomainRow `json:"labels"`
+}
+
 // ClassifiedMessagesFilter constrains ListClassifiedMessages results.
 type ClassifiedMessagesFilter struct {
 	Category string     `json:"category,omitempty"`
@@ -363,6 +385,44 @@ func ListLabelStats(ctx context.Context, cfg config.Config, account string, minC
 	}
 
 	return LabelStatsSummary{
+		MailboxID: mb.ID,
+		Labels:    labels,
+	}, nil
+}
+
+// ListLabelDomainStats returns mailbox-scoped Gmail label rows expanded into
+// top domains to guide manual seed authoring.
+func ListLabelDomainStats(ctx context.Context, cfg config.Config, account string, minCount, topN int) (LabelDomainSummary, error) {
+	st, mb, err := openResolvedStore(ctx, cfg, account)
+	if err != nil {
+		return LabelDomainSummary{}, err
+	}
+	defer func() { _ = st.Close() }()
+
+	rows, err := st.QueryLabelDomainStatsByMailbox(ctx, mb.ID, minCount, topN)
+	if err != nil {
+		return LabelDomainSummary{}, fmt.Errorf("query label domain stats: %w", err)
+	}
+
+	labels := make([]LabelDomainRow, 0)
+	indexByLabel := make(map[string]int, len(rows))
+	for _, row := range rows {
+		idx, ok := indexByLabel[row.Label]
+		if !ok {
+			idx = len(labels)
+			indexByLabel[row.Label] = idx
+			labels = append(labels, LabelDomainRow{
+				Label: row.Label,
+				Name:  row.DisplayName,
+			})
+		}
+		labels[idx].Domains = append(labels[idx].Domains, LabelDomainEntry{
+			Domain:       row.Domain,
+			MessageCount: row.MessageCount,
+		})
+	}
+
+	return LabelDomainSummary{
 		MailboxID: mb.ID,
 		Labels:    labels,
 	}, nil

@@ -1469,6 +1469,80 @@ func TestQueryLabelStatsByMailbox_Empty(t *testing.T) {
 	}
 }
 
+func TestQueryLabelDomainStatsByMailbox(t *testing.T) {
+	st := newTestStore(t)
+	ctx := context.Background()
+	createTestMailbox(t, st, "user@example.com")
+	createTestMailbox(t, st, "other@example.com")
+
+	now := time.Date(2026, 4, 10, 9, 0, 0, 0, time.UTC)
+	for _, msg := range []models.MessageMeta{
+		{ProviderID: "m1", MailboxID: "user@example.com", Provider: "gmail", Domain: "a.example", Labels: []string{"INBOX", "Label_12345"}, ReceivedAt: now},
+		{ProviderID: "m2", MailboxID: "user@example.com", Provider: "gmail", Domain: "a.example", Labels: []string{"INBOX", "Label_12345"}, ReceivedAt: now.Add(time.Minute)},
+		{ProviderID: "m3", MailboxID: "user@example.com", Provider: "gmail", Domain: "b.example", Labels: []string{"INBOX", "Label_12345"}, ReceivedAt: now.Add(2 * time.Minute)},
+		{ProviderID: "m4", MailboxID: "user@example.com", Provider: "gmail", Domain: "c.example", Labels: []string{"INBOX"}, ReceivedAt: now.Add(3 * time.Minute)},
+		{ProviderID: "m5", MailboxID: "user@example.com", Provider: "gmail", Domain: "", Labels: []string{"INBOX", "Label_12345"}, ReceivedAt: now.Add(4 * time.Minute)},
+		{ProviderID: "m6", MailboxID: "other@example.com", Provider: "gmail", Domain: "a.example", Labels: []string{"INBOX"}, ReceivedAt: now.Add(5 * time.Minute)},
+	} {
+		if err := st.UpsertMessage(ctx, msg); err != nil {
+			t.Fatalf("UpsertMessage(%s): %v", msg.ProviderID, err)
+		}
+	}
+	if err := st.UpsertLabelCatalog(ctx, "user@example.com", []LabelCatalogEntry{
+		{LabelID: "INBOX", DisplayName: "Inbox", LabelType: "system"},
+		{LabelID: "Label_12345", DisplayName: "Billing Queue", LabelType: "user"},
+	}); err != nil {
+		t.Fatalf("UpsertLabelCatalog: %v", err)
+	}
+
+	rows, err := st.QueryLabelDomainStatsByMailbox(ctx, "user@example.com", 1, 2)
+	if err != nil {
+		t.Fatalf("QueryLabelDomainStatsByMailbox: %v", err)
+	}
+	if len(rows) != 4 {
+		t.Fatalf("expected 4 label/domain rows, got %d", len(rows))
+	}
+	if rows[0] != (LabelDomainCount{Label: "INBOX", DisplayName: "Inbox", Domain: "a.example", MessageCount: 2}) {
+		t.Fatalf("unexpected first row: %+v", rows[0])
+	}
+	if rows[1] != (LabelDomainCount{Label: "INBOX", DisplayName: "Inbox", Domain: "b.example", MessageCount: 1}) {
+		t.Fatalf("unexpected second row: %+v", rows[1])
+	}
+	if rows[2] != (LabelDomainCount{Label: "Label_12345", DisplayName: "Billing Queue", Domain: "a.example", MessageCount: 2}) {
+		t.Fatalf("unexpected third row: %+v", rows[2])
+	}
+	if rows[3] != (LabelDomainCount{Label: "Label_12345", DisplayName: "Billing Queue", Domain: "b.example", MessageCount: 1}) {
+		t.Fatalf("unexpected fourth row: %+v", rows[3])
+	}
+
+	filteredRows, err := st.QueryLabelDomainStatsByMailbox(ctx, "user@example.com", 2, 1)
+	if err != nil {
+		t.Fatalf("QueryLabelDomainStatsByMailbox filtered: %v", err)
+	}
+	if len(filteredRows) != 2 {
+		t.Fatalf("expected 2 filtered rows, got %d", len(filteredRows))
+	}
+	for _, row := range filteredRows {
+		if row.Domain != "a.example" || row.MessageCount != 2 {
+			t.Fatalf("unexpected filtered row: %+v", row)
+		}
+	}
+}
+
+func TestQueryLabelDomainStatsByMailbox_Empty(t *testing.T) {
+	st := newTestStore(t)
+	ctx := context.Background()
+	createTestMailbox(t, st, "user@example.com")
+
+	rows, err := st.QueryLabelDomainStatsByMailbox(ctx, "user@example.com", 1, 3)
+	if err != nil {
+		t.Fatalf("QueryLabelDomainStatsByMailbox: %v", err)
+	}
+	if len(rows) != 0 {
+		t.Fatalf("expected no label/domain rows, got %+v", rows)
+	}
+}
+
 // --- QueryMessagesBySender ---
 
 func TestQueryMessagesBySender_ScopedOrderedDesc(t *testing.T) {

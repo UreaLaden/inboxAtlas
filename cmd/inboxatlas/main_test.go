@@ -2419,7 +2419,7 @@ func TestRunClassifyLabelAnalysis_Table(t *testing.T) {
 	_ = st.Close()
 
 	var buf bytes.Buffer
-	if err := runClassifyLabelAnalysis(context.Background(), &buf, cfg, "user@example.com", "table", 1); err != nil {
+	if err := runClassifyLabelAnalysis(context.Background(), &buf, cfg, "user@example.com", "table", 1, 0); err != nil {
 		t.Fatalf("runClassifyLabelAnalysis: %v", err)
 	}
 	output := buf.String()
@@ -2457,7 +2457,7 @@ func TestRunClassifyLabelAnalysis_JSON(t *testing.T) {
 	_ = st.Close()
 
 	var buf bytes.Buffer
-	if err := runClassifyLabelAnalysis(context.Background(), &buf, cfg, "user@example.com", "json", 1); err != nil {
+	if err := runClassifyLabelAnalysis(context.Background(), &buf, cfg, "user@example.com", "json", 1, 0); err != nil {
 		t.Fatalf("runClassifyLabelAnalysis: %v", err)
 	}
 	if !strings.Contains(buf.String(), "\"Label\": \"INBOX\"") && !strings.Contains(buf.String(), "\"label\": \"INBOX\"") {
@@ -2483,11 +2483,98 @@ func TestRunClassifyLabelAnalysis_Empty(t *testing.T) {
 	_ = st.Close()
 
 	var buf bytes.Buffer
-	if err := runClassifyLabelAnalysis(context.Background(), &buf, cfg, "user@example.com", "table", 1); err != nil {
+	if err := runClassifyLabelAnalysis(context.Background(), &buf, cfg, "user@example.com", "table", 1, 0); err != nil {
 		t.Fatalf("runClassifyLabelAnalysis: %v", err)
 	}
 	if !strings.Contains(buf.String(), "No label stats found for user@example.com.") {
 		t.Fatalf("unexpected empty output: %q", buf.String())
+	}
+}
+
+func TestRunClassifyLabelAnalysis_TopDomainsTable(t *testing.T) {
+	dir := t.TempDir()
+	cfg := config.Default()
+	cfg.StoragePath = filepath.Join(dir, "test.db")
+
+	st, err := storage.Open(cfg.StoragePath)
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	if err := st.CreateMailbox(context.Background(), models.Mailbox{ID: "user@example.com", Provider: "gmail"}); err != nil {
+		t.Fatalf("CreateMailbox: %v", err)
+	}
+	now := time.Date(2026, 4, 10, 9, 0, 0, 0, time.UTC)
+	for _, msg := range []models.MessageMeta{
+		{ProviderID: "m1", MailboxID: "user@example.com", Provider: "gmail", Domain: "alpha.example", Labels: []string{"INBOX", "Label_12345"}, ReceivedAt: now},
+		{ProviderID: "m2", MailboxID: "user@example.com", Provider: "gmail", Domain: "alpha.example", Labels: []string{"INBOX", "Label_12345"}, ReceivedAt: now.Add(time.Minute)},
+		{ProviderID: "m3", MailboxID: "user@example.com", Provider: "gmail", Domain: "beta.example", Labels: []string{"INBOX", "Label_12345"}, ReceivedAt: now.Add(2 * time.Minute)},
+	} {
+		if err := st.UpsertMessage(context.Background(), msg); err != nil {
+			t.Fatalf("UpsertMessage(%s): %v", msg.ProviderID, err)
+		}
+	}
+	if err := st.UpsertLabelCatalog(context.Background(), "user@example.com", []storage.LabelCatalogEntry{
+		{LabelID: "INBOX", DisplayName: "Inbox", LabelType: "system"},
+		{LabelID: "Label_12345", DisplayName: "Billing Queue", LabelType: "user"},
+	}); err != nil {
+		t.Fatalf("UpsertLabelCatalog: %v", err)
+	}
+	_ = st.Close()
+
+	var buf bytes.Buffer
+	if err := runClassifyLabelAnalysis(context.Background(), &buf, cfg, "user@example.com", "table", 1, 2); err != nil {
+		t.Fatalf("runClassifyLabelAnalysis: %v", err)
+	}
+	output := buf.String()
+	if !strings.Contains(output, "DOMAIN") || !strings.Contains(output, "MESSAGES") {
+		t.Fatalf("unexpected table header: %q", output)
+	}
+	if !strings.Contains(output, "INBOX") || !strings.Contains(output, "Inbox") || !strings.Contains(output, "alpha.example") {
+		t.Fatalf("expected INBOX domain row, got %q", output)
+	}
+	if !strings.Contains(output, "Label_12345") || !strings.Contains(output, "Billing Queue") || !strings.Contains(output, "beta.example") {
+		t.Fatalf("expected custom-label domain row, got %q", output)
+	}
+}
+
+func TestRunClassifyLabelAnalysis_TopDomainsJSON(t *testing.T) {
+	dir := t.TempDir()
+	cfg := config.Default()
+	cfg.StoragePath = filepath.Join(dir, "test.db")
+
+	st, err := storage.Open(cfg.StoragePath)
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	if err := st.CreateMailbox(context.Background(), models.Mailbox{ID: "user@example.com", Provider: "gmail"}); err != nil {
+		t.Fatalf("CreateMailbox: %v", err)
+	}
+	if err := st.UpsertMessage(context.Background(), models.MessageMeta{
+		ProviderID: "m1", MailboxID: "user@example.com", Provider: "gmail",
+		Domain: "alpha.example", Labels: []string{"INBOX", "Label_12345"}, ReceivedAt: time.Date(2026, 4, 10, 9, 0, 0, 0, time.UTC),
+	}); err != nil {
+		t.Fatalf("UpsertMessage: %v", err)
+	}
+	if err := st.UpsertLabelCatalog(context.Background(), "user@example.com", []storage.LabelCatalogEntry{
+		{LabelID: "Label_12345", DisplayName: "Billing Queue", LabelType: "user"},
+	}); err != nil {
+		t.Fatalf("UpsertLabelCatalog: %v", err)
+	}
+	_ = st.Close()
+
+	var buf bytes.Buffer
+	if err := runClassifyLabelAnalysis(context.Background(), &buf, cfg, "user@example.com", "json", 1, 1); err != nil {
+		t.Fatalf("runClassifyLabelAnalysis: %v", err)
+	}
+	output := buf.String()
+	if !strings.Contains(output, "\"label\": \"INBOX\"") {
+		t.Fatalf("expected INBOX label in json output: %q", output)
+	}
+	if !strings.Contains(output, "\"name\": \"Inbox\"") {
+		t.Fatalf("expected fallback inbox name in json output: %q", output)
+	}
+	if !strings.Contains(output, "\"name\": \"Billing Queue\"") || !strings.Contains(output, "\"domain\": \"alpha.example\"") {
+		t.Fatalf("expected nested custom-label domain output: %q", output)
 	}
 }
 
@@ -2535,7 +2622,7 @@ func TestGmailLabelName(t *testing.T) {
 }
 
 func TestRunClassifyLabelAnalysis_InvalidFormat(t *testing.T) {
-	err := runClassifyLabelAnalysis(context.Background(), io.Discard, config.Default(), "user@example.com", "csv", 1)
+	err := runClassifyLabelAnalysis(context.Background(), io.Discard, config.Default(), "user@example.com", "csv", 1, 0)
 	if err == nil || !strings.Contains(err.Error(), "table, json") {
 		t.Fatalf("expected format validation error, got %v", err)
 	}

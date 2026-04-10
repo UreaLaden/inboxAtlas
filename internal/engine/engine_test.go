@@ -695,6 +695,60 @@ func TestListLabelStats_MailboxNotFound(t *testing.T) {
 	}
 }
 
+func TestListLabelDomainStats(t *testing.T) {
+	cfg := engineTestConfig(t)
+	st := engineTestStore(t, cfg)
+	createEngineMailbox(t, st, "user@example.com")
+
+	now := time.Date(2026, 4, 10, 9, 0, 0, 0, time.UTC)
+	for _, msg := range []models.MessageMeta{
+		{ProviderID: "m1", MailboxID: "user@example.com", Provider: "gmail", Domain: "alpha.example", Labels: []string{"INBOX", "Label_12345"}, ReceivedAt: now},
+		{ProviderID: "m2", MailboxID: "user@example.com", Provider: "gmail", Domain: "alpha.example", Labels: []string{"INBOX", "Label_12345"}, ReceivedAt: now.Add(time.Minute)},
+		{ProviderID: "m3", MailboxID: "user@example.com", Provider: "gmail", Domain: "beta.example", Labels: []string{"INBOX", "Label_12345"}, ReceivedAt: now.Add(2 * time.Minute)},
+		{ProviderID: "m4", MailboxID: "user@example.com", Provider: "gmail", Domain: "gamma.example", Labels: []string{"INBOX"}, ReceivedAt: now.Add(3 * time.Minute)},
+	} {
+		engineSeedMessage(t, st, msg)
+	}
+	if err := st.UpsertLabelCatalog(context.Background(), "user@example.com", []storage.LabelCatalogEntry{
+		{LabelID: "INBOX", DisplayName: "Inbox", LabelType: "system"},
+		{LabelID: "Label_12345", DisplayName: "Billing Queue", LabelType: "user"},
+	}); err != nil {
+		t.Fatalf("UpsertLabelCatalog: %v", err)
+	}
+
+	result, err := ListLabelDomainStats(context.Background(), cfg, "user@example.com", 1, 2)
+	if err != nil {
+		t.Fatalf("ListLabelDomainStats: %v", err)
+	}
+	if result.MailboxID != "user@example.com" {
+		t.Fatalf("MailboxID: got %q, want %q", result.MailboxID, "user@example.com")
+	}
+	if len(result.Labels) != 2 {
+		t.Fatalf("expected 2 label rows, got %d", len(result.Labels))
+	}
+	if result.Labels[0].Label != "INBOX" || result.Labels[0].Name != "Inbox" {
+		t.Fatalf("unexpected first label row: %+v", result.Labels[0])
+	}
+	if len(result.Labels[0].Domains) != 2 {
+		t.Fatalf("expected 2 domains under INBOX, got %+v", result.Labels[0].Domains)
+	}
+	if result.Labels[0].Domains[0] != (LabelDomainEntry{Domain: "alpha.example", MessageCount: 2}) {
+		t.Fatalf("unexpected first INBOX domain: %+v", result.Labels[0].Domains[0])
+	}
+	if result.Labels[1].Label != "Label_12345" || result.Labels[1].Name != "Billing Queue" {
+		t.Fatalf("unexpected second label row: %+v", result.Labels[1])
+	}
+}
+
+func TestListLabelDomainStats_MailboxNotFound(t *testing.T) {
+	cfg := engineTestConfig(t)
+
+	_, err := ListLabelDomainStats(context.Background(), cfg, "missing@example.com", 1, 2)
+	if err == nil {
+		t.Fatal("expected mailbox resolution error")
+	}
+}
+
 func TestRunInference_PersistsHighAndMediumCandidates(t *testing.T) {
 	cfg := engineTestConfig(t)
 	st := engineTestStore(t, cfg)

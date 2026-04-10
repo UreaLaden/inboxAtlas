@@ -614,17 +614,19 @@ func buildClassifyLabelAnalysisCmd(cfg config.Config) *cobra.Command {
 	var account string
 	var format string
 	var minCount int
+	var topDomains int
 
 	cmd := &cobra.Command{
 		Use:   "label-analysis",
 		Short: "Show Gmail label frequency to guide seed authoring",
 		RunE: func(cmd *cobra.Command, _ []string) error {
-			return runClassifyLabelAnalysis(cmd.Context(), cmd.OutOrStdout(), cfg, account, format, minCount)
+			return runClassifyLabelAnalysis(cmd.Context(), cmd.OutOrStdout(), cfg, account, format, minCount, topDomains)
 		},
 	}
 	cmd.Flags().StringVar(&account, "account", "", "mailbox email or alias")
 	cmd.Flags().StringVar(&format, "format", "table", "output format: table, json")
 	cmd.Flags().IntVar(&minCount, "min-count", 1, "minimum message count to include a label")
+	cmd.Flags().IntVar(&topDomains, "top-domains", 0, "top domains to include per label")
 	_ = cmd.MarkFlagRequired("account")
 	return cmd
 }
@@ -1096,10 +1098,13 @@ func runClassifySuggestions(ctx context.Context, w io.Writer, cfg config.Config,
 
 // runClassifyLabelAnalysis renders mailbox-scoped Gmail label frequency rows
 // for manual operator review.
-func runClassifyLabelAnalysis(ctx context.Context, w io.Writer, cfg config.Config, account, format string, minCount int) error {
+func runClassifyLabelAnalysis(ctx context.Context, w io.Writer, cfg config.Config, account, format string, minCount, topDomains int) error {
 	f, err := validateClassifyFormat(format)
 	if err != nil {
 		return err
+	}
+	if topDomains > 0 {
+		return runClassifyLabelDomainAnalysis(ctx, w, cfg, account, f, minCount, topDomains)
 	}
 
 	result, err := engine.ListLabelStats(ctx, cfg, account, minCount)
@@ -1126,6 +1131,41 @@ func runClassifyLabelAnalysis(ctx context.Context, w io.Writer, cfg config.Confi
 			name = gmailLabelName(row.Label)
 		}
 		_, _ = fmt.Fprintf(tw, "%s\t%s\t%d\n", row.Label, name, row.MessageCount)
+	}
+	return tw.Flush()
+}
+
+// runClassifyLabelDomainAnalysis renders mailbox-scoped Gmail label rows
+// expanded into top domains for manual operator review.
+func runClassifyLabelDomainAnalysis(ctx context.Context, w io.Writer, cfg config.Config, account, format string, minCount, topDomains int) error {
+	result, err := engine.ListLabelDomainStats(ctx, cfg, account, minCount, topDomains)
+	if err != nil {
+		return err
+	}
+
+	for i := range result.Labels {
+		if result.Labels[i].Name == "" {
+			result.Labels[i].Name = gmailLabelName(result.Labels[i].Label)
+		}
+	}
+
+	if format == "json" {
+		enc := json.NewEncoder(w)
+		enc.SetIndent("", "  ")
+		return enc.Encode(result.Labels)
+	}
+
+	if len(result.Labels) == 0 {
+		_, _ = fmt.Fprintf(w, "No label stats found for %s.\n", result.MailboxID)
+		return nil
+	}
+
+	tw := tabwriter.NewWriter(w, 0, 0, 3, ' ', 0)
+	_, _ = fmt.Fprintln(tw, "LABEL ID\tNAME\tDOMAIN\tMESSAGES")
+	for _, row := range result.Labels {
+		for _, domain := range row.Domains {
+			_, _ = fmt.Fprintf(tw, "%s\t%s\t%s\t%d\n", row.Label, row.Name, domain.Domain, domain.MessageCount)
+		}
 	}
 	return tw.Flush()
 }
