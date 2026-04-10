@@ -145,6 +145,15 @@ CREATE TABLE IF NOT EXISTS ai_inference_suggestions (
     created_at       TEXT NOT NULL,
     PRIMARY KEY (mailbox_id, message_id)
 );
+
+CREATE TABLE IF NOT EXISTS label_catalog (
+    mailbox_id   TEXT NOT NULL REFERENCES mailboxes(id) ON DELETE CASCADE,
+    label_id     TEXT NOT NULL,
+    display_name TEXT NOT NULL DEFAULT '',
+    label_type   TEXT NOT NULL DEFAULT '',
+    synced_at    TEXT NOT NULL,
+    PRIMARY KEY (mailbox_id, label_id)
+);
 `
 
 func (s *Store) migrate() error {
@@ -482,7 +491,15 @@ type SenderCount struct {
 // QueryLabelStatsByMailbox.
 type LabelCount struct {
 	Label        string
+	DisplayName  string
 	MessageCount int
+}
+
+// LabelCatalogEntry is one persisted Gmail label catalog row for a mailbox.
+type LabelCatalogEntry struct {
+	LabelID     string
+	DisplayName string
+	LabelType   string
 }
 
 // VolumeCount is a single monthly volume row returned by QueryMessagesByVolume.
@@ -748,8 +765,11 @@ func (s *Store) QueryDomainStatsByMailbox(ctx context.Context, mailboxID string,
 // ordered by count descending then label ascending.
 func (s *Store) QueryLabelStatsByMailbox(ctx context.Context, mailboxID string, minCount int) ([]LabelCount, error) {
 	rows, err := s.db.QueryContext(ctx,
-		`SELECT je.value AS label, COUNT(*) AS message_count
+		`SELECT je.value AS label,
+		        COALESCE(lc.display_name, '') AS display_name,
+		        COUNT(*) AS message_count
 		 FROM messages m, json_each(m.labels) je
+		 LEFT JOIN label_catalog lc ON lc.mailbox_id = m.mailbox_id AND lc.label_id = je.value
 		 WHERE m.mailbox_id = ?
 		 GROUP BY je.value
 		 HAVING COUNT(*) >= ?
@@ -764,7 +784,7 @@ func (s *Store) QueryLabelStatsByMailbox(ctx context.Context, mailboxID string, 
 	var out []LabelCount
 	for rows.Next() {
 		var lc LabelCount
-		if err := rows.Scan(&lc.Label, &lc.MessageCount); err != nil {
+		if err := rows.Scan(&lc.Label, &lc.DisplayName, &lc.MessageCount); err != nil {
 			return nil, fmt.Errorf("scan label stats row: %w", err)
 		}
 		out = append(out, lc)
@@ -1044,6 +1064,30 @@ func (s *Store) UpsertDomainStat(ctx context.Context, mailboxID, domain string, 
 	)
 	if err != nil {
 		return fmt.Errorf("upsert domain stat: %w", err)
+	}
+	return nil
+}
+
+// UpsertLabelCatalog inserts or updates Gmail label catalog rows for mailboxID.
+func (s *Store) UpsertLabelCatalog(ctx context.Context, mailboxID string, entries []LabelCatalogEntry) error {
+	syncedAt := time.Now().UTC().Format(time.RFC3339)
+	for _, entry := range entries {
+		_, err := s.db.ExecContext(ctx,
+			`INSERT INTO label_catalog (mailbox_id, label_id, display_name, label_type, synced_at)
+			 VALUES (?, ?, ?, ?, ?)
+			 ON CONFLICT(mailbox_id, label_id) DO UPDATE SET
+			 display_name = excluded.display_name,
+			 label_type = excluded.label_type,
+			 synced_at = excluded.synced_at`,
+			mailboxID,
+			entry.LabelID,
+			entry.DisplayName,
+			entry.LabelType,
+			syncedAt,
+		)
+		if err != nil {
+			return fmt.Errorf("upsert label catalog: %w", err)
+		}
 	}
 	return nil
 }

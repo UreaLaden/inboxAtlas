@@ -1384,6 +1384,12 @@ func TestQueryLabelStatsByMailbox(t *testing.T) {
 			t.Fatalf("UpsertMessage(%s): %v", msg.ProviderID, err)
 		}
 	}
+	if err := st.UpsertLabelCatalog(ctx, "user@example.com", []LabelCatalogEntry{
+		{LabelID: "CATEGORY_PROMOTIONS", DisplayName: "Promotions", LabelType: "system"},
+		{LabelID: "INBOX", DisplayName: "Inbox", LabelType: "system"},
+	}); err != nil {
+		t.Fatalf("UpsertLabelCatalog: %v", err)
+	}
 
 	rows, err := st.QueryLabelStatsByMailbox(ctx, "user@example.com", 1)
 	if err != nil {
@@ -1395,8 +1401,14 @@ func TestQueryLabelStatsByMailbox(t *testing.T) {
 	if rows[0].Label != "INBOX" || rows[0].MessageCount != 5 {
 		t.Fatalf("unexpected first label row: %+v", rows[0])
 	}
+	if rows[0].DisplayName != "Inbox" {
+		t.Fatalf("unexpected first label display name: %+v", rows[0])
+	}
 	if rows[1].Label != "CATEGORY_PROMOTIONS" || rows[1].MessageCount != 3 {
 		t.Fatalf("unexpected second label row: %+v", rows[1])
+	}
+	if rows[1].DisplayName != "Promotions" {
+		t.Fatalf("unexpected second label display name: %+v", rows[1])
 	}
 
 	filteredRows, err := st.QueryLabelStatsByMailbox(ctx, "user@example.com", 4)
@@ -1405,6 +1417,41 @@ func TestQueryLabelStatsByMailbox(t *testing.T) {
 	}
 	if len(filteredRows) != 1 || filteredRows[0].Label != "INBOX" || filteredRows[0].MessageCount != 5 {
 		t.Fatalf("unexpected filtered rows: %+v", filteredRows)
+	}
+}
+
+func TestUpsertLabelCatalog_UpdatesExistingRow(t *testing.T) {
+	st := newTestStore(t)
+	ctx := context.Background()
+	createTestMailbox(t, st, "user@example.com")
+
+	if err := st.UpsertLabelCatalog(ctx, "user@example.com", []LabelCatalogEntry{
+		{LabelID: "Label_12345", DisplayName: "Billing Queue", LabelType: "user"},
+	}); err != nil {
+		t.Fatalf("first UpsertLabelCatalog: %v", err)
+	}
+	if err := st.UpsertLabelCatalog(ctx, "user@example.com", []LabelCatalogEntry{
+		{LabelID: "Label_12345", DisplayName: "Invoices", LabelType: "user"},
+	}); err != nil {
+		t.Fatalf("second UpsertLabelCatalog: %v", err)
+	}
+
+	if err := st.UpsertMessage(ctx, models.MessageMeta{
+		ProviderID: "m1",
+		MailboxID:  "user@example.com",
+		Provider:   "gmail",
+		Labels:     []string{"Label_12345"},
+		ReceivedAt: time.Date(2026, 4, 10, 0, 0, 0, 0, time.UTC),
+	}); err != nil {
+		t.Fatalf("UpsertMessage: %v", err)
+	}
+
+	rows, err := st.QueryLabelStatsByMailbox(ctx, "user@example.com", 1)
+	if err != nil {
+		t.Fatalf("QueryLabelStatsByMailbox: %v", err)
+	}
+	if len(rows) != 1 || rows[0].DisplayName != "Invoices" {
+		t.Fatalf("unexpected rows after label catalog update: %+v", rows)
 	}
 }
 

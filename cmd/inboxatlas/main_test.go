@@ -19,6 +19,7 @@ import (
 	"github.com/UreaLaden/inboxatlas/internal/engine"
 	exportpkg "github.com/UreaLaden/inboxatlas/internal/export"
 	"github.com/UreaLaden/inboxatlas/internal/ingestion"
+	gmailprovider "github.com/UreaLaden/inboxatlas/internal/providers/gmail"
 	"github.com/UreaLaden/inboxatlas/internal/storage"
 	"github.com/UreaLaden/inboxatlas/pkg/models"
 )
@@ -884,7 +885,7 @@ func TestRunSyncGmail_UsesResolvedTokenSource(t *testing.T) {
 			return oauth2.StaticTokenSource(&oauth2.Token{AccessToken: "tok"}), nil
 		}, nil
 	}
-	newGmailProvider = func(email string, tokenSourceFactory func(context.Context) (oauth2.TokenSource, error)) models.MailProvider {
+	newGmailProvider = func(email string, tokenSourceFactory func(context.Context) (oauth2.TokenSource, error)) gmailSyncProvider {
 		providerCreated = email == "user@example.com" && tokenSourceFactory != nil
 		return stubMailProvider{}
 	}
@@ -898,6 +899,120 @@ func TestRunSyncGmail_UsesResolvedTokenSource(t *testing.T) {
 	}
 	if !resolveCalled || !providerCreated || !ingestionCalled {
 		t.Fatalf("expected resolve/provider/ingestion path, got resolve=%v provider=%v ingestion=%v", resolveCalled, providerCreated, ingestionCalled)
+	}
+}
+
+func TestRunSyncGmail_PersistsLabelCatalog(t *testing.T) {
+	dir := t.TempDir()
+	dbPath := filepath.Join(dir, "test.db")
+	st, err := storage.Open(dbPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := st.CreateMailbox(context.Background(), models.Mailbox{ID: "user@example.com", Provider: "gmail"}); err != nil {
+		t.Fatal(err)
+	}
+	_ = st.Close()
+
+	cfg := config.Default()
+	cfg.StoragePath = dbPath
+	cfg.CredentialsPath = filepath.Join(dir, "credentials.json")
+	if err := os.WriteFile(cfg.CredentialsPath, []byte(`{}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	origResolve := resolveGmailTokenSource
+	origProvider := newGmailProvider
+	origRunIngestion := runIngestion
+	t.Cleanup(func() {
+		resolveGmailTokenSource = origResolve
+		newGmailProvider = origProvider
+		runIngestion = origRunIngestion
+	})
+
+	resolveGmailTokenSource = func(_ *config.Config, mailboxID string) (func(context.Context) (oauth2.TokenSource, error), error) {
+		return func(context.Context) (oauth2.TokenSource, error) {
+			return oauth2.StaticTokenSource(&oauth2.Token{AccessToken: "tok"}), nil
+		}, nil
+	}
+	newGmailProvider = func(email string, tokenSourceFactory func(context.Context) (oauth2.TokenSource, error)) gmailSyncProvider {
+		return stubLabelSyncProvider{
+			labels: []gmailprovider.LabelMeta{
+				{ID: "Label_12345", DisplayName: "Billing Queue", Type: "user"},
+			},
+		}
+	}
+	runIngestion = func(_ context.Context, opts ingestion.Options) error { return nil }
+
+	if err := runSyncGmail(context.Background(), io.Discard, cfg, "user@example.com", 0); err != nil {
+		t.Fatalf("runSyncGmail: %v", err)
+	}
+
+	st, err = storage.Open(dbPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = st.Close() }()
+
+	if err := st.UpsertMessage(context.Background(), models.MessageMeta{
+		ProviderID: "m1",
+		MailboxID:  "user@example.com",
+		Provider:   "gmail",
+		Labels:     []string{"Label_12345"},
+		ReceivedAt: time.Date(2026, 4, 10, 0, 0, 0, 0, time.UTC),
+	}); err != nil {
+		t.Fatalf("UpsertMessage: %v", err)
+	}
+
+	rows, err := st.QueryLabelStatsByMailbox(context.Background(), "user@example.com", 1)
+	if err != nil {
+		t.Fatalf("QueryLabelStatsByMailbox: %v", err)
+	}
+	if len(rows) != 1 || rows[0].DisplayName != "Billing Queue" {
+		t.Fatalf("unexpected label catalog rows: %+v", rows)
+	}
+}
+
+func TestRunSyncGmail_LabelCatalogFailureNonFatal(t *testing.T) {
+	dir := t.TempDir()
+	dbPath := filepath.Join(dir, "test.db")
+	st, err := storage.Open(dbPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := st.CreateMailbox(context.Background(), models.Mailbox{ID: "user@example.com", Provider: "gmail"}); err != nil {
+		t.Fatal(err)
+	}
+	_ = st.Close()
+
+	cfg := config.Default()
+	cfg.StoragePath = dbPath
+	cfg.CredentialsPath = filepath.Join(dir, "credentials.json")
+	if err := os.WriteFile(cfg.CredentialsPath, []byte(`{}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	origResolve := resolveGmailTokenSource
+	origProvider := newGmailProvider
+	origRunIngestion := runIngestion
+	t.Cleanup(func() {
+		resolveGmailTokenSource = origResolve
+		newGmailProvider = origProvider
+		runIngestion = origRunIngestion
+	})
+
+	resolveGmailTokenSource = func(_ *config.Config, mailboxID string) (func(context.Context) (oauth2.TokenSource, error), error) {
+		return func(context.Context) (oauth2.TokenSource, error) {
+			return oauth2.StaticTokenSource(&oauth2.Token{AccessToken: "tok"}), nil
+		}, nil
+	}
+	newGmailProvider = func(email string, tokenSourceFactory func(context.Context) (oauth2.TokenSource, error)) gmailSyncProvider {
+		return stubLabelSyncProvider{listLabelsErr: errors.New("boom")}
+	}
+	runIngestion = func(_ context.Context, opts ingestion.Options) error { return nil }
+
+	if err := runSyncGmail(context.Background(), io.Discard, cfg, "user@example.com", 0); err != nil {
+		t.Fatalf("runSyncGmail: %v", err)
 	}
 }
 
@@ -1186,6 +1301,23 @@ func (stubMailProvider) ListMessages(context.Context, string) ([]string, string,
 
 func (stubMailProvider) GetMessageMeta(context.Context, string) (*models.MessageMeta, error) {
 	return &models.MessageMeta{}, nil
+}
+
+func (stubMailProvider) ListLabels(context.Context) ([]gmailprovider.LabelMeta, error) {
+	return nil, nil
+}
+
+type stubLabelSyncProvider struct {
+	stubMailProvider
+	labels        []gmailprovider.LabelMeta
+	listLabelsErr error
+}
+
+func (p stubLabelSyncProvider) ListLabels(context.Context) ([]gmailprovider.LabelMeta, error) {
+	if p.listLabelsErr != nil {
+		return nil, p.listLabelsErr
+	}
+	return p.labels, nil
 }
 
 // --- seedReportData seeds a mailbox and messages for report tests ---
@@ -2273,11 +2405,16 @@ func TestRunClassifyLabelAnalysis_Table(t *testing.T) {
 	now := time.Date(2026, 4, 9, 12, 0, 0, 0, time.UTC)
 	for _, msg := range []models.MessageMeta{
 		{ProviderID: "l1", MailboxID: "user@example.com", Provider: "gmail", Labels: []string{"CATEGORY_PROMOTIONS", "INBOX"}, ReceivedAt: now},
-		{ProviderID: "l2", MailboxID: "user@example.com", Provider: "gmail", Labels: []string{"INBOX"}, ReceivedAt: now.Add(time.Minute)},
+		{ProviderID: "l2", MailboxID: "user@example.com", Provider: "gmail", Labels: []string{"INBOX", "Label_12345"}, ReceivedAt: now.Add(time.Minute)},
 	} {
 		if err := st.UpsertMessage(context.Background(), msg); err != nil {
 			t.Fatalf("UpsertMessage(%s): %v", msg.ProviderID, err)
 		}
+	}
+	if err := st.UpsertLabelCatalog(context.Background(), "user@example.com", []storage.LabelCatalogEntry{
+		{LabelID: "Label_12345", DisplayName: "Billing Queue", LabelType: "user"},
+	}); err != nil {
+		t.Fatalf("UpsertLabelCatalog: %v", err)
 	}
 	_ = st.Close()
 
@@ -2289,7 +2426,7 @@ func TestRunClassifyLabelAnalysis_Table(t *testing.T) {
 	if !strings.Contains(output, "LABEL ID") || !strings.Contains(output, "NAME") || !strings.Contains(output, "MESSAGES") {
 		t.Fatalf("unexpected table header: %q", output)
 	}
-	if !strings.Contains(output, "CATEGORY_PROMOTIONS") || !strings.Contains(output, "Promotions") || !strings.Contains(output, "INBOX") || !strings.Contains(output, "Inbox") {
+	if !strings.Contains(output, "CATEGORY_PROMOTIONS") || !strings.Contains(output, "Promotions") || !strings.Contains(output, "INBOX") || !strings.Contains(output, "Inbox") || !strings.Contains(output, "Label_12345") || !strings.Contains(output, "Billing Queue") {
 		t.Fatalf("unexpected table output: %q", output)
 	}
 }
@@ -2308,9 +2445,14 @@ func TestRunClassifyLabelAnalysis_JSON(t *testing.T) {
 	}
 	if err := st.UpsertMessage(context.Background(), models.MessageMeta{
 		ProviderID: "l1", MailboxID: "user@example.com", Provider: "gmail",
-		Labels: []string{"INBOX"}, ReceivedAt: time.Date(2026, 4, 9, 12, 0, 0, 0, time.UTC),
+		Labels: []string{"INBOX", "Label_12345"}, ReceivedAt: time.Date(2026, 4, 9, 12, 0, 0, 0, time.UTC),
 	}); err != nil {
 		t.Fatalf("UpsertMessage: %v", err)
+	}
+	if err := st.UpsertLabelCatalog(context.Background(), "user@example.com", []storage.LabelCatalogEntry{
+		{LabelID: "Label_12345", DisplayName: "Billing Queue", LabelType: "user"},
+	}); err != nil {
+		t.Fatalf("UpsertLabelCatalog: %v", err)
 	}
 	_ = st.Close()
 
@@ -2320,6 +2462,9 @@ func TestRunClassifyLabelAnalysis_JSON(t *testing.T) {
 	}
 	if !strings.Contains(buf.String(), "\"Label\": \"INBOX\"") && !strings.Contains(buf.String(), "\"label\": \"INBOX\"") {
 		t.Fatalf("unexpected json output: %q", buf.String())
+	}
+	if !strings.Contains(buf.String(), "Billing Queue") {
+		t.Fatalf("expected display name in json output: %q", buf.String())
 	}
 }
 

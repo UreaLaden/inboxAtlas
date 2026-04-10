@@ -109,6 +109,14 @@ func TestListMessages_NotAuthenticated(t *testing.T) {
 	}
 }
 
+func TestListLabels_NotAuthenticated(t *testing.T) {
+	p := &Provider{}
+	_, err := p.ListLabels(context.Background())
+	if err == nil {
+		t.Fatal("expected error when not authenticated")
+	}
+}
+
 // --- GetMessageMeta guard ---
 
 func TestGetMessageMeta_NotAuthenticated(t *testing.T) {
@@ -388,6 +396,35 @@ func TestListMessages_APIError(t *testing.T) {
 	_, _, err := p.ListMessages(context.Background(), "")
 	if err == nil {
 		t.Fatal("expected error from API failure")
+	}
+}
+
+func TestListLabels_Success(t *testing.T) {
+	svc, cleanup := newTestService(t, func(w http.ResponseWriter, r *http.Request) {
+		resp := map[string]interface{}{
+			"labels": []map[string]string{
+				{"id": "INBOX", "name": "INBOX", "type": "system"},
+				{"id": "Label_12345", "name": "Billing Queue", "type": "user"},
+			},
+		}
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(resp) //nolint:errcheck
+	})
+	defer cleanup()
+
+	p := &Provider{svc: svc, email: "test@example.com"}
+	labels, err := p.ListLabels(context.Background())
+	if err != nil {
+		t.Fatalf("ListLabels: %v", err)
+	}
+	if len(labels) != 2 {
+		t.Fatalf("expected 2 labels, got %d", len(labels))
+	}
+	if labels[0] != (LabelMeta{ID: "INBOX", DisplayName: "INBOX", Type: "system"}) {
+		t.Fatalf("unexpected first label: %+v", labels[0])
+	}
+	if labels[1] != (LabelMeta{ID: "Label_12345", DisplayName: "Billing Queue", Type: "user"}) {
+		t.Fatalf("unexpected second label: %+v", labels[1])
 	}
 }
 

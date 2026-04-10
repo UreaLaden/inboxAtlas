@@ -33,7 +33,13 @@ import (
 
 var validateGmailDelegation = auth.ValidateGmailDelegation
 var resolveGmailTokenSource = auth.ResolveGmailTokenSource
-var newGmailProvider = func(email string, tokenSourceFactory func(context.Context) (oauth2.TokenSource, error)) models.MailProvider {
+
+type gmailSyncProvider interface {
+	models.MailProvider
+	ListLabels(context.Context) ([]gmailprovider.LabelMeta, error)
+}
+
+var newGmailProvider = func(email string, tokenSourceFactory func(context.Context) (oauth2.TokenSource, error)) gmailSyncProvider {
 	return gmailprovider.New(email, tokenSourceFactory)
 }
 var runIngestion = ingestion.Run
@@ -488,7 +494,7 @@ func runSyncGmail(ctx context.Context, w io.Writer, cfg config.Config, account s
 
 	provider := newGmailProvider(mb.ID, tokenSourceFactory)
 
-	return runIngestion(ctx, ingestion.Options{
+	if err := runIngestion(ctx, ingestion.Options{
 		MailboxID:    mb.ID,
 		Provider:     "gmail",
 		MailProvider: provider,
@@ -497,7 +503,28 @@ func runSyncGmail(ctx context.Context, w io.Writer, cfg config.Config, account s
 		RequestDelay: time.Duration(cfg.SyncDelayMS) * time.Millisecond,
 		MaxRetries:   5,
 		MessageLimit: limit,
-	})
+	}); err != nil {
+		return err
+	}
+
+	labels, err := provider.ListLabels(ctx)
+	if err != nil {
+		slog.WarnContext(ctx, "label catalog sync failed; label names may be stale", "err", err)
+		return nil
+	}
+
+	entries := make([]storage.LabelCatalogEntry, 0, len(labels))
+	for _, label := range labels {
+		entries = append(entries, storage.LabelCatalogEntry{
+			LabelID:     label.ID,
+			DisplayName: label.DisplayName,
+			LabelType:   label.Type,
+		})
+	}
+	if err := st.UpsertLabelCatalog(ctx, mb.ID, entries); err != nil {
+		slog.WarnContext(ctx, "label catalog persist failed", "err", err)
+	}
+	return nil
 }
 
 // runSyncStatus prints the current sync checkpoint for a mailbox to w. It is
@@ -1094,7 +1121,11 @@ func runClassifyLabelAnalysis(ctx context.Context, w io.Writer, cfg config.Confi
 	tw := tabwriter.NewWriter(w, 0, 0, 3, ' ', 0)
 	_, _ = fmt.Fprintln(tw, "LABEL ID\tNAME\tMESSAGES")
 	for _, row := range result.Labels {
-		_, _ = fmt.Fprintf(tw, "%s\t%s\t%d\n", row.Label, gmailLabelName(row.Label), row.MessageCount)
+		name := row.DisplayName
+		if name == "" {
+			name = gmailLabelName(row.Label)
+		}
+		_, _ = fmt.Fprintf(tw, "%s\t%s\t%d\n", row.Label, name, row.MessageCount)
 	}
 	return tw.Flush()
 }
