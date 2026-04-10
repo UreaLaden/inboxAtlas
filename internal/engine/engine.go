@@ -81,6 +81,13 @@ type ClassificationSummary struct {
 	UnknownPct float64                       `json:"unknown_pct"`
 }
 
+// LabelStatsSummary describes mailbox-scoped Gmail label frequencies for
+// manual operator review.
+type LabelStatsSummary struct {
+	MailboxID string               `json:"mailbox_id"`
+	Labels    []storage.LabelCount `json:"labels"`
+}
+
 // ClassifiedMessagesFilter constrains ListClassifiedMessages results.
 type ClassifiedMessagesFilter struct {
 	Category string     `json:"category,omitempty"`
@@ -228,6 +235,7 @@ func ClassificationPatternTypes() []string {
 		classification.PatternDomain,
 		classification.PatternSenderEmail,
 		classification.PatternSenderPrefix,
+		classification.PatternLabel,
 		classification.PatternHasAttachment,
 		classification.PatternSubjectTerm,
 	}
@@ -337,6 +345,26 @@ func GetClassificationSummary(ctx context.Context, cfg config.Config, account st
 		Total:      total,
 		Breakdown:  breakdown,
 		UnknownPct: unknownPct,
+	}, nil
+}
+
+// ListLabelStats returns mailbox-scoped Gmail label frequency rows to guide
+// manual seed authoring.
+func ListLabelStats(ctx context.Context, cfg config.Config, account string, minCount int) (LabelStatsSummary, error) {
+	st, mb, err := openResolvedStore(ctx, cfg, account)
+	if err != nil {
+		return LabelStatsSummary{}, err
+	}
+	defer func() { _ = st.Close() }()
+
+	labels, err := st.QueryLabelStatsByMailbox(ctx, mb.ID, minCount)
+	if err != nil {
+		return LabelStatsSummary{}, fmt.Errorf("query label stats: %w", err)
+	}
+
+	return LabelStatsSummary{
+		MailboxID: mb.ID,
+		Labels:    labels,
 	}, nil
 }
 

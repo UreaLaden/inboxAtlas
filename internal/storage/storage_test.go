@@ -1365,6 +1365,63 @@ func TestQueryDomainStatsByMailbox_MinCountAndOrdering(t *testing.T) {
 	}
 }
 
+func TestQueryLabelStatsByMailbox(t *testing.T) {
+	st := newTestStore(t)
+	ctx := context.Background()
+	createTestMailbox(t, st, "user@example.com")
+
+	now := time.Date(2026, 4, 9, 12, 0, 0, 0, time.UTC)
+	messages := []models.MessageMeta{
+		{ProviderID: "m1", MailboxID: "user@example.com", Provider: "gmail", Labels: []string{"CATEGORY_PROMOTIONS", "INBOX"}, ReceivedAt: now},
+		{ProviderID: "m2", MailboxID: "user@example.com", Provider: "gmail", Labels: []string{"CATEGORY_PROMOTIONS", "INBOX"}, ReceivedAt: now.Add(time.Minute)},
+		{ProviderID: "m3", MailboxID: "user@example.com", Provider: "gmail", Labels: []string{"CATEGORY_PROMOTIONS", "INBOX"}, ReceivedAt: now.Add(2 * time.Minute)},
+		{ProviderID: "m4", MailboxID: "user@example.com", Provider: "gmail", Labels: []string{"INBOX"}, ReceivedAt: now.Add(3 * time.Minute)},
+		{ProviderID: "m5", MailboxID: "user@example.com", Provider: "gmail", Labels: []string{"INBOX"}, ReceivedAt: now.Add(4 * time.Minute)},
+		{ProviderID: "m6", MailboxID: "user@example.com", Provider: "gmail", Labels: []string{}, ReceivedAt: now.Add(5 * time.Minute)},
+	}
+	for _, msg := range messages {
+		if err := st.UpsertMessage(ctx, msg); err != nil {
+			t.Fatalf("UpsertMessage(%s): %v", msg.ProviderID, err)
+		}
+	}
+
+	rows, err := st.QueryLabelStatsByMailbox(ctx, "user@example.com", 1)
+	if err != nil {
+		t.Fatalf("QueryLabelStatsByMailbox: %v", err)
+	}
+	if len(rows) != 2 {
+		t.Fatalf("expected 2 label rows, got %d", len(rows))
+	}
+	if rows[0].Label != "INBOX" || rows[0].MessageCount != 5 {
+		t.Fatalf("unexpected first label row: %+v", rows[0])
+	}
+	if rows[1].Label != "CATEGORY_PROMOTIONS" || rows[1].MessageCount != 3 {
+		t.Fatalf("unexpected second label row: %+v", rows[1])
+	}
+
+	filteredRows, err := st.QueryLabelStatsByMailbox(ctx, "user@example.com", 4)
+	if err != nil {
+		t.Fatalf("QueryLabelStatsByMailbox filtered: %v", err)
+	}
+	if len(filteredRows) != 1 || filteredRows[0].Label != "INBOX" || filteredRows[0].MessageCount != 5 {
+		t.Fatalf("unexpected filtered rows: %+v", filteredRows)
+	}
+}
+
+func TestQueryLabelStatsByMailbox_Empty(t *testing.T) {
+	st := newTestStore(t)
+	ctx := context.Background()
+	createTestMailbox(t, st, "user@example.com")
+
+	rows, err := st.QueryLabelStatsByMailbox(ctx, "user@example.com", 1)
+	if err != nil {
+		t.Fatalf("QueryLabelStatsByMailbox: %v", err)
+	}
+	if len(rows) != 0 {
+		t.Fatalf("expected no label rows, got %+v", rows)
+	}
+}
+
 // --- QueryMessagesBySender ---
 
 func TestQueryMessagesBySender_ScopedOrderedDesc(t *testing.T) {

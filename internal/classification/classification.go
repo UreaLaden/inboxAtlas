@@ -60,6 +60,8 @@ const (
 	PatternSenderEmail = "sender_email"
 	// PatternSenderPrefix matches when the local part of msg.FromEmail has the seed value as prefix.
 	PatternSenderPrefix = "sender_prefix"
+	// PatternLabel matches when one raw Gmail label equals the seed value (case-insensitive).
+	PatternLabel = "label"
 	// PatternHasAttachment matches when msg.HasAttachment equals the string-encoded boolean pattern value.
 	PatternHasAttachment = "has_attachment"
 	// PatternSubjectTerm matches when the lowercased tokenized subject contains the seed value.
@@ -262,12 +264,14 @@ func specificityRank(patternType string) int {
 		return 2
 	case PatternDomain:
 		return 3
-	case PatternHasAttachment:
+	case PatternLabel:
 		return 4
-	case PatternSubjectTerm:
+	case PatternHasAttachment:
 		return 5
-	default:
+	case PatternSubjectTerm:
 		return 6
+	default:
+		return 7
 	}
 }
 
@@ -369,6 +373,13 @@ func matchesSeed(seed ClassificationSeed, msg models.MessageMeta) bool {
 		return strings.EqualFold(msg.FromEmail, seed.PatternValue)
 	case PatternSenderPrefix:
 		return strings.HasPrefix(localPart(msg.FromEmail), strings.ToLower(seed.PatternValue))
+	case PatternLabel:
+		for _, label := range msg.Labels {
+			if strings.EqualFold(label, seed.PatternValue) {
+				return true
+			}
+		}
+		return false
 	case PatternHasAttachment:
 		return msg.HasAttachment == strings.EqualFold(seed.PatternValue, "true")
 	case PatternSubjectTerm:

@@ -478,6 +478,13 @@ type SenderCount struct {
 	Count  int
 }
 
+// LabelCount is a single Gmail label aggregate row returned by
+// QueryLabelStatsByMailbox.
+type LabelCount struct {
+	Label        string
+	MessageCount int
+}
+
 // VolumeCount is a single monthly volume row returned by QueryMessagesByVolume.
 type VolumeCount struct {
 	Period string // "YYYY-MM"
@@ -732,6 +739,35 @@ func (s *Store) QueryDomainStatsByMailbox(ctx context.Context, mailboxID string,
 			return nil, fmt.Errorf("scan domain stats row: %w", err)
 		}
 		out = append(out, dc)
+	}
+	return out, rows.Err()
+}
+
+// QueryLabelStatsByMailbox returns persisted Gmail label aggregate rows for one
+// mailbox from the messages.labels JSON column, filtered by minCount and
+// ordered by count descending then label ascending.
+func (s *Store) QueryLabelStatsByMailbox(ctx context.Context, mailboxID string, minCount int) ([]LabelCount, error) {
+	rows, err := s.db.QueryContext(ctx,
+		`SELECT je.value AS label, COUNT(*) AS message_count
+		 FROM messages m, json_each(m.labels) je
+		 WHERE m.mailbox_id = ?
+		 GROUP BY je.value
+		 HAVING COUNT(*) >= ?
+		 ORDER BY COUNT(*) DESC, je.value ASC`,
+		mailboxID, minCount,
+	)
+	if err != nil {
+		return nil, fmt.Errorf("query label stats by mailbox: %w", err)
+	}
+	defer func() { _ = rows.Close() }()
+
+	var out []LabelCount
+	for rows.Next() {
+		var lc LabelCount
+		if err := rows.Scan(&lc.Label, &lc.MessageCount); err != nil {
+			return nil, fmt.Errorf("scan label stats row: %w", err)
+		}
+		out = append(out, lc)
 	}
 	return out, rows.Err()
 }

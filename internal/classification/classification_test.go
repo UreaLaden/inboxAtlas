@@ -299,6 +299,73 @@ func TestChainClassifier_FirstMatchWins(t *testing.T) {
 	}
 }
 
+func TestSeedRuleClassifier_LabelMatch(t *testing.T) {
+	seeds := []ClassificationSeed{
+		{ID: 1, PatternType: PatternLabel, PatternValue: "CATEGORY_PROMOTIONS", Category: CategoryNewsletterMarketing, Source: SourceSeed, Priority: 100},
+	}
+	c := NewSeedRuleClassifier(seeds)
+	msg := makeMsg("user@example.com", "example.com", "")
+	msg.Labels = []string{"CATEGORY_PROMOTIONS"}
+
+	result, err := c.Classify(context.Background(), msg)
+	if err != nil {
+		t.Fatalf("Classify: %v", err)
+	}
+	if result.Category != CategoryNewsletterMarketing {
+		t.Errorf("Category: got %q, want %q", result.Category, CategoryNewsletterMarketing)
+	}
+}
+
+func TestSeedRuleClassifier_LabelMatchCaseInsensitive(t *testing.T) {
+	seeds := []ClassificationSeed{
+		{ID: 1, PatternType: PatternLabel, PatternValue: "category_promotions", Category: CategoryNewsletterMarketing, Source: SourceSeed, Priority: 100},
+	}
+	c := NewSeedRuleClassifier(seeds)
+	msg := makeMsg("user@example.com", "example.com", "")
+	msg.Labels = []string{"CATEGORY_PROMOTIONS"}
+
+	result, err := c.Classify(context.Background(), msg)
+	if err != nil {
+		t.Fatalf("Classify: %v", err)
+	}
+	if result.Category != CategoryNewsletterMarketing {
+		t.Errorf("Category: got %q, want %q", result.Category, CategoryNewsletterMarketing)
+	}
+}
+
+func TestSeedRuleClassifier_LabelNoMatchWhenEmpty(t *testing.T) {
+	seeds := []ClassificationSeed{
+		{ID: 1, PatternType: PatternLabel, PatternValue: "INBOX", Category: CategoryInternal, Source: SourceSeed, Priority: 100},
+	}
+	c := NewSeedRuleClassifier(seeds)
+	msg := makeMsg("user@example.com", "example.com", "")
+
+	result, err := c.Classify(context.Background(), msg)
+	if err != nil {
+		t.Fatalf("Classify: %v", err)
+	}
+	if result.Category != CategoryUnknown {
+		t.Errorf("Category: got %q, want %q", result.Category, CategoryUnknown)
+	}
+}
+
+func TestSeedRuleClassifier_LabelWrongValueNoMatch(t *testing.T) {
+	seeds := []ClassificationSeed{
+		{ID: 1, PatternType: PatternLabel, PatternValue: "SENT", Category: CategoryInternal, Source: SourceSeed, Priority: 100},
+	}
+	c := NewSeedRuleClassifier(seeds)
+	msg := makeMsg("user@example.com", "example.com", "")
+	msg.Labels = []string{"INBOX"}
+
+	result, err := c.Classify(context.Background(), msg)
+	if err != nil {
+		t.Fatalf("Classify: %v", err)
+	}
+	if result.Category != CategoryUnknown {
+		t.Errorf("Category: got %q, want %q", result.Category, CategoryUnknown)
+	}
+}
+
 func TestAIInferenceClassifier_SkipsDeterministicallyClassifiedMessage(t *testing.T) {
 	classifier := NewAIInferenceClassifier(
 		map[string]string{"m1": CategoryVendor},
@@ -554,7 +621,7 @@ func TestDefaultSeeds_Integrity(t *testing.T) {
 	}
 	validPatternTypes := map[string]bool{
 		PatternDomain: true, PatternSenderEmail: true,
-		PatternSenderPrefix: true, PatternHasAttachment: true, PatternSubjectTerm: true,
+		PatternSenderPrefix: true, PatternLabel: true, PatternHasAttachment: true, PatternSubjectTerm: true,
 	}
 
 	for i, s := range seeds {
@@ -1032,8 +1099,8 @@ func TestRunMailboxClassification_RejectsMissingProviderID(t *testing.T) {
 }
 
 func TestSpecificityRank_UnknownTypeFallsBackLast(t *testing.T) {
-	if got := specificityRank("mystery"); got != 6 {
-		t.Fatalf("specificityRank: got %d, want 6", got)
+	if got := specificityRank("mystery"); got != 7 {
+		t.Fatalf("specificityRank: got %d, want 7", got)
 	}
 }
 
@@ -1045,8 +1112,9 @@ func TestSpecificityRank_KnownTypes(t *testing.T) {
 		{PatternSenderEmail, 1},
 		{PatternSenderPrefix, 2},
 		{PatternDomain, 3},
-		{PatternHasAttachment, 4},
-		{PatternSubjectTerm, 5},
+		{PatternLabel, 4},
+		{PatternHasAttachment, 5},
+		{PatternSubjectTerm, 6},
 	}
 
 	for _, tt := range tests {

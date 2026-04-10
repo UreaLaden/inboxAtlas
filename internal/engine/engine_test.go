@@ -657,6 +657,44 @@ func TestListClassifiedMessages_MailboxNotFound(t *testing.T) {
 	}
 }
 
+func TestListLabelStats(t *testing.T) {
+	cfg := engineTestConfig(t)
+	st := engineTestStore(t, cfg)
+	createEngineMailbox(t, st, "user@example.com")
+
+	now := time.Date(2026, 4, 9, 12, 0, 0, 0, time.UTC)
+	for _, msg := range []models.MessageMeta{
+		{ProviderID: "l1", MailboxID: "user@example.com", Provider: "gmail", Labels: []string{"CATEGORY_PROMOTIONS", "INBOX"}, ReceivedAt: now},
+		{ProviderID: "l2", MailboxID: "user@example.com", Provider: "gmail", Labels: []string{"INBOX"}, ReceivedAt: now.Add(time.Minute)},
+		{ProviderID: "l3", MailboxID: "user@example.com", Provider: "gmail", Labels: []string{"INBOX"}, ReceivedAt: now.Add(2 * time.Minute)},
+	} {
+		engineSeedMessage(t, st, msg)
+	}
+
+	result, err := ListLabelStats(context.Background(), cfg, "user@example.com", 2)
+	if err != nil {
+		t.Fatalf("ListLabelStats: %v", err)
+	}
+	if result.MailboxID != "user@example.com" {
+		t.Fatalf("MailboxID: got %q, want %q", result.MailboxID, "user@example.com")
+	}
+	if len(result.Labels) != 1 {
+		t.Fatalf("expected 1 label row, got %d", len(result.Labels))
+	}
+	if result.Labels[0].Label != "INBOX" || result.Labels[0].MessageCount != 3 {
+		t.Fatalf("unexpected label row: %+v", result.Labels[0])
+	}
+}
+
+func TestListLabelStats_MailboxNotFound(t *testing.T) {
+	cfg := engineTestConfig(t)
+
+	_, err := ListLabelStats(context.Background(), cfg, "missing@example.com", 1)
+	if err == nil {
+		t.Fatal("expected mailbox resolution error")
+	}
+}
+
 func TestRunInference_PersistsHighAndMediumCandidates(t *testing.T) {
 	cfg := engineTestConfig(t)
 	st := engineTestStore(t, cfg)
@@ -1254,6 +1292,9 @@ func TestClassificationPatternTypes(t *testing.T) {
 	}
 	if !containsString(got, classification.PatternHasAttachment) {
 		t.Fatalf("missing has_attachment pattern type: %+v", got)
+	}
+	if !containsString(got, classification.PatternLabel) {
+		t.Fatalf("missing label pattern type: %+v", got)
 	}
 }
 

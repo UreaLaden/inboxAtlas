@@ -1372,7 +1372,7 @@ func TestBuildClassifyCmd_HasSubcommands(t *testing.T) {
 	for _, sub := range cmd.Commands() {
 		names[sub.Name()] = true
 	}
-	for _, want := range []string{"run", "results", "suggestions", "infer", "promote", "seeds", "categories", "pattern-types"} {
+	for _, want := range []string{"run", "results", "suggestions", "infer", "promote", "seeds", "categories", "pattern-types", "label-analysis"} {
 		if !names[want] {
 			t.Errorf("expected subcommand %q under classify", want)
 		}
@@ -2234,7 +2234,7 @@ func TestRunClassifyPatternTypes(t *testing.T) {
 	if err := runClassifyPatternTypes(&buf); err != nil {
 		t.Fatalf("runClassifyPatternTypes: %v", err)
 	}
-	if !strings.Contains(buf.String(), "domain") || !strings.Contains(buf.String(), "subject_term") {
+	if !strings.Contains(buf.String(), "domain") || !strings.Contains(buf.String(), "subject_term") || !strings.Contains(buf.String(), "label") {
 		t.Fatalf("unexpected pattern types output: %q", buf.String())
 	}
 }
@@ -2255,6 +2255,91 @@ func TestBuildClassifyPatternTypesCmd_Executes(t *testing.T) {
 	}
 	if !strings.Contains(buf.String(), "domain") {
 		t.Fatalf("unexpected output: %q", buf.String())
+	}
+}
+
+func TestRunClassifyLabelAnalysis_Table(t *testing.T) {
+	dir := t.TempDir()
+	cfg := config.Default()
+	cfg.StoragePath = filepath.Join(dir, "test.db")
+
+	st, err := storage.Open(cfg.StoragePath)
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	if err := st.CreateMailbox(context.Background(), models.Mailbox{ID: "user@example.com", Provider: "gmail"}); err != nil {
+		t.Fatalf("CreateMailbox: %v", err)
+	}
+	now := time.Date(2026, 4, 9, 12, 0, 0, 0, time.UTC)
+	for _, msg := range []models.MessageMeta{
+		{ProviderID: "l1", MailboxID: "user@example.com", Provider: "gmail", Labels: []string{"CATEGORY_PROMOTIONS", "INBOX"}, ReceivedAt: now},
+		{ProviderID: "l2", MailboxID: "user@example.com", Provider: "gmail", Labels: []string{"INBOX"}, ReceivedAt: now.Add(time.Minute)},
+	} {
+		if err := st.UpsertMessage(context.Background(), msg); err != nil {
+			t.Fatalf("UpsertMessage(%s): %v", msg.ProviderID, err)
+		}
+	}
+	_ = st.Close()
+
+	var buf bytes.Buffer
+	if err := runClassifyLabelAnalysis(context.Background(), &buf, cfg, "user@example.com", "table", 1); err != nil {
+		t.Fatalf("runClassifyLabelAnalysis: %v", err)
+	}
+	output := buf.String()
+	if !strings.Contains(output, "LABEL") || !strings.Contains(output, "MESSAGES") || !strings.Contains(output, "INBOX") {
+		t.Fatalf("unexpected table output: %q", output)
+	}
+}
+
+func TestRunClassifyLabelAnalysis_JSON(t *testing.T) {
+	dir := t.TempDir()
+	cfg := config.Default()
+	cfg.StoragePath = filepath.Join(dir, "test.db")
+
+	st, err := storage.Open(cfg.StoragePath)
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	if err := st.CreateMailbox(context.Background(), models.Mailbox{ID: "user@example.com", Provider: "gmail"}); err != nil {
+		t.Fatalf("CreateMailbox: %v", err)
+	}
+	if err := st.UpsertMessage(context.Background(), models.MessageMeta{
+		ProviderID: "l1", MailboxID: "user@example.com", Provider: "gmail",
+		Labels: []string{"INBOX"}, ReceivedAt: time.Date(2026, 4, 9, 12, 0, 0, 0, time.UTC),
+	}); err != nil {
+		t.Fatalf("UpsertMessage: %v", err)
+	}
+	_ = st.Close()
+
+	var buf bytes.Buffer
+	if err := runClassifyLabelAnalysis(context.Background(), &buf, cfg, "user@example.com", "json", 1); err != nil {
+		t.Fatalf("runClassifyLabelAnalysis: %v", err)
+	}
+	if !strings.Contains(buf.String(), "\"Label\": \"INBOX\"") && !strings.Contains(buf.String(), "\"label\": \"INBOX\"") {
+		t.Fatalf("unexpected json output: %q", buf.String())
+	}
+}
+
+func TestRunClassifyLabelAnalysis_Empty(t *testing.T) {
+	dir := t.TempDir()
+	cfg := config.Default()
+	cfg.StoragePath = filepath.Join(dir, "test.db")
+
+	st, err := storage.Open(cfg.StoragePath)
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	if err := st.CreateMailbox(context.Background(), models.Mailbox{ID: "user@example.com", Provider: "gmail"}); err != nil {
+		t.Fatalf("CreateMailbox: %v", err)
+	}
+	_ = st.Close()
+
+	var buf bytes.Buffer
+	if err := runClassifyLabelAnalysis(context.Background(), &buf, cfg, "user@example.com", "table", 1); err != nil {
+		t.Fatalf("runClassifyLabelAnalysis: %v", err)
+	}
+	if !strings.Contains(buf.String(), "No label stats found for user@example.com.") {
+		t.Fatalf("unexpected empty output: %q", buf.String())
 	}
 }
 

@@ -1,6 +1,4 @@
-.PHONY: fmt lint build test run coverage coverage-pkg coverage-func coverage-total
-
-BINARY  := inboxatlas
+.PHONY: fmt lint build test run coverage coverage-pkg coverage-func coverage-total sync classify-run classify-infer gen-reports pipeline
 CMD     := ./cmd/inboxatlas
 SUMMARY_PROVIDER := ./cmd/openai-summary-provider
 INFERENCE_PROVIDER := ./cmd/ai-inference-provider
@@ -9,8 +7,17 @@ GO_TEST_ENV := env GOCACHE=/tmp/inboxatlas-gocache GOTMPDIR=/tmp/inboxatlas-gotm
 GO_TEST_PREP := mkdir -p /tmp/inboxatlas-gocache /tmp/inboxatlas-gotmp
 GO_TEST_FLAGS :=
 
+REPORTS_DIR := ./.ai/references/reports/out
+
 ifeq ($(OS),Windows_NT)
+BINARY := inboxatlas.exe
+SUMMARY_PROVIDER_BINARY := openai-summary-provider.exe
+AI_INFERENCE_BINARY := ai-inference-provider.exe
 GO_TEST_FLAGS += -work
+else
+BINARY := inboxatlas
+SUMMARY_PROVIDER_BINARY := openai-summary-provider
+AI_INFERENCE_BINARY := ai-inference-provider
 endif
 
 # Format all Go source files.
@@ -23,10 +30,11 @@ lint: fmt
 
 # Build the inboxatlas, ia, openai-summary-provider, and ai-inference-provider binaries.
 build:
-	$(GO) build -o inboxatlas $(CMD)
-	$(GO) build -o ia $(CMD)
-	$(GO) build -o openai-summary-provider.exe $(SUMMARY_PROVIDER)
-	$(GO) build -o ai-inference-provider.exe $(INFERENCE_PROVIDER)
+	@$(GO) build -o $(BINARY) $(CMD)
+	@$(GO) build -o ia $(CMD)
+	@$(GO) build -o $(SUMMARY_PROVIDER_BINARY) $(SUMMARY_PROVIDER)
+	@$(GO) build -o $(AI_INFERENCE_BINARY) $(INFERENCE_PROVIDER)
+	@echo "Build complete!"
 
 # Run all tests.
 test:
@@ -54,3 +62,73 @@ coverage-total: coverage
 # Build and run the inboxatlas binary.
 run: build
 	./$(BINARY)
+
+ACCOUNT?= 
+gen-reports-csv:
+	@./$(BINARY) report domains --account $(ACCOUNT) --format csv > .ai/references/reports/out/domains.csv
+	@./$(BINARY) report senders --account $(ACCOUNT) --format csv > .ai/references/reports/out/senders.csv
+	@./$(BINARY) report subjects --account $(ACCOUNT) --format csv > .ai/references/reports/out/subjects.csv
+	@./$(BINARY) report volume --account $(ACCOUNT) --format csv > .ai/references/reports/out/volume.csv
+
+gen-reports-json:
+	@./$(BINARY) report domains --account $(ACCOUNT) --format json > .ai/references/reports/out/domains.json
+	@./$(BINARY) report senders --account $(ACCOUNT) --format json > .ai/references/reports/out/senders.json
+	@./$(BINARY) report subjects --account $(ACCOUNT) --format json > .ai/references/reports/out/subjects.json
+	@./$(BINARY) report volume --account $(ACCOUNT) --format json > .ai/references/reports/out/volume.json
+
+
+gen-promote-commands:
+	@comm -23 \
+		<(./$(BINARY) classify suggestions --account $(ACCOUNT) | awk 'NR>1 {print $$1 ":" $$2}' | sort) \
+		<(./$(BINARY)  classify seeds list --account $(ACCOUNT) | awk 'NR>1 {print $$2 ":" $$3}' | sort) \
+	  | while IFS=: read ptype pvalue; do \
+			echo "./$(BINARY) classify promote --account $(ACCOUNT) --pattern-type $$ptype --pattern-value $$pvalue --category <CATEGORY>"; \
+		done
+
+
+LIMIT ?= 0
+sync:
+	@./$(BINARY) sync gmail --account $(ACCOUNT) --limit $(LIMIT)
+
+# Run pattern-based classification for one account.
+classify-run:
+	@./$(BINARY) classify run --account $(ACCOUNT)
+
+# Run AI-assisted inference for one account using the bundled inference provider.
+classify-infer:
+	@./$(BINARY) classify infer \
+		--account $(ACCOUNT) \
+		--provider-command ./$(AI_INFERENCE_BINARY)
+
+# Generate both CSV and JSON report sets in one shot.
+gen-reports: gen-reports-csv gen-reports-json
+
+
+# Run the full pipeline for one account: sync → classify → infer → reports.
+pipeline: sync classify-run classify-infer gen-reports-csv
+
+OWNER_EMAIL ?=
+summarize-reports:
+	@./$(BINARY) report summarize \
+		--reports-dir $(REPORTS_DIR) \
+		--owner-email $(OWNER_EMAIL) \
+		--provider-command ./$(SUMMARY_PROVIDER_BINARY) \
+		--prompt-file ./.claude/commands/summarizeReport.md
+
+gen-export-html: 
+	@./$(BINARY) report export \
+		--reports-dir $(REPORTS_DIR) \
+		--output-dir $(REPORTS_DIR) \
+		--format html \
+		--owner-email $(OWNER_EMAIL) \
+		--summary-file $(REPORTS_DIR)/summary.md
+
+gen-export-excel: 
+	@./$(BINARY) report export \
+		--reports-dir $(REPORTS_DIR) \
+		--output-dir $(REPORTS_DIR) \
+		--format excel \
+		--owner-email $(OWNER_EMAIL) \
+		--summary-file $(REPORTS_DIR)/summary.md
+
+gen-exports: gen-export-html gen-export-excel

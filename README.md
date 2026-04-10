@@ -344,6 +344,9 @@ inboxatlas classify suggestions --account <id|alias> [--format table|json]
 # Review classified messages with optional filters
 inboxatlas classify messages --account <id|alias> [--category <category>] [--intent <intent>] [--since <RFC3339>] [--format table|csv|json] [--limit 100]
 
+# Review Gmail label frequency to guide manual seed authoring
+inboxatlas classify label-analysis --account <id|alias> [--format table|json] [--min-count 1]
+
 # Run AI-assisted inference over still-unknown messages
 inboxatlas classify infer --account <id|alias> --provider-command <cmd> [--provider-arg <arg>...]
 
@@ -363,7 +366,7 @@ inboxatlas classify pattern-types
 
 # Promote one reviewed suggestion into the active mailbox-scoped seed set
 inboxatlas classify promote --account <id|alias> \
-  --pattern-type <domain|sender_email|sender_prefix|has_attachment|subject_term> \
+  --pattern-type <domain|sender_email|sender_prefix|label|has_attachment|subject_term> \
   --pattern-value <value> \
   --category <category> \
   [--priority 100]
@@ -373,6 +376,7 @@ inboxatlas classify promote --account <id|alias> \
 |---|---|
 | `classify run` | Loads synced message metadata for one mailbox, persists mailbox-scoped classifications, and prints a per-category breakdown with unknown percentage |
 | `classify messages` | Lists per-message classification rows with optional category, intent, and since filters, plus message IDs, attachment presence, and table/csv/json output |
+| `classify label-analysis` | Shows mailbox-scoped Gmail label frequency so operators can author manual `pattern-type=label` seeds from observed labels |
 | `classify results` | Shows mailbox-scoped classification totals, per-category counts, and unknown percentage |
 | `classify suggestions` | Shows read-only mailbox bootstrap suggestions derived from observed mailbox discovery data, excluding patterns already covered by global defaults |
 | `classify infer` | Runs AI-assisted inference only for messages still classified as `unknown` and stages valid medium/high-confidence suggestions for review |
@@ -394,7 +398,8 @@ Notes:
 - `classify suggestions` is read-only and does not activate any seed.
 - `classify infer` requires `--provider-command` or `INBOXATLAS_INFERENCE_PROVIDER_CMD`; it only submits messages that remain `unknown` after deterministic classification.
 - `classify infer suggestions` is read-only and lists staged AI candidates rather than active seeds.
-- `classify categories` lists only relationship categories; `classify intents` lists additive intent values; `classify pattern-types` includes `has_attachment`.
+- `classify categories` lists only relationship categories; `classify intents` lists additive intent values; `classify pattern-types` includes `label` and `has_attachment`.
+- `classify label-analysis` is read-only and intended for manual workflow tuning rather than automatic suggestion generation.
 - `classify results` and `classify run` now show an `INTENT` column whenever any mailbox classification rows carry a non-empty intent.
 - The first-party inference provider binary added in this repo is `cmd/ai-inference-provider`.
 - Set `OPENAI_API_KEY` before running the first-party inference provider. Optional overrides are `OPENAI_INFERENCE_MODEL`, `OPENAI_MODEL`, `OPENAI_BASE_URL`, `OPENAI_TIMEOUT_SECONDS`, and `OPENAI_DEBUG`.
