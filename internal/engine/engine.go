@@ -479,7 +479,10 @@ func derefTime(t *time.Time) time.Time {
 // RunInference executes mailbox-scoped AI inference over messages that remain
 // unknown after deterministic classification and stages valid medium/high
 // confidence candidates for operator review.
-func RunInference(ctx context.Context, cfg config.Config, account, command string, args []string) (InferenceRunSummary, error) {
+//
+// batchSize controls how many messages are sent to the provider in each call.
+// A value of 0 or less sends all unknown messages in a single call.
+func RunInference(ctx context.Context, cfg config.Config, account, command string, args []string, batchSize int) (InferenceRunSummary, error) {
 	st, mb, err := openResolvedStore(ctx, cfg, account)
 	if err != nil {
 		return InferenceRunSummary{}, err
@@ -569,12 +572,27 @@ func RunInference(ctx context.Context, cfg config.Config, account, command strin
 	}
 
 	provider := classification.CommandInferenceProvider{Command: command, Args: args}
-	candidates, err := provider.Infer(ctx, requests)
-	if err != nil {
-		return InferenceRunSummary{}, err
+
+	effective := batchSize
+	if effective <= 0 {
+		effective = len(requests)
 	}
 
-	for _, candidate := range candidates {
+	var allCandidates []classification.InferenceCandidate
+	for i := 0; i < len(requests); i += effective {
+		end := i + effective
+		if end > len(requests) {
+			end = len(requests)
+		}
+		batch := requests[i:end]
+		got, err := provider.Infer(ctx, batch)
+		if err != nil {
+			return InferenceRunSummary{}, err
+		}
+		allCandidates = append(allCandidates, got...)
+	}
+
+	for _, candidate := range allCandidates {
 		if err := classification.ValidateInferenceCandidate(candidate, requestByID); err != nil {
 			summary.Rejected++
 			continue
@@ -720,6 +738,155 @@ func PromoteClassifySuggestion(ctx context.Context, cfg config.Config, account s
 		Source:       classification.SourceOperator,
 		Priority:     priority,
 		Created:      true,
+	}, nil
+}
+
+// SubjectEvalRule is the engine-layer representation of a subject keyword
+// classification rule. It mirrors classification.SubjectRule but is defined
+// here so that callers (including the CLI) do not need to import the
+// classification package directly.
+type SubjectEvalRule struct {
+	// IncludeKeywords specifies keywords of which at least one must appear in
+	// the normalized subject (OR semantics, case-insensitive, whole-token).
+	IncludeKeywords []string
+	// ExcludeKeywords specifies keywords none of which may appear in the
+	// normalized subject (case-insensitive, whole-token).
+	ExcludeKeywords []string
+	// Category is the taxonomy constant assigned when this rule matches.
+	Category string
+	// Priority controls evaluation order (lower = evaluated first).
+	Priority int
+}
+
+// SubjectEvalResult is one message evaluation row from EvaluateSubjectRules.
+type SubjectEvalResult struct {
+	MessageID      string `json:"message_id"`
+	Subject        string `json:"subject"`
+	Normalized     string `json:"normalized"`
+	Matched        bool   `json:"matched"`
+	Category       string `json:"category"`
+	MatchedRule    string `json:"matched_rule"`
+	Excluded       bool   `json:"excluded"`
+	ExcludedReason string `json:"excluded_reason,omitempty"`
+}
+
+// SubjectEvalSummary is the result of EvaluateSubjectRules.
+type SubjectEvalSummary struct {
+	MailboxID     string              `json:"mailbox_id"`
+	TotalMessages int                 `json:"total_messages"`
+	MatchedCount  int                 `json:"matched_count"`
+	ExcludedCount int                 `json:"excluded_count"`
+	Results       []SubjectEvalResult `json:"results"`
+}
+
+// EvaluateSubjectRules runs a dry-run subject-rule evaluation against all
+// synced messages for account. No classifications are persisted — this is a
+// read-only operator tool. Rules are passed directly by the caller rather than
+// loaded from storage.
+//
+// excludeCategories is an optional list of persisted category values. Messages
+// whose persisted classification matches any entry are marked excluded
+// (Excluded: true, ExcludedReason: "category:<name>") and do not count toward
+// MatchedCount. Messages with no persisted classification row are never excluded.
+//
+// Note on output volume: ListMessageMetaByMailbox returns all synced messages.
+// For large mailboxes this may produce a large in-memory result set. This is
+// acceptable for a dry-run operator tool in v1.
+//
+// If both a PatternSubjectTerm seed (via SeedRuleClassifier) and a
+// SubjectRuleClassifier rule are active in a future classify run, the
+// ChainClassifier priority/chain order governs which result wins.
+func EvaluateSubjectRules(
+	ctx context.Context,
+	cfg config.Config,
+	account string,
+	rules []SubjectEvalRule,
+	excludeCategories []string,
+) (SubjectEvalSummary, error) {
+	st, mb, err := openResolvedStore(ctx, cfg, account)
+	if err != nil {
+		return SubjectEvalSummary{}, err
+	}
+	defer func() { _ = st.Close() }()
+
+	messages, err := st.ListMessageMetaByMailbox(ctx, mb.ID)
+	if err != nil {
+		return SubjectEvalSummary{}, fmt.Errorf("list messages: %w", err)
+	}
+
+	// Load persisted classifications for category-exclusion checks.
+	var persistedCategories map[string]string
+	if len(excludeCategories) > 0 {
+		persistedCategories, err = st.ListMessageClassificationsByMailbox(ctx, mb.ID)
+		if err != nil {
+			return SubjectEvalSummary{}, fmt.Errorf("load persisted classifications: %w", err)
+		}
+	}
+
+	// Build a set of excluded category values for O(1) lookup.
+	excludeSet := make(map[string]struct{}, len(excludeCategories))
+	for _, cat := range excludeCategories {
+		excludeSet[cat] = struct{}{}
+	}
+
+	classRules := make([]classification.SubjectRule, len(rules))
+	for i, r := range rules {
+		classRules[i] = classification.SubjectRule{
+			IncludeKeywords: append([]string(nil), r.IncludeKeywords...),
+			ExcludeKeywords: append([]string(nil), r.ExcludeKeywords...),
+			Category:        r.Category,
+			Priority:        r.Priority,
+		}
+	}
+	classifier := classification.NewSubjectRuleClassifier(classRules)
+	results := make([]SubjectEvalResult, 0, len(messages))
+	matched := 0
+	excluded := 0
+
+	for _, msg := range messages {
+		norm := classification.NormalizeSubject(msg.Subject)
+
+		// Check category exclusion before running the subject rule.
+		var isExcluded bool
+		var excludedReason string
+		if len(excludeSet) > 0 {
+			if persistedCat, ok := persistedCategories[msg.ProviderID]; ok {
+				if _, excluded := excludeSet[persistedCat]; excluded {
+					isExcluded = true
+					excludedReason = "category:" + persistedCat
+				}
+			}
+		}
+
+		result, err := classifier.Classify(ctx, msg)
+		if err != nil {
+			return SubjectEvalSummary{}, fmt.Errorf("evaluate message %q: %w", msg.ProviderID, err)
+		}
+		isMatch := result.Category != classification.CategoryUnknown
+		if isMatch && !isExcluded {
+			matched++
+		}
+		if isExcluded {
+			excluded++
+		}
+		results = append(results, SubjectEvalResult{
+			MessageID:      msg.ProviderID,
+			Subject:        msg.Subject,
+			Normalized:     norm,
+			Matched:        isMatch,
+			Category:       result.Category,
+			MatchedRule:    result.MatchedRule,
+			Excluded:       isExcluded,
+			ExcludedReason: excludedReason,
+		})
+	}
+
+	return SubjectEvalSummary{
+		MailboxID:     mb.ID,
+		TotalMessages: len(messages),
+		MatchedCount:  matched,
+		ExcludedCount: excluded,
+		Results:       results,
 	}, nil
 }
 

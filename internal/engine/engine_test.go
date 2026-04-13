@@ -794,7 +794,7 @@ func TestRunInference_PersistsHighAndMediumCandidates(t *testing.T) {
 		t.Fatalf("UpsertDomainStat m3: %v", err)
 	}
 
-	result, err := RunInference(context.Background(), cfg, "user@example.com", inferenceTestProviderCommand(), inferenceTestProviderArgs("persisted"))
+	result, err := RunInference(context.Background(), cfg, "user@example.com", inferenceTestProviderCommand(), inferenceTestProviderArgs("persisted"), 0)
 	if err != nil {
 		t.Fatalf("RunInference: %v", err)
 	}
@@ -836,7 +836,7 @@ func TestRunInference_RejectsInvalidAndLowCandidates(t *testing.T) {
 		t.Fatalf("UpsertDomainStat y: %v", err)
 	}
 
-	result, err := RunInference(context.Background(), cfg, "user@example.com", inferenceTestProviderCommand(), inferenceTestProviderArgs("mixed"))
+	result, err := RunInference(context.Background(), cfg, "user@example.com", inferenceTestProviderCommand(), inferenceTestProviderArgs("mixed"), 0)
 	if err != nil {
 		t.Fatalf("RunInference: %v", err)
 	}
@@ -858,7 +858,7 @@ func TestRunInference_NoUnknownMessages(t *testing.T) {
 		ReceivedAt: time.Now().UTC(),
 	})
 
-	result, err := RunInference(context.Background(), cfg, "user@example.com", inferenceTestProviderCommand(), inferenceTestProviderArgs("persisted"))
+	result, err := RunInference(context.Background(), cfg, "user@example.com", inferenceTestProviderCommand(), inferenceTestProviderArgs("persisted"), 0)
 	if err != nil {
 		t.Fatalf("RunInference: %v", err)
 	}
@@ -883,7 +883,7 @@ func TestRunInference_UsesSenderEmailFallbackPattern(t *testing.T) {
 		t.Fatalf("UpsertSenderStat: %v", err)
 	}
 
-	result, err := RunInference(context.Background(), cfg, "user@example.com", inferenceTestProviderCommand(), inferenceTestProviderArgs("sender-fallback"))
+	result, err := RunInference(context.Background(), cfg, "user@example.com", inferenceTestProviderCommand(), inferenceTestProviderArgs("sender-fallback"), 0)
 	if err != nil {
 		t.Fatalf("RunInference: %v", err)
 	}
@@ -912,7 +912,7 @@ func TestRunInference_RejectsCandidateWithoutPromotablePattern(t *testing.T) {
 		ReceivedAt: time.Now().UTC(),
 	})
 
-	result, err := RunInference(context.Background(), cfg, "user@example.com", inferenceTestProviderCommand(), inferenceTestProviderArgs("sender-fallback"))
+	result, err := RunInference(context.Background(), cfg, "user@example.com", inferenceTestProviderCommand(), inferenceTestProviderArgs("sender-fallback"), 0)
 	if err != nil {
 		t.Fatalf("RunInference: %v", err)
 	}
@@ -926,14 +926,14 @@ func TestRunInference_EmptyMailbox(t *testing.T) {
 	st := engineTestStore(t, cfg)
 	createEngineMailbox(t, st, "user@example.com")
 
-	if _, err := RunInference(context.Background(), cfg, "user@example.com", inferenceTestProviderCommand(), inferenceTestProviderArgs("persisted")); err == nil {
+	if _, err := RunInference(context.Background(), cfg, "user@example.com", inferenceTestProviderCommand(), inferenceTestProviderArgs("persisted"), 0); err == nil {
 		t.Fatal("expected empty mailbox error")
 	}
 }
 
 func TestRunInference_MailboxNotFound(t *testing.T) {
 	cfg := engineTestConfig(t)
-	if _, err := RunInference(context.Background(), cfg, "missing@example.com", inferenceTestProviderCommand(), inferenceTestProviderArgs("persisted")); err == nil {
+	if _, err := RunInference(context.Background(), cfg, "missing@example.com", inferenceTestProviderCommand(), inferenceTestProviderArgs("persisted"), 0); err == nil {
 		t.Fatal("expected mailbox resolution error")
 	}
 }
@@ -942,7 +942,7 @@ func TestRunInference_OpenStorageError(t *testing.T) {
 	cfg := config.Default()
 	cfg.StoragePath = "/dev/null/inboxatlas.db"
 
-	if _, err := RunInference(context.Background(), cfg, "user@example.com", inferenceTestProviderCommand(), inferenceTestProviderArgs("persisted")); err == nil {
+	if _, err := RunInference(context.Background(), cfg, "user@example.com", inferenceTestProviderCommand(), inferenceTestProviderArgs("persisted"), 0); err == nil {
 		t.Fatal("expected open storage error")
 	}
 }
@@ -963,7 +963,7 @@ func TestRunInference_ProviderError(t *testing.T) {
 		t.Fatalf("UpsertDomainStat: %v", err)
 	}
 
-	if _, err := RunInference(context.Background(), cfg, "user@example.com", inferenceTestProviderCommand(), inferenceTestProviderArgs("stderr-exit")); err == nil {
+	if _, err := RunInference(context.Background(), cfg, "user@example.com", inferenceTestProviderCommand(), inferenceTestProviderArgs("stderr-exit"), 0); err == nil {
 		t.Fatal("expected provider error")
 	}
 }
@@ -980,8 +980,72 @@ func TestRunInference_PropagatesDeterministicClassificationError(t *testing.T) {
 		ReceivedAt: time.Now().UTC(),
 	})
 
-	if _, err := RunInference(context.Background(), cfg, "user@example.com", inferenceTestProviderCommand(), inferenceTestProviderArgs("persisted")); err == nil {
+	if _, err := RunInference(context.Background(), cfg, "user@example.com", inferenceTestProviderCommand(), inferenceTestProviderArgs("persisted"), 0); err == nil {
 		t.Fatal("expected deterministic classification error")
+	}
+}
+
+func TestRunInference_BatchingCollectsAllCandidates(t *testing.T) {
+	// Uses the same message setup as TestRunInference_PersistsHighAndMediumCandidates
+	// so the hardcoded provider responses (m2, m3) map to the actual unknown messages.
+	// batchSize=1 forces two provider calls (one per unknown message); both candidates
+	// must still be accumulated and persisted.
+	cfg := engineTestConfig(t)
+	st := engineTestStore(t, cfg)
+	createEngineMailbox(t, st, "user@example.com")
+	now := time.Now().UTC()
+
+	engineSeedMessage(t, st, models.MessageMeta{
+		ProviderID: "m1",
+		MailboxID:  "user@example.com",
+		Provider:   "gmail",
+		FromEmail:  "groupupdates@facebookmail.com",
+		Domain:     "facebookmail.com",
+		ReceivedAt: now,
+	})
+	engineSeedMessage(t, st, models.MessageMeta{
+		ProviderID: "m2",
+		MailboxID:  "user@example.com",
+		Provider:   "gmail",
+		FromEmail:  "ai@healthymd.com",
+		Domain:     "healthymd.com",
+		Subject:    "Invoice review",
+		ReceivedAt: now.Add(time.Minute),
+	})
+	engineSeedMessage(t, st, models.MessageMeta{
+		ProviderID: "m3",
+		MailboxID:  "user@example.com",
+		Provider:   "gmail",
+		FromEmail:  "reply@client.example",
+		Domain:     "client.example",
+		Subject:    "Client follow-up",
+		ReceivedAt: now.Add(2 * time.Minute),
+	})
+	if err := st.UpsertDomainStat(context.Background(), "user@example.com", "healthymd.com", 2); err != nil {
+		t.Fatalf("UpsertDomainStat healthymd: %v", err)
+	}
+	if err := st.UpsertDomainStat(context.Background(), "user@example.com", "client.example", 1); err != nil {
+		t.Fatalf("UpsertDomainStat client: %v", err)
+	}
+
+	// m1 is classified by the default facebookmail seed; m2 and m3 are unknown.
+	// batchSize=1 forces two provider calls. The provider returns m2+m3 for every
+	// call, so both candidates are accumulated across both batches. After upsert
+	// deduplication, ListInferenceSuggestions must return exactly 2 entries.
+	result, err := RunInference(context.Background(), cfg, "user@example.com", inferenceTestProviderCommand(), inferenceTestProviderArgs("persisted"), 1)
+	if err != nil {
+		t.Fatalf("RunInference with batchSize=1: %v", err)
+	}
+	if result.Submitted != 2 {
+		t.Fatalf("expected Submitted=2 with batchSize=1, got %+v", result)
+	}
+
+	suggestions, err := st.ListInferenceSuggestions(context.Background(), "user@example.com")
+	if err != nil {
+		t.Fatalf("ListInferenceSuggestions: %v", err)
+	}
+	if len(suggestions) != 2 {
+		t.Fatalf("expected 2 unique persisted suggestions with batchSize=1, got %d", len(suggestions))
 	}
 }
 
@@ -1476,5 +1540,277 @@ func inferenceTestProviderWindows(mode string) string {
 		return `more >nul & >&2 echo debug trace & exit /b 9`
 	default:
 		panic("unknown mode: " + mode)
+	}
+}
+
+// --- EvaluateSubjectRules ---
+
+func TestEvaluateSubjectRules_MatchAndExclusion(t *testing.T) {
+	cfg := engineTestConfig(t)
+	st := engineTestStore(t, cfg)
+	createEngineMailbox(t, st, "user@example.com")
+	engineSeedMessage(t, st, models.MessageMeta{
+		ProviderID: "m1",
+		MailboxID:  "user@example.com",
+		Provider:   "gmail",
+		FromEmail:  "billing@vendor.com",
+		Domain:     "vendor.com",
+		Subject:    "Invoice #42",
+		ReceivedAt: time.Now().UTC(),
+	})
+	engineSeedMessage(t, st, models.MessageMeta{
+		ProviderID: "m2",
+		MailboxID:  "user@example.com",
+		Provider:   "gmail",
+		FromEmail:  "auto@vendor.com",
+		Domain:     "vendor.com",
+		Subject:    "Meeting agenda",
+		ReceivedAt: time.Now().UTC(),
+	})
+	engineSeedMessage(t, st, models.MessageMeta{
+		ProviderID: "m3",
+		MailboxID:  "user@example.com",
+		Provider:   "gmail",
+		FromEmail:  "auto@vendor.com",
+		Domain:     "vendor.com",
+		Subject:    "invoice office update",
+		ReceivedAt: time.Now().UTC(),
+	})
+
+	rules := []SubjectEvalRule{
+		{
+			IncludeKeywords: []string{"invoice"},
+			ExcludeKeywords: []string{"office"},
+			Category:        classification.CategoryVendor,
+			Priority:        100,
+		},
+	}
+
+	summary, err := EvaluateSubjectRules(context.Background(), cfg, "user@example.com", rules, nil)
+	if err != nil {
+		t.Fatalf("EvaluateSubjectRules: %v", err)
+	}
+	if summary.TotalMessages != 3 {
+		t.Errorf("TotalMessages: got %d, want 3", summary.TotalMessages)
+	}
+	// m1 matches (invoice, no office); m2 misses; m3 excluded (invoice + office).
+	if summary.MatchedCount != 1 {
+		t.Errorf("MatchedCount: got %d, want 1", summary.MatchedCount)
+	}
+	if len(summary.Results) != 3 {
+		t.Errorf("len(Results): got %d, want 3", len(summary.Results))
+	}
+}
+
+func TestEvaluateSubjectRules_NormalizedFieldStripsPrefix(t *testing.T) {
+	cfg := engineTestConfig(t)
+	st := engineTestStore(t, cfg)
+	createEngineMailbox(t, st, "user@example.com")
+	engineSeedMessage(t, st, models.MessageMeta{
+		ProviderID: "m1",
+		MailboxID:  "user@example.com",
+		Provider:   "gmail",
+		FromEmail:  "billing@vendor.com",
+		Domain:     "vendor.com",
+		Subject:    "Re: Invoice #42",
+		ReceivedAt: time.Now().UTC(),
+	})
+
+	rules := []SubjectEvalRule{
+		{IncludeKeywords: []string{"invoice"}, Category: classification.CategoryVendor, Priority: 100},
+	}
+
+	summary, err := EvaluateSubjectRules(context.Background(), cfg, "user@example.com", rules, nil)
+	if err != nil {
+		t.Fatalf("EvaluateSubjectRules: %v", err)
+	}
+	if summary.MatchedCount != 1 {
+		t.Errorf("MatchedCount: got %d, want 1 (normalization should strip Re: prefix)", summary.MatchedCount)
+	}
+	if len(summary.Results) != 1 {
+		t.Fatalf("expected 1 result, got %d", len(summary.Results))
+	}
+	if summary.Results[0].Normalized != "Invoice #42" {
+		t.Errorf("Normalized: got %q, want %q", summary.Results[0].Normalized, "Invoice #42")
+	}
+}
+
+func TestEvaluateSubjectRules_EmptyRules_AllUnmatched(t *testing.T) {
+	cfg := engineTestConfig(t)
+	st := engineTestStore(t, cfg)
+	createEngineMailbox(t, st, "user@example.com")
+	engineSeedMessage(t, st, models.MessageMeta{
+		ProviderID: "m1",
+		MailboxID:  "user@example.com",
+		Provider:   "gmail",
+		FromEmail:  "billing@vendor.com",
+		Domain:     "vendor.com",
+		Subject:    "Invoice #42",
+		ReceivedAt: time.Now().UTC(),
+	})
+
+	summary, err := EvaluateSubjectRules(context.Background(), cfg, "user@example.com", nil, nil)
+	if err != nil {
+		t.Fatalf("EvaluateSubjectRules: %v", err)
+	}
+	if summary.MatchedCount != 0 {
+		t.Errorf("MatchedCount: got %d, want 0 (empty rules must produce no matches)", summary.MatchedCount)
+	}
+	if summary.TotalMessages != 1 {
+		t.Errorf("TotalMessages: got %d, want 1", summary.TotalMessages)
+	}
+}
+
+func TestEvaluateSubjectRules_UnknownAccount_ReturnsError(t *testing.T) {
+	cfg := engineTestConfig(t)
+	_, err := EvaluateSubjectRules(context.Background(), cfg, "nobody@example.com", nil, nil)
+	if err == nil {
+		t.Fatal("expected error for unknown account, got nil")
+	}
+}
+
+func TestEvaluateSubjectRules_EmptyMailbox(t *testing.T) {
+	cfg := engineTestConfig(t)
+	st := engineTestStore(t, cfg)
+	createEngineMailbox(t, st, "user@example.com")
+
+	rules := []SubjectEvalRule{
+		{IncludeKeywords: []string{"invoice"}, Category: classification.CategoryVendor, Priority: 100},
+	}
+	summary, err := EvaluateSubjectRules(context.Background(), cfg, "user@example.com", rules, nil)
+	if err != nil {
+		t.Fatalf("EvaluateSubjectRules: %v", err)
+	}
+	if summary.TotalMessages != 0 {
+		t.Errorf("TotalMessages: got %d, want 0", summary.TotalMessages)
+	}
+	if summary.MatchedCount != 0 {
+		t.Errorf("MatchedCount: got %d, want 0", summary.MatchedCount)
+	}
+}
+
+func TestEvaluateSubjectRules_ExcludeCategory_MarksAndDoesNotCount(t *testing.T) {
+	cfg := engineTestConfig(t)
+	st := engineTestStore(t, cfg)
+	createEngineMailbox(t, st, "user@example.com")
+	now := time.Now().UTC()
+
+	// m1: invoice subject, persisted as "social" — excluded.
+	// m2: invoice subject, no persisted classification — matched.
+	// m3: meeting subject, persisted as "social" — excluded but not matched.
+	for _, msg := range []models.MessageMeta{
+		{ProviderID: "m1", MailboxID: "user@example.com", Provider: "gmail", Subject: "Invoice notice", ReceivedAt: now},
+		{ProviderID: "m2", MailboxID: "user@example.com", Provider: "gmail", Subject: "Invoice pending", ReceivedAt: now},
+		{ProviderID: "m3", MailboxID: "user@example.com", Provider: "gmail", Subject: "Meeting agenda", ReceivedAt: now},
+	} {
+		engineSeedMessage(t, st, msg)
+	}
+	for _, c := range []storage.Classification{
+		{MessageID: "m1", MailboxID: "user@example.com", Category: classification.CategorySocial, Source: "seed", ClassifiedAt: now},
+		{MessageID: "m3", MailboxID: "user@example.com", Category: classification.CategorySocial, Source: "seed", ClassifiedAt: now},
+	} {
+		if err := st.SaveClassification(context.Background(), c); err != nil {
+			t.Fatalf("SaveClassification(%s): %v", c.MessageID, err)
+		}
+	}
+
+	rules := []SubjectEvalRule{
+		{IncludeKeywords: []string{"invoice"}, Category: classification.CategoryVendor, Priority: 100},
+	}
+
+	summary, err := EvaluateSubjectRules(context.Background(), cfg, "user@example.com", rules, []string{classification.CategorySocial})
+	if err != nil {
+		t.Fatalf("EvaluateSubjectRules: %v", err)
+	}
+
+	if summary.TotalMessages != 3 {
+		t.Errorf("TotalMessages: got %d, want 3", summary.TotalMessages)
+	}
+	// Only m2 counts: m1 matches but is excluded, m3 doesn't match and is excluded.
+	if summary.MatchedCount != 1 {
+		t.Errorf("MatchedCount: got %d, want 1", summary.MatchedCount)
+	}
+	if summary.ExcludedCount != 2 {
+		t.Errorf("ExcludedCount: got %d, want 2", summary.ExcludedCount)
+	}
+
+	byID := make(map[string]SubjectEvalResult, 3)
+	for _, r := range summary.Results {
+		byID[r.MessageID] = r
+	}
+	if !byID["m1"].Excluded {
+		t.Error("m1: expected Excluded=true")
+	}
+	if byID["m1"].ExcludedReason != "category:social" {
+		t.Errorf("m1: ExcludedReason got %q, want %q", byID["m1"].ExcludedReason, "category:social")
+	}
+	if byID["m2"].Excluded {
+		t.Error("m2: expected Excluded=false (no persisted classification)")
+	}
+	if !byID["m3"].Excluded {
+		t.Error("m3: expected Excluded=true")
+	}
+}
+
+func TestEvaluateSubjectRules_ExcludeCategory_UnclassifiedNotExcluded(t *testing.T) {
+	// Messages with no persisted classification are not excluded even when
+	// --exclude-category unknown is specified.
+	cfg := engineTestConfig(t)
+	st := engineTestStore(t, cfg)
+	createEngineMailbox(t, st, "user@example.com")
+	now := time.Now().UTC()
+
+	engineSeedMessage(t, st, models.MessageMeta{
+		ProviderID: "m1", MailboxID: "user@example.com", Provider: "gmail",
+		Subject: "Invoice notice", ReceivedAt: now,
+	})
+	// m1 has no classification row at all.
+
+	rules := []SubjectEvalRule{
+		{IncludeKeywords: []string{"invoice"}, Category: classification.CategoryVendor, Priority: 100},
+	}
+	summary, err := EvaluateSubjectRules(context.Background(), cfg, "user@example.com", rules, []string{classification.CategoryUnknown})
+	if err != nil {
+		t.Fatalf("EvaluateSubjectRules: %v", err)
+	}
+	if summary.ExcludedCount != 0 {
+		t.Errorf("ExcludedCount: got %d, want 0 (no classification row = not excluded)", summary.ExcludedCount)
+	}
+	if summary.MatchedCount != 1 {
+		t.Errorf("MatchedCount: got %d, want 1", summary.MatchedCount)
+	}
+}
+
+func TestEvaluateSubjectRules_ExcludeCategory_LiteralUnknownExcluded(t *testing.T) {
+	// A message persisted with category "unknown" IS excluded when
+	// --exclude-category unknown is specified.
+	cfg := engineTestConfig(t)
+	st := engineTestStore(t, cfg)
+	createEngineMailbox(t, st, "user@example.com")
+	now := time.Now().UTC()
+
+	engineSeedMessage(t, st, models.MessageMeta{
+		ProviderID: "m1", MailboxID: "user@example.com", Provider: "gmail",
+		Subject: "Invoice notice", ReceivedAt: now,
+	})
+	if err := st.SaveClassification(context.Background(), storage.Classification{
+		MessageID: "m1", MailboxID: "user@example.com",
+		Category: classification.CategoryUnknown, Source: "seed", ClassifiedAt: now,
+	}); err != nil {
+		t.Fatalf("SaveClassification: %v", err)
+	}
+
+	rules := []SubjectEvalRule{
+		{IncludeKeywords: []string{"invoice"}, Category: classification.CategoryVendor, Priority: 100},
+	}
+	summary, err := EvaluateSubjectRules(context.Background(), cfg, "user@example.com", rules, []string{classification.CategoryUnknown})
+	if err != nil {
+		t.Fatalf("EvaluateSubjectRules: %v", err)
+	}
+	if summary.ExcludedCount != 1 {
+		t.Errorf("ExcludedCount: got %d, want 1", summary.ExcludedCount)
+	}
+	if summary.MatchedCount != 0 {
+		t.Errorf("MatchedCount: got %d, want 0 (excluded match must not count)", summary.MatchedCount)
 	}
 }

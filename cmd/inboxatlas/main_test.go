@@ -1740,7 +1740,7 @@ func TestRunClassifySuggestions_JSON(t *testing.T) {
 
 func TestRunClassifyInfer(t *testing.T) {
 	originalRunInference := runInference
-	runInference = func(ctx context.Context, cfg config.Config, account, command string, args []string) (engine.InferenceRunSummary, error) {
+	runInference = func(ctx context.Context, cfg config.Config, account, command string, args []string, batchSize int) (engine.InferenceRunSummary, error) {
 		return engine.InferenceRunSummary{
 			MailboxID: "user@example.com",
 			Submitted: 3,
@@ -1754,7 +1754,7 @@ func TestRunClassifyInfer(t *testing.T) {
 	t.Cleanup(func() { runInference = originalRunInference })
 
 	var buf bytes.Buffer
-	if err := runClassifyInfer(context.Background(), &buf, config.Default(), "user@example.com", "provider", nil); err != nil {
+	if err := runClassifyInfer(context.Background(), &buf, config.Default(), "user@example.com", "provider", nil, 50); err != nil {
 		t.Fatalf("runClassifyInfer: %v", err)
 	}
 	output := buf.String()
@@ -1765,7 +1765,7 @@ func TestRunClassifyInfer(t *testing.T) {
 
 func TestRunClassifyInfer_RequiresProviderCommand(t *testing.T) {
 	t.Setenv("INBOXATLAS_INFERENCE_PROVIDER_CMD", "")
-	err := runClassifyInfer(context.Background(), io.Discard, config.Default(), "user@example.com", "", nil)
+	err := runClassifyInfer(context.Background(), io.Discard, config.Default(), "user@example.com", "", nil, 50)
 	if err == nil {
 		t.Fatal("expected missing provider command error")
 	}
@@ -1773,7 +1773,7 @@ func TestRunClassifyInfer_RequiresProviderCommand(t *testing.T) {
 
 func TestRunClassifyInfer_UsesEnvProviderCommand(t *testing.T) {
 	originalRunInference := runInference
-	runInference = func(ctx context.Context, cfg config.Config, account, command string, args []string) (engine.InferenceRunSummary, error) {
+	runInference = func(ctx context.Context, cfg config.Config, account, command string, args []string, batchSize int) (engine.InferenceRunSummary, error) {
 		if command != "provider-from-env" {
 			t.Fatalf("command: got %q", command)
 		}
@@ -1782,8 +1782,19 @@ func TestRunClassifyInfer_UsesEnvProviderCommand(t *testing.T) {
 	t.Cleanup(func() { runInference = originalRunInference })
 
 	t.Setenv("INBOXATLAS_INFERENCE_PROVIDER_CMD", "provider-from-env")
-	if err := runClassifyInfer(context.Background(), io.Discard, config.Default(), "user@example.com", "", nil); err != nil {
+	if err := runClassifyInfer(context.Background(), io.Discard, config.Default(), "user@example.com", "", nil, 50); err != nil {
 		t.Fatalf("runClassifyInfer: %v", err)
+	}
+}
+
+func TestBuildClassifyInferCmd_BatchSizeFlagRegistered(t *testing.T) {
+	cmd := buildClassifyInferCmd(config.Default())
+	f := cmd.Flags().Lookup("batch-size")
+	if f == nil {
+		t.Fatal("--batch-size flag not registered on classify infer")
+	}
+	if f.DefValue != "10" {
+		t.Fatalf("--batch-size default: got %q, want %q", f.DefValue, "10")
 	}
 }
 
@@ -3484,4 +3495,339 @@ func (s summaryProviderStub) GenerateSummary(_ context.Context, _ string, _ expo
 		return exportpkg.SummaryOutput{}, s.err
 	}
 	return s.output, nil
+}
+
+// --- classify subject-eval ---
+
+// seedSubjectEvalData creates a mailbox with three messages for subject-eval tests.
+// m1: "Invoice #42"        — matches include:invoice, no office
+// m2: "Meeting agenda"     — does not match
+// m3: "invoice office log" — include matches but exclude blocks it
+func seedSubjectEvalData(t *testing.T, dbPath string) {
+	t.Helper()
+	st, err := storage.Open(dbPath)
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	defer func() { _ = st.Close() }()
+	ctx := context.Background()
+	if err := st.CreateMailbox(ctx, models.Mailbox{ID: "user@example.com", Provider: "gmail"}); err != nil {
+		t.Fatalf("CreateMailbox: %v", err)
+	}
+	now := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
+	for _, msg := range []models.MessageMeta{
+		{ProviderID: "m1", MailboxID: "user@example.com", Provider: "gmail", Subject: "Invoice #42", ReceivedAt: now},
+		{ProviderID: "m2", MailboxID: "user@example.com", Provider: "gmail", Subject: "Meeting agenda", ReceivedAt: now},
+		{ProviderID: "m3", MailboxID: "user@example.com", Provider: "gmail", Subject: "invoice office log", ReceivedAt: now},
+	} {
+		if err := st.UpsertMessage(ctx, msg); err != nil {
+			t.Fatalf("UpsertMessage(%s): %v", msg.ProviderID, err)
+		}
+	}
+}
+
+func TestBuildClassifySubjectEvalCmd_HasCorrectFlags(t *testing.T) {
+	cmd := buildClassifySubjectEvalCmd(config.Default())
+	if cmd.Use != "subject-eval" {
+		t.Errorf("Use: got %q, want %q", cmd.Use, "subject-eval")
+	}
+	required := []string{"account", "category"}
+	for _, flag := range required {
+		if cmd.Flags().Lookup(flag) == nil {
+			t.Errorf("expected flag --%s to exist", flag)
+		}
+	}
+	optional := []string{"include", "exclude", "format", "matched-only"}
+	for _, flag := range optional {
+		if cmd.Flags().Lookup(flag) == nil {
+			t.Errorf("expected flag --%s to exist", flag)
+		}
+	}
+}
+
+func TestBuildClassifySubjectEvalCmd_RegisteredUnderClassify(t *testing.T) {
+	cmd := buildClassifyCmd(config.Default())
+	names := make(map[string]bool)
+	for _, sub := range cmd.Commands() {
+		names[sub.Name()] = true
+	}
+	if !names["subject-eval"] {
+		t.Error("expected subject-eval to be registered under classify")
+	}
+}
+
+func TestRunClassifySubjectEval_Table(t *testing.T) {
+	dir := t.TempDir()
+	dbPath := filepath.Join(dir, "test.db")
+	seedSubjectEvalData(t, dbPath)
+
+	cfg := config.Default()
+	cfg.StoragePath = dbPath
+
+	var buf bytes.Buffer
+	err := runClassifySubjectEval(context.Background(), &buf, cfg,
+		"user@example.com",
+		[]string{"invoice"}, []string{"office"}, nil,
+		"vendor", "table", true,
+	)
+	if err != nil {
+		t.Fatalf("runClassifySubjectEval: %v", err)
+	}
+	out := buf.String()
+	// m1 matches; m2 and m3 do not.
+	if !strings.Contains(out, "m1") {
+		t.Errorf("expected m1 in output, got:\n%s", out)
+	}
+	if strings.Contains(out, "m2") {
+		t.Errorf("did not expect m2 in matched-only output, got:\n%s", out)
+	}
+	if strings.Contains(out, "m3") {
+		t.Errorf("did not expect m3 in matched-only output (exclusion), got:\n%s", out)
+	}
+	if !strings.Contains(out, "1 of 3 messages matched") {
+		t.Errorf("expected summary line, got:\n%s", out)
+	}
+}
+
+func TestRunClassifySubjectEval_MatchedOnlyFalse(t *testing.T) {
+	dir := t.TempDir()
+	dbPath := filepath.Join(dir, "test.db")
+	seedSubjectEvalData(t, dbPath)
+
+	cfg := config.Default()
+	cfg.StoragePath = dbPath
+
+	var buf bytes.Buffer
+	err := runClassifySubjectEval(context.Background(), &buf, cfg,
+		"user@example.com",
+		[]string{"invoice"}, []string{"office"}, nil,
+		"vendor", "table", false,
+	)
+	if err != nil {
+		t.Fatalf("runClassifySubjectEval: %v", err)
+	}
+	out := buf.String()
+	// All 3 messages should appear when matched-only=false.
+	for _, id := range []string{"m1", "m2", "m3"} {
+		if !strings.Contains(out, id) {
+			t.Errorf("expected %s in output, got:\n%s", id, out)
+		}
+	}
+}
+
+func TestRunClassifySubjectEval_JSON(t *testing.T) {
+	dir := t.TempDir()
+	dbPath := filepath.Join(dir, "test.db")
+	seedSubjectEvalData(t, dbPath)
+
+	cfg := config.Default()
+	cfg.StoragePath = dbPath
+
+	var buf bytes.Buffer
+	err := runClassifySubjectEval(context.Background(), &buf, cfg,
+		"user@example.com",
+		[]string{"invoice"}, nil, nil,
+		"vendor", "json", true,
+	)
+	if err != nil {
+		t.Fatalf("runClassifySubjectEval: %v", err)
+	}
+	out := buf.String()
+	if !strings.Contains(out, `"mailbox_id"`) {
+		t.Errorf("expected mailbox_id in JSON output, got:\n%s", out)
+	}
+	if !strings.Contains(out, `"total_messages"`) {
+		t.Errorf("expected total_messages in JSON output, got:\n%s", out)
+	}
+	if !strings.Contains(out, `"matched_count"`) {
+		t.Errorf("expected matched_count in JSON output, got:\n%s", out)
+	}
+	if !strings.Contains(out, `"results"`) {
+		t.Errorf("expected results in JSON output, got:\n%s", out)
+	}
+	if !strings.Contains(out, `"excluded_count"`) {
+		t.Errorf("expected excluded_count in JSON output, got:\n%s", out)
+	}
+}
+
+func TestRunClassifySubjectEval_MissingInclude(t *testing.T) {
+	cfg := config.Default()
+	err := runClassifySubjectEval(context.Background(), io.Discard, cfg,
+		"user@example.com",
+		nil, nil, nil,
+		"vendor", "table", true,
+	)
+	if err == nil {
+		t.Fatal("expected error when --include is missing")
+	}
+	if !strings.Contains(err.Error(), "--include") {
+		t.Errorf("expected --include in error message, got: %v", err)
+	}
+}
+
+func TestRunClassifySubjectEval_MissingCategory(t *testing.T) {
+	cfg := config.Default()
+	err := runClassifySubjectEval(context.Background(), io.Discard, cfg,
+		"user@example.com",
+		[]string{"invoice"}, nil, nil,
+		"", "table", true,
+	)
+	if err == nil {
+		t.Fatal("expected error when --category is missing")
+	}
+	if !strings.Contains(err.Error(), "--category") {
+		t.Errorf("expected --category in error message, got: %v", err)
+	}
+}
+
+func TestRunClassifySubjectEval_UnknownCategory(t *testing.T) {
+	cfg := config.Default()
+	err := runClassifySubjectEval(context.Background(), io.Discard, cfg,
+		"user@example.com",
+		[]string{"invoice"}, nil, nil,
+		"notacategory", "table", true,
+	)
+	if err == nil {
+		t.Fatal("expected error for unknown category")
+	}
+}
+
+func TestRunClassifySubjectEval_UnknownFormat(t *testing.T) {
+	cfg := config.Default()
+	err := runClassifySubjectEval(context.Background(), io.Discard, cfg,
+		"user@example.com",
+		[]string{"invoice"}, nil, nil,
+		"vendor", "csv", true,
+	)
+	if err == nil {
+		t.Fatal("expected error for invalid format")
+	}
+}
+
+func TestRunClassifySubjectEval_ExclusionRespected(t *testing.T) {
+	dir := t.TempDir()
+	dbPath := filepath.Join(dir, "test.db")
+	seedSubjectEvalData(t, dbPath)
+
+	cfg := config.Default()
+	cfg.StoragePath = dbPath
+
+	var buf bytes.Buffer
+	// include invoice, exclude office — m3 has both and must be excluded.
+	err := runClassifySubjectEval(context.Background(), &buf, cfg,
+		"user@example.com",
+		[]string{"invoice"}, []string{"office"}, nil,
+		"vendor", "table", false,
+	)
+	if err != nil {
+		t.Fatalf("runClassifySubjectEval: %v", err)
+	}
+	out := buf.String()
+	if !strings.Contains(out, "1 of 3 messages matched") {
+		t.Errorf("expected 1 match (exclusion applied), got:\n%s", out)
+	}
+}
+
+func TestRunClassifySubjectEval_NoMatches(t *testing.T) {
+	dir := t.TempDir()
+	dbPath := filepath.Join(dir, "test.db")
+	seedSubjectEvalData(t, dbPath)
+
+	cfg := config.Default()
+	cfg.StoragePath = dbPath
+
+	var buf bytes.Buffer
+	err := runClassifySubjectEval(context.Background(), &buf, cfg,
+		"user@example.com",
+		[]string{"xyzzy"}, nil, nil,
+		"vendor", "table", true,
+	)
+	if err != nil {
+		t.Fatalf("runClassifySubjectEval: %v", err)
+	}
+	out := buf.String()
+	if !strings.Contains(out, "No messages matched") {
+		t.Errorf("expected no-matches message, got:\n%s", out)
+	}
+}
+
+func TestRunClassifySubjectEval_ExcludeCategory_MarksAndDoesNotCount(t *testing.T) {
+	dir := t.TempDir()
+	dbPath := filepath.Join(dir, "test.db")
+
+	// Set up: m1 = invoice (persisted social), m2 = invoice (no classification), m3 = meeting (persisted social).
+	st, err := storage.Open(dbPath)
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	ctx := context.Background()
+	if err := st.CreateMailbox(ctx, models.Mailbox{ID: "user@example.com", Provider: "gmail"}); err != nil {
+		t.Fatalf("CreateMailbox: %v", err)
+	}
+	now := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
+	for _, msg := range []models.MessageMeta{
+		{ProviderID: "m1", MailboxID: "user@example.com", Provider: "gmail", Subject: "Invoice notice", ReceivedAt: now},
+		{ProviderID: "m2", MailboxID: "user@example.com", Provider: "gmail", Subject: "Invoice pending", ReceivedAt: now},
+		{ProviderID: "m3", MailboxID: "user@example.com", Provider: "gmail", Subject: "Meeting agenda", ReceivedAt: now},
+	} {
+		if err := st.UpsertMessage(ctx, msg); err != nil {
+			t.Fatalf("UpsertMessage: %v", err)
+		}
+	}
+	for _, c := range []storage.Classification{
+		{MessageID: "m1", MailboxID: "user@example.com", Category: "social", Source: "seed", ClassifiedAt: now},
+		{MessageID: "m3", MailboxID: "user@example.com", Category: "social", Source: "seed", ClassifiedAt: now},
+	} {
+		if err := st.SaveClassification(ctx, c); err != nil {
+			t.Fatalf("SaveClassification: %v", err)
+		}
+	}
+	_ = st.Close()
+
+	cfg := config.Default()
+	cfg.StoragePath = dbPath
+
+	var buf bytes.Buffer
+	err = runClassifySubjectEval(context.Background(), &buf, cfg,
+		"user@example.com",
+		[]string{"invoice"}, nil, []string{"social"},
+		"vendor", "table", false,
+	)
+	if err != nil {
+		t.Fatalf("runClassifySubjectEval: %v", err)
+	}
+	out := buf.String()
+	// m2 matches; m1 is excluded (invoice + social category); m3 excluded but no match.
+	if !strings.Contains(out, "1 of 3 messages matched") {
+		t.Errorf("expected 1 match, got:\n%s", out)
+	}
+	if !strings.Contains(out, "2 messages excluded") {
+		t.Errorf("expected 2 excluded line, got:\n%s", out)
+	}
+	// Excluded reason should appear for m1.
+	if !strings.Contains(out, "category:social") {
+		t.Errorf("expected category:social reason in output, got:\n%s", out)
+	}
+}
+
+func TestRunClassifySubjectEval_ExcludeCategory_UnknownCategoryFlagErrors(t *testing.T) {
+	cfg := config.Default()
+	err := runClassifySubjectEval(context.Background(), io.Discard, cfg,
+		"user@example.com",
+		[]string{"invoice"}, nil, []string{"notacat"},
+		"vendor", "table", true,
+	)
+	if err == nil {
+		t.Fatal("expected error for unknown --exclude-category value")
+	}
+	if !strings.Contains(err.Error(), "--exclude-category") {
+		t.Errorf("expected --exclude-category in error, got: %v", err)
+	}
+}
+
+func TestRunClassifySubjectEval_ExcludeCategory_FlagRegistered(t *testing.T) {
+	cmd := buildClassifySubjectEvalCmd(config.Default())
+	if cmd.Flags().Lookup("exclude-category") == nil {
+		t.Error("expected --exclude-category flag to be registered")
+	}
 }

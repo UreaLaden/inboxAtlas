@@ -2709,3 +2709,85 @@ func TestListInferenceSuggestions_InvalidCreatedAt(t *testing.T) {
 		t.Fatal("expected parse error for invalid inference suggestion created_at")
 	}
 }
+
+// --- ListMessageClassificationsByMailbox ---
+
+func TestListMessageClassificationsByMailbox_ReturnsMap(t *testing.T) {
+	st := newTestStore(t)
+	ctx := context.Background()
+	createTestMailbox(t, st, "user@example.com")
+	now := time.Now().UTC()
+
+	for _, id := range []string{"m1", "m2", "m3"} {
+		seedMessage(t, st, id, "user@example.com", "a@x.com", "", "x.com", "", now)
+	}
+	for _, c := range []Classification{
+		{MessageID: "m1", MailboxID: "user@example.com", Category: "vendor", Source: "seed", ClassifiedAt: now},
+		{MessageID: "m2", MailboxID: "user@example.com", Category: "unknown", Source: "seed", ClassifiedAt: now},
+	} {
+		if err := st.SaveClassification(ctx, c); err != nil {
+			t.Fatalf("SaveClassification(%s): %v", c.MessageID, err)
+		}
+	}
+
+	got, err := st.ListMessageClassificationsByMailbox(ctx, "user@example.com")
+	if err != nil {
+		t.Fatalf("ListMessageClassificationsByMailbox: %v", err)
+	}
+	if len(got) != 2 {
+		t.Errorf("len: got %d, want 2", len(got))
+	}
+	if got["m1"] != "vendor" {
+		t.Errorf("m1: got %q, want %q", got["m1"], "vendor")
+	}
+	if got["m2"] != "unknown" {
+		t.Errorf("m2: got %q, want %q", got["m2"], "unknown")
+	}
+	// m3 has no classification — must be absent.
+	if _, ok := got["m3"]; ok {
+		t.Error("m3 should not be present in map (no persisted classification)")
+	}
+}
+
+func TestListMessageClassificationsByMailbox_Empty(t *testing.T) {
+	st := newTestStore(t)
+	ctx := context.Background()
+	createTestMailbox(t, st, "user@example.com")
+
+	got, err := st.ListMessageClassificationsByMailbox(ctx, "user@example.com")
+	if err != nil {
+		t.Fatalf("ListMessageClassificationsByMailbox: %v", err)
+	}
+	if len(got) != 0 {
+		t.Errorf("expected empty map, got %v", got)
+	}
+}
+
+func TestListMessageClassificationsByMailbox_MailboxIsolation(t *testing.T) {
+	st := newTestStore(t)
+	ctx := context.Background()
+	createTestMailbox(t, st, "user@example.com")
+	createTestMailbox(t, st, "other@example.com")
+	now := time.Now().UTC()
+
+	seedMessage(t, st, "m1", "user@example.com", "a@x.com", "", "x.com", "", now)
+	seedMessage(t, st, "m2", "other@example.com", "b@y.com", "", "y.com", "", now)
+	if err := st.SaveClassification(ctx, Classification{
+		MessageID: "m1", MailboxID: "user@example.com", Category: "vendor", Source: "seed", ClassifiedAt: now,
+	}); err != nil {
+		t.Fatalf("SaveClassification: %v", err)
+	}
+	if err := st.SaveClassification(ctx, Classification{
+		MessageID: "m2", MailboxID: "other@example.com", Category: "client", Source: "seed", ClassifiedAt: now,
+	}); err != nil {
+		t.Fatalf("SaveClassification: %v", err)
+	}
+
+	got, err := st.ListMessageClassificationsByMailbox(ctx, "user@example.com")
+	if err != nil {
+		t.Fatalf("ListMessageClassificationsByMailbox: %v", err)
+	}
+	if len(got) != 1 || got["m1"] != "vendor" {
+		t.Errorf("expected only m1=vendor, got %v", got)
+	}
+}

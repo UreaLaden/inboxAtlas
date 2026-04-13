@@ -1,4 +1,4 @@
-.PHONY: fmt lint build test run coverage coverage-pkg coverage-func coverage-total sync classify-run classify-infer gen-reports pipeline
+.PHONY: fmt lint build test run coverage coverage-pkg coverage-func coverage-total sync classify-run classify-infer gen-reports gen-classify-reports gen-promote-unknowns pipeline
 CMD     := ./cmd/inboxatlas
 SUMMARY_PROVIDER := ./cmd/openai-summary-provider
 INFERENCE_PROVIDER := ./cmd/ai-inference-provider
@@ -87,6 +87,7 @@ gen-promote-commands:
 
 
 LIMIT ?= 0
+BATCH_SIZE ?= 10
 sync:
 	@./$(BINARY) sync gmail --account $(ACCOUNT) --limit $(LIMIT)
 
@@ -98,7 +99,24 @@ classify-run:
 classify-infer:
 	@./$(BINARY) classify infer \
 		--account $(ACCOUNT) \
-		--provider-command ./$(AI_INFERENCE_BINARY)
+		--provider-command ./$(AI_INFERENCE_BINARY) \
+		--batch-size $(BATCH_SIZE)
+
+# Generate classification reference reports: suggestions (inferred categories per domain)
+# and classified messages (ground-truth per-message category assignments).
+# Used as input for filling in promote.txt category placeholders.
+# Usage: make gen-classify-reports ACCOUNT=acr
+gen-classify-reports:
+	@./$(BINARY) classify suggestions --account $(ACCOUNT) --format json > .ai/references/reports/out/suggestions.json
+	@./$(BINARY) classify messages --account $(ACCOUNT) --format json --limit 0 > .ai/references/reports/out/classified-messages.json
+	@$(MAKE) --no-print-directory gen-promote-commands ACCOUNT=$(ACCOUNT) > .ai/references/reports/out/promote.txt
+
+# Extract unresolved promote commands (still containing <CATEGORY>) from promote.txt
+# into a standalone file for manual review and gap resolution.
+# Usage: make gen-promote-unknowns
+gen-promote-unknowns:
+	@grep "<CATEGORY>" .ai/references/reports/promote.txt | grep "classify promote" > .ai/references/reports/out/promote-unknowns.txt || true
+	@echo "$$(grep -c 'classify promote' .ai/references/reports/out/promote-unknowns.txt) unresolved entries → .ai/references/reports/out/promote-unknowns.txt"
 
 # Generate both CSV and JSON report sets in one shot.
 gen-reports: gen-reports-csv gen-reports-json

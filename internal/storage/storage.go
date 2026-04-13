@@ -1480,6 +1480,30 @@ func (s *Store) BulkSaveClassifications(ctx context.Context, classifications []C
 	return nil
 }
 
+// ListMessageClassificationsByMailbox returns a map of providerID → category for
+// all persisted message classifications in mailboxID. Messages that have no
+// classification row are absent from the map.
+func (s *Store) ListMessageClassificationsByMailbox(ctx context.Context, mailboxID string) (map[string]string, error) {
+	rows, err := s.db.QueryContext(ctx,
+		`SELECT message_id, category FROM message_classifications WHERE mailbox_id = ?`,
+		mailboxID,
+	)
+	if err != nil {
+		return nil, fmt.Errorf("list message classifications: %w", err)
+	}
+	defer func() { _ = rows.Close() }()
+
+	result := make(map[string]string)
+	for rows.Next() {
+		var messageID, category string
+		if err := rows.Scan(&messageID, &category); err != nil {
+			return nil, fmt.Errorf("scan message classification: %w", err)
+		}
+		result[messageID] = category
+	}
+	return result, rows.Err()
+}
+
 // GetClassification returns the classification for the given message and mailbox.
 // Returns (nil, nil) when no classification exists.
 func (s *Store) GetClassification(ctx context.Context, messageID, mailboxID string) (*Classification, error) {

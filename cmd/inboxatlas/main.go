@@ -605,6 +605,38 @@ func buildClassifyCmd(cfg config.Config) *cobra.Command {
 	cmd.AddCommand(buildClassifyCategoriesCmd())
 	cmd.AddCommand(buildClassifyIntentsCmd())
 	cmd.AddCommand(buildClassifyPatternTypesCmd())
+	cmd.AddCommand(buildClassifySubjectEvalCmd(cfg))
+	return cmd
+}
+
+// buildClassifySubjectEvalCmd returns the "classify subject-eval" subcommand,
+// which runs a dry-run subject-rule evaluation against all synced messages for
+// one mailbox without persisting any classifications.
+func buildClassifySubjectEvalCmd(cfg config.Config) *cobra.Command {
+	var account string
+	var include []string
+	var exclude []string
+	var excludeCategory []string
+	var category string
+	var format string
+	var matchedOnly bool
+
+	cmd := &cobra.Command{
+		Use:   "subject-eval",
+		Short: "Dry-run subject keyword rule evaluation against synced mailbox messages",
+		RunE: func(cmd *cobra.Command, _ []string) error {
+			return runClassifySubjectEval(cmd.Context(), cmd.OutOrStdout(), cfg, account, include, exclude, excludeCategory, category, format, matchedOnly)
+		},
+	}
+	cmd.Flags().StringVar(&account, "account", "", "mailbox email or alias")
+	cmd.Flags().StringArrayVar(&include, "include", nil, "keyword that must appear in the normalized subject (repeatable, OR semantics)")
+	cmd.Flags().StringArrayVar(&exclude, "exclude", nil, "keyword that must not appear in the normalized subject (repeatable)")
+	cmd.Flags().StringArrayVar(&excludeCategory, "exclude-category", nil, "skip messages whose persisted classification matches this category (repeatable)")
+	cmd.Flags().StringVar(&category, "category", "", "category to assign on match (required)")
+	cmd.Flags().StringVar(&format, "format", "table", "output format: table or json")
+	cmd.Flags().BoolVar(&matchedOnly, "matched-only", true, "show matched and excluded rows; suppress unmatched non-excluded rows")
+	_ = cmd.MarkFlagRequired("account")
+	_ = cmd.MarkFlagRequired("category")
 	return cmd
 }
 
@@ -637,17 +669,19 @@ func buildClassifyInferCmd(cfg config.Config) *cobra.Command {
 	var account string
 	var providerCommand string
 	var providerArgs []string
+	var batchSize int
 
 	cmd := &cobra.Command{
 		Use:   "infer",
 		Short: "Run AI-assisted inference for still-unknown mailbox messages",
 		RunE: func(cmd *cobra.Command, _ []string) error {
-			return runClassifyInfer(cmd.Context(), cmd.OutOrStdout(), cfg, account, providerCommand, providerArgs)
+			return runClassifyInfer(cmd.Context(), cmd.OutOrStdout(), cfg, account, providerCommand, providerArgs, batchSize)
 		},
 	}
 	cmd.Flags().StringVar(&account, "account", "", "mailbox email or alias")
 	cmd.Flags().StringVar(&providerCommand, "provider-command", "", "external command that returns structured inference candidates")
 	cmd.Flags().StringSliceVar(&providerArgs, "provider-arg", nil, "argument to pass to the inference provider command; repeatable")
+	cmd.Flags().IntVar(&batchSize, "batch-size", 10, "number of messages sent to the inference provider per batch (0 = no batching)")
 	_ = cmd.MarkFlagRequired("account")
 	cmd.AddCommand(buildClassifyInferSuggestionsCmd(cfg))
 	return cmd
@@ -1171,7 +1205,7 @@ func runClassifyLabelDomainAnalysis(ctx context.Context, w io.Writer, cfg config
 }
 
 // runClassifyInfer executes one mailbox-scoped AI inference pass.
-func runClassifyInfer(ctx context.Context, w io.Writer, cfg config.Config, account, providerCommand string, providerArgs []string) error {
+func runClassifyInfer(ctx context.Context, w io.Writer, cfg config.Config, account, providerCommand string, providerArgs []string, batchSize int) error {
 	command := strings.TrimSpace(providerCommand)
 	if command == "" {
 		command = strings.TrimSpace(os.Getenv("INBOXATLAS_INFERENCE_PROVIDER_CMD"))
@@ -1180,7 +1214,7 @@ func runClassifyInfer(ctx context.Context, w io.Writer, cfg config.Config, accou
 		return fmt.Errorf("inference provider command is required via --provider-command or INBOXATLAS_INFERENCE_PROVIDER_CMD")
 	}
 
-	result, err := runInference(ctx, cfg, account, command, providerArgs)
+	result, err := runInference(ctx, cfg, account, command, providerArgs, batchSize)
 	if err != nil {
 		return err
 	}
@@ -1329,6 +1363,102 @@ func runClassifySeedsDelete(ctx context.Context, w io.Writer, cfg config.Config,
 	}
 	_, _ = fmt.Fprintf(w, "Deleted mailbox seed %d for %s.\n", seedID, account)
 	return nil
+}
+
+// runClassifySubjectEval executes a dry-run subject-rule evaluation and renders
+// the results as a table or JSON. No classifications are persisted.
+func runClassifySubjectEval(ctx context.Context, w io.Writer, cfg config.Config, account string, include, exclude, excludeCategory []string, category, format string, matchedOnly bool) error {
+	f, err := validateClassifyFormat(format)
+	if err != nil {
+		return err
+	}
+	if len(include) == 0 {
+		return fmt.Errorf("at least one --include keyword is required")
+	}
+	if err := validateClassificationCategoryRequired(category); err != nil {
+		return err
+	}
+	for _, cat := range excludeCategory {
+		if err := validateClassificationCategory(cat); err != nil {
+			return fmt.Errorf("--exclude-category: %w", err)
+		}
+	}
+
+	rules := []engine.SubjectEvalRule{
+		{
+			IncludeKeywords: include,
+			ExcludeKeywords: exclude,
+			Category:        category,
+			Priority:        100,
+		},
+	}
+
+	summary, err := engine.EvaluateSubjectRules(ctx, cfg, account, rules, excludeCategory)
+	if err != nil {
+		return err
+	}
+
+	if f == "json" {
+		enc := json.NewEncoder(w)
+		enc.SetIndent("", "  ")
+		return enc.Encode(summary)
+	}
+
+	// --matched-only: show matched rows and excluded rows; suppress unmatched non-excluded rows.
+	results := summary.Results
+	if matchedOnly {
+		filtered := results[:0]
+		for _, r := range results {
+			if r.Matched || r.Excluded {
+				filtered = append(filtered, r)
+			}
+		}
+		results = filtered
+	}
+
+	if len(results) == 0 {
+		_, _ = fmt.Fprintf(w, "No messages matched for %s.\n", summary.MailboxID)
+		_, _ = fmt.Fprintf(w, "%d of %d messages matched.\n", summary.MatchedCount, summary.TotalMessages)
+		return nil
+	}
+
+	tw := tabwriter.NewWriter(w, 0, 0, 3, ' ', 0)
+	_, _ = fmt.Fprintln(tw, "MESSAGE_ID\tSUBJECT\tNORMALIZED\tCATEGORY\tMATCHED_RULE\tEXCLUDED_REASON")
+	for _, r := range results {
+		subject := r.Subject
+		if len(subject) > 40 {
+			subject = subject[:37] + "..."
+		}
+		normalized := r.Normalized
+		if len(normalized) > 40 {
+			normalized = normalized[:37] + "..."
+		}
+		_, _ = fmt.Fprintf(tw, "%s\t%s\t%s\t%s\t%s\t%s\n",
+			r.MessageID,
+			subject,
+			normalized,
+			r.Category,
+			r.MatchedRule,
+			r.ExcludedReason,
+		)
+	}
+	if err := tw.Flush(); err != nil {
+		return err
+	}
+	_, _ = fmt.Fprintf(w, "%d of %d messages matched.\n", summary.MatchedCount, summary.TotalMessages)
+	if summary.ExcludedCount > 0 {
+		_, _ = fmt.Fprintf(w, "%d messages excluded by category filter.\n", summary.ExcludedCount)
+	}
+	return nil
+}
+
+// validateClassificationCategoryRequired validates that category is non-empty
+// and refers to a known taxonomy constant.
+func validateClassificationCategoryRequired(category string) error {
+	if category == "" {
+		return fmt.Errorf("--category is required")
+	}
+	return validateClassificationCategory(category)
 }
 
 // runClassifyCategories writes the supported deterministic category names.
