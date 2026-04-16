@@ -88,6 +88,7 @@ inboxatlas classify promote --account <id|alias> \
 # Run and review
 inboxatlas classify run     --account <id|alias>
 inboxatlas classify messages --account <id|alias> [--category <category>] [--intent <intent>] [--since <RFC3339>] [--format table|csv|json] [--limit 100]
+inboxatlas classify label-analysis --account <id|alias> [--format table|json] [--min-count 1]
 inboxatlas classify results --account <id|alias> [--format table|json]
 
 # Manage active seeds
@@ -95,7 +96,7 @@ inboxatlas classify seeds list   --account <id|alias> [--format table|json]
 inboxatlas classify seeds delete --account <id|alias> --id <seed-id>
 ```
 
-Valid `--pattern-type` values: `domain`, `sender_email`, `sender_prefix`, `has_attachment`, `subject_term`
+Valid `--pattern-type` values: `domain`, `sender_email`, `sender_prefix`, `label`, `has_attachment`, `subject_term`
 
 Valid `--category` values: `internal`, `client`, `vendor`, `government`, `system-generated`, `newsletter/marketing`, `social`, `unknown`
 
@@ -148,6 +149,21 @@ do not replay mailbox history. Use `MessageID` as the downstream dedup key.
 inboxatlas classify messages --account your@email.com --intent invoice --since 2026-04-01T00:00:00Z --format csv
 ```
 
+**6. Review Gmail labels before promoting a manual label seed.**
+Use `classify label-analysis` to see which raw Gmail labels occur often enough to
+justify a mailbox-scoped `pattern-type=label` rule. The table shows both the raw
+label ID and a friendly name for known Gmail system labels; user-created
+`Label_...` values remain unchanged.
+
+```bash
+inboxatlas classify label-analysis --account your@email.com --min-count 5
+inboxatlas classify promote \
+  --account your@email.com \
+  --pattern-type label \
+  --pattern-value CATEGORY_PROMOTIONS \
+  --category newsletter/marketing
+```
+
 inboxatlas classify promote \
   --account your@email.com \
   --pattern-type sender_email \
@@ -155,7 +171,7 @@ inboxatlas classify promote \
   --category vendor
 ```
 
-**5. Check what seeds are active.**
+**7. Check what seeds are active.**
 
 ```bash
 inboxatlas classify seeds list --account your@email.com
@@ -167,7 +183,7 @@ Remove a seed promoted by mistake (use the ID shown in `seeds list`):
 inboxatlas classify seeds delete --account your@email.com --id 7
 ```
 
-**6. Run classification.**
+**8. Run classification.**
 Applies all built-in global rules plus your promoted seeds to every message. Safe to re-run after promoting more seeds.
 
 ```bash

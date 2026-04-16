@@ -47,6 +47,13 @@ type Provider struct {
 	svc                *gmailapi.Service // nil until Authenticate is called
 }
 
+// LabelMeta is one Gmail label catalog entry returned by ListLabels.
+type LabelMeta struct {
+	ID          string
+	DisplayName string
+	Type        string
+}
+
 // New constructs a Gmail Provider for the given account using tokenSourceFactory
 // to supply the OAuth token source during Authenticate.
 func New(email string, tokenSourceFactory func(context.Context) (oauth2.TokenSource, error)) *Provider {
@@ -91,6 +98,28 @@ func (p *Provider) ListMessages(ctx context.Context, pageToken string) ([]string
 		ids = append(ids, m.Id)
 	}
 	return ids, resp.NextPageToken, nil
+}
+
+// ListLabels returns the Gmail label catalog for the authenticated account.
+func (p *Provider) ListLabels(ctx context.Context) ([]LabelMeta, error) {
+	if p.svc == nil {
+		return nil, fmt.Errorf("gmail: not authenticated")
+	}
+
+	resp, err := p.svc.Users.Labels.List(p.email).Context(ctx).Do()
+	if err != nil {
+		return nil, fmt.Errorf("gmail: list labels: %w", err)
+	}
+
+	labels := make([]LabelMeta, 0, len(resp.Labels))
+	for _, label := range resp.Labels {
+		labels = append(labels, LabelMeta{
+			ID:          label.Id,
+			DisplayName: label.Name,
+			Type:        strings.ToLower(label.Type),
+		})
+	}
+	return labels, nil
 }
 
 // GetMessageMeta fetches metadata for a single message by ID. The returned

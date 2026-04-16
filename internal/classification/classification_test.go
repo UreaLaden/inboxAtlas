@@ -299,6 +299,73 @@ func TestChainClassifier_FirstMatchWins(t *testing.T) {
 	}
 }
 
+func TestSeedRuleClassifier_LabelMatch(t *testing.T) {
+	seeds := []ClassificationSeed{
+		{ID: 1, PatternType: PatternLabel, PatternValue: "CATEGORY_PROMOTIONS", Category: CategoryNewsletterMarketing, Source: SourceSeed, Priority: 100},
+	}
+	c := NewSeedRuleClassifier(seeds)
+	msg := makeMsg("user@example.com", "example.com", "")
+	msg.Labels = []string{"CATEGORY_PROMOTIONS"}
+
+	result, err := c.Classify(context.Background(), msg)
+	if err != nil {
+		t.Fatalf("Classify: %v", err)
+	}
+	if result.Category != CategoryNewsletterMarketing {
+		t.Errorf("Category: got %q, want %q", result.Category, CategoryNewsletterMarketing)
+	}
+}
+
+func TestSeedRuleClassifier_LabelMatchCaseInsensitive(t *testing.T) {
+	seeds := []ClassificationSeed{
+		{ID: 1, PatternType: PatternLabel, PatternValue: "category_promotions", Category: CategoryNewsletterMarketing, Source: SourceSeed, Priority: 100},
+	}
+	c := NewSeedRuleClassifier(seeds)
+	msg := makeMsg("user@example.com", "example.com", "")
+	msg.Labels = []string{"CATEGORY_PROMOTIONS"}
+
+	result, err := c.Classify(context.Background(), msg)
+	if err != nil {
+		t.Fatalf("Classify: %v", err)
+	}
+	if result.Category != CategoryNewsletterMarketing {
+		t.Errorf("Category: got %q, want %q", result.Category, CategoryNewsletterMarketing)
+	}
+}
+
+func TestSeedRuleClassifier_LabelNoMatchWhenEmpty(t *testing.T) {
+	seeds := []ClassificationSeed{
+		{ID: 1, PatternType: PatternLabel, PatternValue: "INBOX", Category: CategoryInternal, Source: SourceSeed, Priority: 100},
+	}
+	c := NewSeedRuleClassifier(seeds)
+	msg := makeMsg("user@example.com", "example.com", "")
+
+	result, err := c.Classify(context.Background(), msg)
+	if err != nil {
+		t.Fatalf("Classify: %v", err)
+	}
+	if result.Category != CategoryUnknown {
+		t.Errorf("Category: got %q, want %q", result.Category, CategoryUnknown)
+	}
+}
+
+func TestSeedRuleClassifier_LabelWrongValueNoMatch(t *testing.T) {
+	seeds := []ClassificationSeed{
+		{ID: 1, PatternType: PatternLabel, PatternValue: "SENT", Category: CategoryInternal, Source: SourceSeed, Priority: 100},
+	}
+	c := NewSeedRuleClassifier(seeds)
+	msg := makeMsg("user@example.com", "example.com", "")
+	msg.Labels = []string{"INBOX"}
+
+	result, err := c.Classify(context.Background(), msg)
+	if err != nil {
+		t.Fatalf("Classify: %v", err)
+	}
+	if result.Category != CategoryUnknown {
+		t.Errorf("Category: got %q, want %q", result.Category, CategoryUnknown)
+	}
+}
+
 func TestAIInferenceClassifier_SkipsDeterministicallyClassifiedMessage(t *testing.T) {
 	classifier := NewAIInferenceClassifier(
 		map[string]string{"m1": CategoryVendor},
@@ -554,7 +621,7 @@ func TestDefaultSeeds_Integrity(t *testing.T) {
 	}
 	validPatternTypes := map[string]bool{
 		PatternDomain: true, PatternSenderEmail: true,
-		PatternSenderPrefix: true, PatternHasAttachment: true, PatternSubjectTerm: true,
+		PatternSenderPrefix: true, PatternLabel: true, PatternHasAttachment: true, PatternSubjectTerm: true,
 	}
 
 	for i, s := range seeds {
@@ -1032,8 +1099,8 @@ func TestRunMailboxClassification_RejectsMissingProviderID(t *testing.T) {
 }
 
 func TestSpecificityRank_UnknownTypeFallsBackLast(t *testing.T) {
-	if got := specificityRank("mystery"); got != 6 {
-		t.Fatalf("specificityRank: got %d, want 6", got)
+	if got := specificityRank("mystery"); got != 7 {
+		t.Fatalf("specificityRank: got %d, want 7", got)
 	}
 }
 
@@ -1045,8 +1112,9 @@ func TestSpecificityRank_KnownTypes(t *testing.T) {
 		{PatternSenderEmail, 1},
 		{PatternSenderPrefix, 2},
 		{PatternDomain, 3},
-		{PatternHasAttachment, 4},
-		{PatternSubjectTerm, 5},
+		{PatternLabel, 4},
+		{PatternHasAttachment, 5},
+		{PatternSubjectTerm, 6},
 	}
 
 	for _, tt := range tests {
@@ -1122,3 +1190,199 @@ func mustGetClassification(t *testing.T, st *storage.Store, messageID, mailboxID
 
 // Ensure the package compiles with the correct time import.
 var _ = time.Now
+
+// --- NormalizeSubject ---
+
+func TestNormalizeSubject(t *testing.T) {
+	tests := []struct {
+		input string
+		want  string
+	}{
+		{"Re: Invoice #123", "Invoice #123"},
+		{"RE: Invoice #123", "Invoice #123"},
+		{"re: invoice", "invoice"},
+		{"Fw: Re: Payment due", "Payment due"},
+		{"FWD: Fwd: Hello", "Hello"},
+		{"Re[2]: Budget review", "Budget review"},
+		{"Re[10]: status update", "status update"},
+		{"Invoice (no prefix)", "Invoice (no prefix)"},
+		{"  Re:   Trimmed  ", "Trimmed"},
+		{"Re:", ""},
+		// No prefix — returned as-is (trimmed).
+		{"Hello World", "Hello World"},
+		// Already normalized — idempotent.
+		{"Invoice", "Invoice"},
+		// Aw: German-style forward prefix.
+		{"AW: Some subject", "Some subject"},
+		// Nested Re:/FW:.
+		{"Re: Fw: Re: Deep nesting", "Deep nesting"},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.input, func(t *testing.T) {
+			got := NormalizeSubject(tc.input)
+			if got != tc.want {
+				t.Errorf("NormalizeSubject(%q) = %q, want %q", tc.input, got, tc.want)
+			}
+			// Idempotence: calling twice must return the same result.
+			got2 := NormalizeSubject(got)
+			if got2 != got {
+				t.Errorf("NormalizeSubject not idempotent: second call on %q returned %q", got, got2)
+			}
+		})
+	}
+}
+
+// --- SubjectRuleClassifier ---
+
+func TestSubjectRuleClassifier_InclusionMatch(t *testing.T) {
+	rules := []SubjectRule{
+		{IncludeKeywords: []string{"invoice"}, Category: CategoryVendor, Priority: 100},
+	}
+	c := NewSubjectRuleClassifier(rules)
+	result, err := c.Classify(context.Background(), makeMsg("", "", "Invoice #42"))
+	if err != nil {
+		t.Fatalf("Classify: %v", err)
+	}
+	if result.Category != CategoryVendor {
+		t.Errorf("Category: got %q, want %q", result.Category, CategoryVendor)
+	}
+	if !strings.HasPrefix(result.MatchedRule, "subject_rule:") {
+		t.Errorf("MatchedRule: got %q, want prefix %q", result.MatchedRule, "subject_rule:")
+	}
+	if result.Source != SourceOperator {
+		t.Errorf("Source: got %q, want %q", result.Source, SourceOperator)
+	}
+}
+
+func TestSubjectRuleClassifier_NormalizedSubjectUsed(t *testing.T) {
+	// "Re: invoice" — raw subject has prefix; normalization must strip it before matching.
+	rules := []SubjectRule{
+		{IncludeKeywords: []string{"invoice"}, Category: CategoryVendor, Priority: 100},
+	}
+	c := NewSubjectRuleClassifier(rules)
+	result, err := c.Classify(context.Background(), makeMsg("", "", "Re: invoice"))
+	if err != nil {
+		t.Fatalf("Classify: %v", err)
+	}
+	if result.Category != CategoryVendor {
+		t.Errorf("Category: got %q, want %q", result.Category, CategoryVendor)
+	}
+}
+
+func TestSubjectRuleClassifier_ExclusionBlocksMatch(t *testing.T) {
+	rules := []SubjectRule{
+		{IncludeKeywords: []string{"invoice"}, ExcludeKeywords: []string{"office"}, Category: CategoryVendor, Priority: 100},
+	}
+	c := NewSubjectRuleClassifier(rules)
+	// "office" is present — should not match.
+	result, err := c.Classify(context.Background(), makeMsg("", "", "invoice office update"))
+	if err != nil {
+		t.Fatalf("Classify: %v", err)
+	}
+	if result.Category != CategoryUnknown {
+		t.Errorf("Category: got %q, want %q (exclusion should block)", result.Category, CategoryUnknown)
+	}
+}
+
+func TestSubjectRuleClassifier_ExclusionKeywordAbsent(t *testing.T) {
+	// Exclude keyword NOT present — inclusion match should succeed.
+	rules := []SubjectRule{
+		{IncludeKeywords: []string{"invoice"}, ExcludeKeywords: []string{"office"}, Category: CategoryVendor, Priority: 100},
+	}
+	c := NewSubjectRuleClassifier(rules)
+	result, err := c.Classify(context.Background(), makeMsg("", "", "invoice payment"))
+	if err != nil {
+		t.Fatalf("Classify: %v", err)
+	}
+	if result.Category != CategoryVendor {
+		t.Errorf("Category: got %q, want %q", result.Category, CategoryVendor)
+	}
+}
+
+func TestSubjectRuleClassifier_NoMatch(t *testing.T) {
+	rules := []SubjectRule{
+		{IncludeKeywords: []string{"invoice"}, Category: CategoryVendor, Priority: 100},
+	}
+	c := NewSubjectRuleClassifier(rules)
+	result, err := c.Classify(context.Background(), makeMsg("", "", "meeting agenda"))
+	if err != nil {
+		t.Fatalf("Classify: %v", err)
+	}
+	if result.Category != CategoryUnknown {
+		t.Errorf("Category: got %q, want %q", result.Category, CategoryUnknown)
+	}
+}
+
+func TestSubjectRuleClassifier_PriorityOrdering(t *testing.T) {
+	// Lower Priority value = evaluated first; first match wins.
+	rules := []SubjectRule{
+		{IncludeKeywords: []string{"invoice"}, Category: CategoryClient, Priority: 200},
+		{IncludeKeywords: []string{"invoice"}, Category: CategoryVendor, Priority: 100},
+	}
+	c := NewSubjectRuleClassifier(rules)
+	result, err := c.Classify(context.Background(), makeMsg("", "", "invoice due"))
+	if err != nil {
+		t.Fatalf("Classify: %v", err)
+	}
+	// Priority 100 rule should win.
+	if result.Category != CategoryVendor {
+		t.Errorf("Category: got %q, want %q (priority 100 rule should win)", result.Category, CategoryVendor)
+	}
+}
+
+func TestSubjectRuleClassifier_EmptyIncludeKeywordsNeverMatches(t *testing.T) {
+	rules := []SubjectRule{
+		{IncludeKeywords: nil, Category: CategoryVendor, Priority: 100},
+	}
+	c := NewSubjectRuleClassifier(rules)
+	result, err := c.Classify(context.Background(), makeMsg("", "", "invoice due"))
+	if err != nil {
+		t.Fatalf("Classify: %v", err)
+	}
+	if result.Category != CategoryUnknown {
+		t.Errorf("Category: got %q, want %q (empty IncludeKeywords must not match)", result.Category, CategoryUnknown)
+	}
+}
+
+func TestSubjectRuleClassifier_MultipleIncludeKeywordsOR(t *testing.T) {
+	// Any one of the include keywords is sufficient.
+	rules := []SubjectRule{
+		{IncludeKeywords: []string{"invoice", "payment"}, Category: CategoryVendor, Priority: 100},
+	}
+	c := NewSubjectRuleClassifier(rules)
+	for _, subject := range []string{"invoice notice", "payment due", "invoice and payment"} {
+		result, err := c.Classify(context.Background(), makeMsg("", "", subject))
+		if err != nil {
+			t.Fatalf("Classify(%q): %v", subject, err)
+		}
+		if result.Category != CategoryVendor {
+			t.Errorf("Classify(%q): got %q, want %q", subject, result.Category, CategoryVendor)
+		}
+	}
+}
+
+func TestSubjectRuleClassifier_CaseInsensitiveKeywords(t *testing.T) {
+	rules := []SubjectRule{
+		{IncludeKeywords: []string{"INVOICE"}, Category: CategoryVendor, Priority: 100},
+	}
+	c := NewSubjectRuleClassifier(rules)
+	result, err := c.Classify(context.Background(), makeMsg("", "", "invoice notice"))
+	if err != nil {
+		t.Fatalf("Classify: %v", err)
+	}
+	if result.Category != CategoryVendor {
+		t.Errorf("Category: got %q, want %q", result.Category, CategoryVendor)
+	}
+}
+
+func TestSubjectRuleClassifier_EmptyRuleList(t *testing.T) {
+	c := NewSubjectRuleClassifier(nil)
+	result, err := c.Classify(context.Background(), makeMsg("", "", "invoice due"))
+	if err != nil {
+		t.Fatalf("Classify: %v", err)
+	}
+	if result.Category != CategoryUnknown {
+		t.Errorf("Category: got %q, want %q (empty rules must return unknown)", result.Category, CategoryUnknown)
+	}
+}

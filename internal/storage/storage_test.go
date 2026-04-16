@@ -1365,6 +1365,184 @@ func TestQueryDomainStatsByMailbox_MinCountAndOrdering(t *testing.T) {
 	}
 }
 
+func TestQueryLabelStatsByMailbox(t *testing.T) {
+	st := newTestStore(t)
+	ctx := context.Background()
+	createTestMailbox(t, st, "user@example.com")
+
+	now := time.Date(2026, 4, 9, 12, 0, 0, 0, time.UTC)
+	messages := []models.MessageMeta{
+		{ProviderID: "m1", MailboxID: "user@example.com", Provider: "gmail", Labels: []string{"CATEGORY_PROMOTIONS", "INBOX"}, ReceivedAt: now},
+		{ProviderID: "m2", MailboxID: "user@example.com", Provider: "gmail", Labels: []string{"CATEGORY_PROMOTIONS", "INBOX"}, ReceivedAt: now.Add(time.Minute)},
+		{ProviderID: "m3", MailboxID: "user@example.com", Provider: "gmail", Labels: []string{"CATEGORY_PROMOTIONS", "INBOX"}, ReceivedAt: now.Add(2 * time.Minute)},
+		{ProviderID: "m4", MailboxID: "user@example.com", Provider: "gmail", Labels: []string{"INBOX"}, ReceivedAt: now.Add(3 * time.Minute)},
+		{ProviderID: "m5", MailboxID: "user@example.com", Provider: "gmail", Labels: []string{"INBOX"}, ReceivedAt: now.Add(4 * time.Minute)},
+		{ProviderID: "m6", MailboxID: "user@example.com", Provider: "gmail", Labels: []string{}, ReceivedAt: now.Add(5 * time.Minute)},
+	}
+	for _, msg := range messages {
+		if err := st.UpsertMessage(ctx, msg); err != nil {
+			t.Fatalf("UpsertMessage(%s): %v", msg.ProviderID, err)
+		}
+	}
+	if err := st.UpsertLabelCatalog(ctx, "user@example.com", []LabelCatalogEntry{
+		{LabelID: "CATEGORY_PROMOTIONS", DisplayName: "Promotions", LabelType: "system"},
+		{LabelID: "INBOX", DisplayName: "Inbox", LabelType: "system"},
+	}); err != nil {
+		t.Fatalf("UpsertLabelCatalog: %v", err)
+	}
+
+	rows, err := st.QueryLabelStatsByMailbox(ctx, "user@example.com", 1)
+	if err != nil {
+		t.Fatalf("QueryLabelStatsByMailbox: %v", err)
+	}
+	if len(rows) != 2 {
+		t.Fatalf("expected 2 label rows, got %d", len(rows))
+	}
+	if rows[0].Label != "INBOX" || rows[0].MessageCount != 5 {
+		t.Fatalf("unexpected first label row: %+v", rows[0])
+	}
+	if rows[0].DisplayName != "Inbox" {
+		t.Fatalf("unexpected first label display name: %+v", rows[0])
+	}
+	if rows[1].Label != "CATEGORY_PROMOTIONS" || rows[1].MessageCount != 3 {
+		t.Fatalf("unexpected second label row: %+v", rows[1])
+	}
+	if rows[1].DisplayName != "Promotions" {
+		t.Fatalf("unexpected second label display name: %+v", rows[1])
+	}
+
+	filteredRows, err := st.QueryLabelStatsByMailbox(ctx, "user@example.com", 4)
+	if err != nil {
+		t.Fatalf("QueryLabelStatsByMailbox filtered: %v", err)
+	}
+	if len(filteredRows) != 1 || filteredRows[0].Label != "INBOX" || filteredRows[0].MessageCount != 5 {
+		t.Fatalf("unexpected filtered rows: %+v", filteredRows)
+	}
+}
+
+func TestUpsertLabelCatalog_UpdatesExistingRow(t *testing.T) {
+	st := newTestStore(t)
+	ctx := context.Background()
+	createTestMailbox(t, st, "user@example.com")
+
+	if err := st.UpsertLabelCatalog(ctx, "user@example.com", []LabelCatalogEntry{
+		{LabelID: "Label_12345", DisplayName: "Billing Queue", LabelType: "user"},
+	}); err != nil {
+		t.Fatalf("first UpsertLabelCatalog: %v", err)
+	}
+	if err := st.UpsertLabelCatalog(ctx, "user@example.com", []LabelCatalogEntry{
+		{LabelID: "Label_12345", DisplayName: "Invoices", LabelType: "user"},
+	}); err != nil {
+		t.Fatalf("second UpsertLabelCatalog: %v", err)
+	}
+
+	if err := st.UpsertMessage(ctx, models.MessageMeta{
+		ProviderID: "m1",
+		MailboxID:  "user@example.com",
+		Provider:   "gmail",
+		Labels:     []string{"Label_12345"},
+		ReceivedAt: time.Date(2026, 4, 10, 0, 0, 0, 0, time.UTC),
+	}); err != nil {
+		t.Fatalf("UpsertMessage: %v", err)
+	}
+
+	rows, err := st.QueryLabelStatsByMailbox(ctx, "user@example.com", 1)
+	if err != nil {
+		t.Fatalf("QueryLabelStatsByMailbox: %v", err)
+	}
+	if len(rows) != 1 || rows[0].DisplayName != "Invoices" {
+		t.Fatalf("unexpected rows after label catalog update: %+v", rows)
+	}
+}
+
+func TestQueryLabelStatsByMailbox_Empty(t *testing.T) {
+	st := newTestStore(t)
+	ctx := context.Background()
+	createTestMailbox(t, st, "user@example.com")
+
+	rows, err := st.QueryLabelStatsByMailbox(ctx, "user@example.com", 1)
+	if err != nil {
+		t.Fatalf("QueryLabelStatsByMailbox: %v", err)
+	}
+	if len(rows) != 0 {
+		t.Fatalf("expected no label rows, got %+v", rows)
+	}
+}
+
+func TestQueryLabelDomainStatsByMailbox(t *testing.T) {
+	st := newTestStore(t)
+	ctx := context.Background()
+	createTestMailbox(t, st, "user@example.com")
+	createTestMailbox(t, st, "other@example.com")
+
+	now := time.Date(2026, 4, 10, 9, 0, 0, 0, time.UTC)
+	for _, msg := range []models.MessageMeta{
+		{ProviderID: "m1", MailboxID: "user@example.com", Provider: "gmail", Domain: "a.example", Labels: []string{"INBOX", "Label_12345"}, ReceivedAt: now},
+		{ProviderID: "m2", MailboxID: "user@example.com", Provider: "gmail", Domain: "a.example", Labels: []string{"INBOX", "Label_12345"}, ReceivedAt: now.Add(time.Minute)},
+		{ProviderID: "m3", MailboxID: "user@example.com", Provider: "gmail", Domain: "b.example", Labels: []string{"INBOX", "Label_12345"}, ReceivedAt: now.Add(2 * time.Minute)},
+		{ProviderID: "m4", MailboxID: "user@example.com", Provider: "gmail", Domain: "c.example", Labels: []string{"INBOX"}, ReceivedAt: now.Add(3 * time.Minute)},
+		{ProviderID: "m5", MailboxID: "user@example.com", Provider: "gmail", Domain: "", Labels: []string{"INBOX", "Label_12345"}, ReceivedAt: now.Add(4 * time.Minute)},
+		{ProviderID: "m6", MailboxID: "other@example.com", Provider: "gmail", Domain: "a.example", Labels: []string{"INBOX"}, ReceivedAt: now.Add(5 * time.Minute)},
+	} {
+		if err := st.UpsertMessage(ctx, msg); err != nil {
+			t.Fatalf("UpsertMessage(%s): %v", msg.ProviderID, err)
+		}
+	}
+	if err := st.UpsertLabelCatalog(ctx, "user@example.com", []LabelCatalogEntry{
+		{LabelID: "INBOX", DisplayName: "Inbox", LabelType: "system"},
+		{LabelID: "Label_12345", DisplayName: "Billing Queue", LabelType: "user"},
+	}); err != nil {
+		t.Fatalf("UpsertLabelCatalog: %v", err)
+	}
+
+	rows, err := st.QueryLabelDomainStatsByMailbox(ctx, "user@example.com", 1, 2)
+	if err != nil {
+		t.Fatalf("QueryLabelDomainStatsByMailbox: %v", err)
+	}
+	if len(rows) != 4 {
+		t.Fatalf("expected 4 label/domain rows, got %d", len(rows))
+	}
+	if rows[0] != (LabelDomainCount{Label: "INBOX", DisplayName: "Inbox", Domain: "a.example", MessageCount: 2}) {
+		t.Fatalf("unexpected first row: %+v", rows[0])
+	}
+	if rows[1] != (LabelDomainCount{Label: "INBOX", DisplayName: "Inbox", Domain: "b.example", MessageCount: 1}) {
+		t.Fatalf("unexpected second row: %+v", rows[1])
+	}
+	if rows[2] != (LabelDomainCount{Label: "Label_12345", DisplayName: "Billing Queue", Domain: "a.example", MessageCount: 2}) {
+		t.Fatalf("unexpected third row: %+v", rows[2])
+	}
+	if rows[3] != (LabelDomainCount{Label: "Label_12345", DisplayName: "Billing Queue", Domain: "b.example", MessageCount: 1}) {
+		t.Fatalf("unexpected fourth row: %+v", rows[3])
+	}
+
+	filteredRows, err := st.QueryLabelDomainStatsByMailbox(ctx, "user@example.com", 2, 1)
+	if err != nil {
+		t.Fatalf("QueryLabelDomainStatsByMailbox filtered: %v", err)
+	}
+	if len(filteredRows) != 2 {
+		t.Fatalf("expected 2 filtered rows, got %d", len(filteredRows))
+	}
+	for _, row := range filteredRows {
+		if row.Domain != "a.example" || row.MessageCount != 2 {
+			t.Fatalf("unexpected filtered row: %+v", row)
+		}
+	}
+}
+
+func TestQueryLabelDomainStatsByMailbox_Empty(t *testing.T) {
+	st := newTestStore(t)
+	ctx := context.Background()
+	createTestMailbox(t, st, "user@example.com")
+
+	rows, err := st.QueryLabelDomainStatsByMailbox(ctx, "user@example.com", 1, 3)
+	if err != nil {
+		t.Fatalf("QueryLabelDomainStatsByMailbox: %v", err)
+	}
+	if len(rows) != 0 {
+		t.Fatalf("expected no label/domain rows, got %+v", rows)
+	}
+}
+
 // --- QueryMessagesBySender ---
 
 func TestQueryMessagesBySender_ScopedOrderedDesc(t *testing.T) {
@@ -2529,5 +2707,87 @@ func TestListInferenceSuggestions_InvalidCreatedAt(t *testing.T) {
 
 	if _, err := st.ListInferenceSuggestions(ctx, "user@example.com"); err == nil {
 		t.Fatal("expected parse error for invalid inference suggestion created_at")
+	}
+}
+
+// --- ListMessageClassificationsByMailbox ---
+
+func TestListMessageClassificationsByMailbox_ReturnsMap(t *testing.T) {
+	st := newTestStore(t)
+	ctx := context.Background()
+	createTestMailbox(t, st, "user@example.com")
+	now := time.Now().UTC()
+
+	for _, id := range []string{"m1", "m2", "m3"} {
+		seedMessage(t, st, id, "user@example.com", "a@x.com", "", "x.com", "", now)
+	}
+	for _, c := range []Classification{
+		{MessageID: "m1", MailboxID: "user@example.com", Category: "vendor", Source: "seed", ClassifiedAt: now},
+		{MessageID: "m2", MailboxID: "user@example.com", Category: "unknown", Source: "seed", ClassifiedAt: now},
+	} {
+		if err := st.SaveClassification(ctx, c); err != nil {
+			t.Fatalf("SaveClassification(%s): %v", c.MessageID, err)
+		}
+	}
+
+	got, err := st.ListMessageClassificationsByMailbox(ctx, "user@example.com")
+	if err != nil {
+		t.Fatalf("ListMessageClassificationsByMailbox: %v", err)
+	}
+	if len(got) != 2 {
+		t.Errorf("len: got %d, want 2", len(got))
+	}
+	if got["m1"] != "vendor" {
+		t.Errorf("m1: got %q, want %q", got["m1"], "vendor")
+	}
+	if got["m2"] != "unknown" {
+		t.Errorf("m2: got %q, want %q", got["m2"], "unknown")
+	}
+	// m3 has no classification — must be absent.
+	if _, ok := got["m3"]; ok {
+		t.Error("m3 should not be present in map (no persisted classification)")
+	}
+}
+
+func TestListMessageClassificationsByMailbox_Empty(t *testing.T) {
+	st := newTestStore(t)
+	ctx := context.Background()
+	createTestMailbox(t, st, "user@example.com")
+
+	got, err := st.ListMessageClassificationsByMailbox(ctx, "user@example.com")
+	if err != nil {
+		t.Fatalf("ListMessageClassificationsByMailbox: %v", err)
+	}
+	if len(got) != 0 {
+		t.Errorf("expected empty map, got %v", got)
+	}
+}
+
+func TestListMessageClassificationsByMailbox_MailboxIsolation(t *testing.T) {
+	st := newTestStore(t)
+	ctx := context.Background()
+	createTestMailbox(t, st, "user@example.com")
+	createTestMailbox(t, st, "other@example.com")
+	now := time.Now().UTC()
+
+	seedMessage(t, st, "m1", "user@example.com", "a@x.com", "", "x.com", "", now)
+	seedMessage(t, st, "m2", "other@example.com", "b@y.com", "", "y.com", "", now)
+	if err := st.SaveClassification(ctx, Classification{
+		MessageID: "m1", MailboxID: "user@example.com", Category: "vendor", Source: "seed", ClassifiedAt: now,
+	}); err != nil {
+		t.Fatalf("SaveClassification: %v", err)
+	}
+	if err := st.SaveClassification(ctx, Classification{
+		MessageID: "m2", MailboxID: "other@example.com", Category: "client", Source: "seed", ClassifiedAt: now,
+	}); err != nil {
+		t.Fatalf("SaveClassification: %v", err)
+	}
+
+	got, err := st.ListMessageClassificationsByMailbox(ctx, "user@example.com")
+	if err != nil {
+		t.Fatalf("ListMessageClassificationsByMailbox: %v", err)
+	}
+	if len(got) != 1 || got["m1"] != "vendor" {
+		t.Errorf("expected only m1=vendor, got %v", got)
 	}
 }

@@ -60,6 +60,8 @@ const (
 	PatternSenderEmail = "sender_email"
 	// PatternSenderPrefix matches when the local part of msg.FromEmail has the seed value as prefix.
 	PatternSenderPrefix = "sender_prefix"
+	// PatternLabel matches when one raw Gmail label equals the seed value (case-insensitive).
+	PatternLabel = "label"
 	// PatternHasAttachment matches when msg.HasAttachment equals the string-encoded boolean pattern value.
 	PatternHasAttachment = "has_attachment"
 	// PatternSubjectTerm matches when the lowercased tokenized subject contains the seed value.
@@ -262,12 +264,14 @@ func specificityRank(patternType string) int {
 		return 2
 	case PatternDomain:
 		return 3
-	case PatternHasAttachment:
+	case PatternLabel:
 		return 4
-	case PatternSubjectTerm:
+	case PatternHasAttachment:
 		return 5
-	default:
+	case PatternSubjectTerm:
 		return 6
+	default:
+		return 7
 	}
 }
 
@@ -369,6 +373,13 @@ func matchesSeed(seed ClassificationSeed, msg models.MessageMeta) bool {
 		return strings.EqualFold(msg.FromEmail, seed.PatternValue)
 	case PatternSenderPrefix:
 		return strings.HasPrefix(localPart(msg.FromEmail), strings.ToLower(seed.PatternValue))
+	case PatternLabel:
+		for _, label := range msg.Labels {
+			if strings.EqualFold(label, seed.PatternValue) {
+				return true
+			}
+		}
+		return false
 	case PatternHasAttachment:
 		return msg.HasAttachment == strings.EqualFold(seed.PatternValue, "true")
 	case PatternSubjectTerm:
@@ -397,6 +408,127 @@ func tokenizeSubject(subject string) []string {
 		tokens = append(tokens, strings.ToLower(token))
 	}
 	return tokens
+}
+
+// NormalizeSubject strips leading reply/forward prefixes (Re:, RE:, Fw:, Fwd:,
+// Re[N]:, etc.) from subject until stable, then trims whitespace. The result is
+// the canonical base subject suitable for keyword matching across thread replies.
+// NormalizeSubject is deterministic and idempotent.
+func NormalizeSubject(subject string) string {
+	for {
+		s := strings.TrimSpace(subject)
+		lower := strings.ToLower(s)
+		found := false
+		stripped := ""
+		for _, prefix := range []string{"re", "fw", "fwd", "aw"} {
+			if strings.HasPrefix(lower, prefix+"[") {
+				// Re[2]: style — find the closing ]:.
+				end := strings.Index(lower[len(prefix):], "]:")
+				if end >= 0 {
+					stripped = strings.TrimSpace(s[len(prefix)+end+2:])
+					found = true
+					break
+				}
+			}
+			if strings.HasPrefix(lower, prefix+":") {
+				stripped = strings.TrimSpace(s[len(prefix)+1:])
+				found = true
+				break
+			}
+		}
+		if !found {
+			return s
+		}
+		if stripped == s {
+			return s
+		}
+		subject = stripped
+	}
+}
+
+// SubjectRule is a single named subject-based classification rule with
+// independent inclusion and exclusion keyword lists.
+type SubjectRule struct {
+	// IncludeKeywords specifies keywords of which at least one must appear in
+	// the normalized subject. Matching is case-insensitive, whole-token.
+	IncludeKeywords []string
+	// ExcludeKeywords specifies keywords none of which may appear in the
+	// normalized subject. Matching is case-insensitive, whole-token.
+	ExcludeKeywords []string
+	// Category is the taxonomy constant assigned when this rule matches.
+	Category string
+	// Priority controls evaluation order (lower = evaluated first).
+	Priority int
+}
+
+// SubjectRuleClassifier implements Classifier using subject normalization and
+// keyword inclusion/exclusion matching. It is pluggable and can be composed via
+// ChainClassifier alongside SeedRuleClassifier or an AI-backed classifier.
+type SubjectRuleClassifier struct {
+	rules []SubjectRule // sorted by Priority ASC at construction time
+}
+
+// NewSubjectRuleClassifier creates a SubjectRuleClassifier with rules sorted
+// by Priority ASC, then stable by original order for ties.
+func NewSubjectRuleClassifier(rules []SubjectRule) *SubjectRuleClassifier {
+	sorted := make([]SubjectRule, len(rules))
+	copy(sorted, rules)
+	sort.SliceStable(sorted, func(i, j int) bool {
+		return sorted[i].Priority < sorted[j].Priority
+	})
+	return &SubjectRuleClassifier{rules: sorted}
+}
+
+// Classify normalizes msg.Subject and evaluates each rule in priority order.
+// A rule matches when at least one IncludeKeyword is present AND no
+// ExcludeKeyword is present in the normalized subject tokens.
+// Returns CategoryUnknown when no rule matches.
+func (c *SubjectRuleClassifier) Classify(_ context.Context, msg models.MessageMeta) (ClassificationResult, error) {
+	normalized := NormalizeSubject(msg.Subject)
+	tokens := tokenizeSubject(normalized)
+	tokenSet := make(map[string]struct{}, len(tokens))
+	for _, t := range tokens {
+		tokenSet[t] = struct{}{}
+	}
+	for _, rule := range c.rules {
+		if matchesSubjectRule(rule, tokenSet) {
+			return ClassificationResult{
+				Category:    rule.Category,
+				MatchedRule: "subject_rule:" + strings.Join(rule.IncludeKeywords, ","),
+				Source:      SourceOperator,
+			}, nil
+		}
+	}
+	return ClassificationResult{
+		Category:    CategoryUnknown,
+		MatchedRule: "no matching rule",
+		Source:      SourceOperator,
+	}, nil
+}
+
+// matchesSubjectRule returns true when the tokenSet satisfies rule's inclusion
+// and exclusion constraints. At least one IncludeKeyword must be present and no
+// ExcludeKeyword may be present. An empty IncludeKeywords list never matches.
+func matchesSubjectRule(rule SubjectRule, tokenSet map[string]struct{}) bool {
+	if len(rule.IncludeKeywords) == 0 {
+		return false
+	}
+	matched := false
+	for _, kw := range rule.IncludeKeywords {
+		if _, ok := tokenSet[strings.ToLower(kw)]; ok {
+			matched = true
+			break
+		}
+	}
+	if !matched {
+		return false
+	}
+	for _, kw := range rule.ExcludeKeywords {
+		if _, ok := tokenSet[strings.ToLower(kw)]; ok {
+			return false
+		}
+	}
+	return true
 }
 
 // InferenceConfidenceBand derives the canonical confidence band for one

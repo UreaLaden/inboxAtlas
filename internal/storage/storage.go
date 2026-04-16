@@ -145,6 +145,15 @@ CREATE TABLE IF NOT EXISTS ai_inference_suggestions (
     created_at       TEXT NOT NULL,
     PRIMARY KEY (mailbox_id, message_id)
 );
+
+CREATE TABLE IF NOT EXISTS label_catalog (
+    mailbox_id   TEXT NOT NULL REFERENCES mailboxes(id) ON DELETE CASCADE,
+    label_id     TEXT NOT NULL,
+    display_name TEXT NOT NULL DEFAULT '',
+    label_type   TEXT NOT NULL DEFAULT '',
+    synced_at    TEXT NOT NULL,
+    PRIMARY KEY (mailbox_id, label_id)
+);
 `
 
 func (s *Store) migrate() error {
@@ -478,6 +487,30 @@ type SenderCount struct {
 	Count  int
 }
 
+// LabelCount is a single Gmail label aggregate row returned by
+// QueryLabelStatsByMailbox.
+type LabelCount struct {
+	Label        string
+	DisplayName  string
+	MessageCount int
+}
+
+// LabelDomainCount is a single Gmail label and domain aggregate row returned
+// by QueryLabelDomainStatsByMailbox.
+type LabelDomainCount struct {
+	Label        string
+	DisplayName  string
+	Domain       string
+	MessageCount int
+}
+
+// LabelCatalogEntry is one persisted Gmail label catalog row for a mailbox.
+type LabelCatalogEntry struct {
+	LabelID     string
+	DisplayName string
+	LabelType   string
+}
+
 // VolumeCount is a single monthly volume row returned by QueryMessagesByVolume.
 type VolumeCount struct {
 	Period string // "YYYY-MM"
@@ -732,6 +765,86 @@ func (s *Store) QueryDomainStatsByMailbox(ctx context.Context, mailboxID string,
 			return nil, fmt.Errorf("scan domain stats row: %w", err)
 		}
 		out = append(out, dc)
+	}
+	return out, rows.Err()
+}
+
+// QueryLabelStatsByMailbox returns persisted Gmail label aggregate rows for one
+// mailbox from the messages.labels JSON column, filtered by minCount and
+// ordered by count descending then label ascending.
+func (s *Store) QueryLabelStatsByMailbox(ctx context.Context, mailboxID string, minCount int) ([]LabelCount, error) {
+	rows, err := s.db.QueryContext(ctx,
+		`SELECT je.value AS label,
+		        COALESCE(lc.display_name, '') AS display_name,
+		        COUNT(*) AS message_count
+		 FROM messages m, json_each(m.labels) je
+		 LEFT JOIN label_catalog lc ON lc.mailbox_id = m.mailbox_id AND lc.label_id = je.value
+		 WHERE m.mailbox_id = ?
+		 GROUP BY je.value
+		 HAVING COUNT(*) >= ?
+		 ORDER BY COUNT(*) DESC, je.value ASC`,
+		mailboxID, minCount,
+	)
+	if err != nil {
+		return nil, fmt.Errorf("query label stats by mailbox: %w", err)
+	}
+	defer func() { _ = rows.Close() }()
+
+	var out []LabelCount
+	for rows.Next() {
+		var lc LabelCount
+		if err := rows.Scan(&lc.Label, &lc.DisplayName, &lc.MessageCount); err != nil {
+			return nil, fmt.Errorf("scan label stats row: %w", err)
+		}
+		out = append(out, lc)
+	}
+	return out, rows.Err()
+}
+
+// QueryLabelDomainStatsByMailbox returns persisted Gmail label and domain
+// aggregate rows for one mailbox from the messages.labels JSON column,
+// filtered by minCount, ranked within each label, and limited to topN domains
+// per label.
+func (s *Store) QueryLabelDomainStatsByMailbox(ctx context.Context, mailboxID string, minCount, topN int) ([]LabelDomainCount, error) {
+	rows, err := s.db.QueryContext(ctx,
+		`WITH label_domain_counts AS (
+			SELECT je.value AS label,
+			       COALESCE(lc.display_name, '') AS display_name,
+			       m.domain AS domain,
+			       COUNT(*) AS message_count
+			FROM messages m
+			JOIN json_each(m.labels) je
+			LEFT JOIN label_catalog lc ON lc.mailbox_id = m.mailbox_id AND lc.label_id = je.value
+			WHERE m.mailbox_id = ? AND m.domain != ''
+			GROUP BY je.value, COALESCE(lc.display_name, ''), m.domain
+			HAVING COUNT(*) >= ?
+		),
+		ranked AS (
+			SELECT label,
+			       display_name,
+			       domain,
+			       message_count,
+			       ROW_NUMBER() OVER (PARTITION BY label ORDER BY message_count DESC, domain ASC) AS row_num
+			FROM label_domain_counts
+		)
+		SELECT label, display_name, domain, message_count
+		FROM ranked
+		WHERE row_num <= ?
+		ORDER BY label ASC, message_count DESC, domain ASC`,
+		mailboxID, minCount, topN,
+	)
+	if err != nil {
+		return nil, fmt.Errorf("query label domain stats by mailbox: %w", err)
+	}
+	defer func() { _ = rows.Close() }()
+
+	var out []LabelDomainCount
+	for rows.Next() {
+		var row LabelDomainCount
+		if err := rows.Scan(&row.Label, &row.DisplayName, &row.Domain, &row.MessageCount); err != nil {
+			return nil, fmt.Errorf("scan label domain stats row: %w", err)
+		}
+		out = append(out, row)
 	}
 	return out, rows.Err()
 }
@@ -1008,6 +1121,30 @@ func (s *Store) UpsertDomainStat(ctx context.Context, mailboxID, domain string, 
 	)
 	if err != nil {
 		return fmt.Errorf("upsert domain stat: %w", err)
+	}
+	return nil
+}
+
+// UpsertLabelCatalog inserts or updates Gmail label catalog rows for mailboxID.
+func (s *Store) UpsertLabelCatalog(ctx context.Context, mailboxID string, entries []LabelCatalogEntry) error {
+	syncedAt := time.Now().UTC().Format(time.RFC3339)
+	for _, entry := range entries {
+		_, err := s.db.ExecContext(ctx,
+			`INSERT INTO label_catalog (mailbox_id, label_id, display_name, label_type, synced_at)
+			 VALUES (?, ?, ?, ?, ?)
+			 ON CONFLICT(mailbox_id, label_id) DO UPDATE SET
+			 display_name = excluded.display_name,
+			 label_type = excluded.label_type,
+			 synced_at = excluded.synced_at`,
+			mailboxID,
+			entry.LabelID,
+			entry.DisplayName,
+			entry.LabelType,
+			syncedAt,
+		)
+		if err != nil {
+			return fmt.Errorf("upsert label catalog: %w", err)
+		}
 	}
 	return nil
 }
@@ -1341,6 +1478,30 @@ func (s *Store) BulkSaveClassifications(ctx context.Context, classifications []C
 		return fmt.Errorf("commit bulk save: %w", err)
 	}
 	return nil
+}
+
+// ListMessageClassificationsByMailbox returns a map of providerID → category for
+// all persisted message classifications in mailboxID. Messages that have no
+// classification row are absent from the map.
+func (s *Store) ListMessageClassificationsByMailbox(ctx context.Context, mailboxID string) (map[string]string, error) {
+	rows, err := s.db.QueryContext(ctx,
+		`SELECT message_id, category FROM message_classifications WHERE mailbox_id = ?`,
+		mailboxID,
+	)
+	if err != nil {
+		return nil, fmt.Errorf("list message classifications: %w", err)
+	}
+	defer func() { _ = rows.Close() }()
+
+	result := make(map[string]string)
+	for rows.Next() {
+		var messageID, category string
+		if err := rows.Scan(&messageID, &category); err != nil {
+			return nil, fmt.Errorf("scan message classification: %w", err)
+		}
+		result[messageID] = category
+	}
+	return result, rows.Err()
 }
 
 // GetClassification returns the classification for the given message and mailbox.

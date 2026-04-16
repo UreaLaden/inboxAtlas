@@ -33,7 +33,13 @@ import (
 
 var validateGmailDelegation = auth.ValidateGmailDelegation
 var resolveGmailTokenSource = auth.ResolveGmailTokenSource
-var newGmailProvider = func(email string, tokenSourceFactory func(context.Context) (oauth2.TokenSource, error)) models.MailProvider {
+
+type gmailSyncProvider interface {
+	models.MailProvider
+	ListLabels(context.Context) ([]gmailprovider.LabelMeta, error)
+}
+
+var newGmailProvider = func(email string, tokenSourceFactory func(context.Context) (oauth2.TokenSource, error)) gmailSyncProvider {
 	return gmailprovider.New(email, tokenSourceFactory)
 }
 var runIngestion = ingestion.Run
@@ -488,7 +494,7 @@ func runSyncGmail(ctx context.Context, w io.Writer, cfg config.Config, account s
 
 	provider := newGmailProvider(mb.ID, tokenSourceFactory)
 
-	return runIngestion(ctx, ingestion.Options{
+	if err := runIngestion(ctx, ingestion.Options{
 		MailboxID:    mb.ID,
 		Provider:     "gmail",
 		MailProvider: provider,
@@ -497,7 +503,28 @@ func runSyncGmail(ctx context.Context, w io.Writer, cfg config.Config, account s
 		RequestDelay: time.Duration(cfg.SyncDelayMS) * time.Millisecond,
 		MaxRetries:   5,
 		MessageLimit: limit,
-	})
+	}); err != nil {
+		return err
+	}
+
+	labels, err := provider.ListLabels(ctx)
+	if err != nil {
+		slog.WarnContext(ctx, "label catalog sync failed; label names may be stale", "err", err)
+		return nil
+	}
+
+	entries := make([]storage.LabelCatalogEntry, 0, len(labels))
+	for _, label := range labels {
+		entries = append(entries, storage.LabelCatalogEntry{
+			LabelID:     label.ID,
+			DisplayName: label.DisplayName,
+			LabelType:   label.Type,
+		})
+	}
+	if err := st.UpsertLabelCatalog(ctx, mb.ID, entries); err != nil {
+		slog.WarnContext(ctx, "label catalog persist failed", "err", err)
+	}
+	return nil
 }
 
 // runSyncStatus prints the current sync checkpoint for a mailbox to w. It is
@@ -569,6 +596,7 @@ func buildClassifyCmd(cfg config.Config) *cobra.Command {
 	}
 	cmd.AddCommand(buildClassifyRunCmd(cfg))
 	cmd.AddCommand(buildClassifyMessagesCmd(cfg))
+	cmd.AddCommand(buildClassifyLabelAnalysisCmd(cfg))
 	cmd.AddCommand(buildClassifyResultsCmd(cfg))
 	cmd.AddCommand(buildClassifySuggestionsCmd(cfg))
 	cmd.AddCommand(buildClassifyInferCmd(cfg))
@@ -577,6 +605,61 @@ func buildClassifyCmd(cfg config.Config) *cobra.Command {
 	cmd.AddCommand(buildClassifyCategoriesCmd())
 	cmd.AddCommand(buildClassifyIntentsCmd())
 	cmd.AddCommand(buildClassifyPatternTypesCmd())
+	cmd.AddCommand(buildClassifySubjectEvalCmd(cfg))
+	return cmd
+}
+
+// buildClassifySubjectEvalCmd returns the "classify subject-eval" subcommand,
+// which runs a dry-run subject-rule evaluation against all synced messages for
+// one mailbox without persisting any classifications.
+func buildClassifySubjectEvalCmd(cfg config.Config) *cobra.Command {
+	var account string
+	var include []string
+	var exclude []string
+	var excludeCategory []string
+	var category string
+	var format string
+	var matchedOnly bool
+
+	cmd := &cobra.Command{
+		Use:   "subject-eval",
+		Short: "Dry-run subject keyword rule evaluation against synced mailbox messages",
+		RunE: func(cmd *cobra.Command, _ []string) error {
+			return runClassifySubjectEval(cmd.Context(), cmd.OutOrStdout(), cfg, account, include, exclude, excludeCategory, category, format, matchedOnly)
+		},
+	}
+	cmd.Flags().StringVar(&account, "account", "", "mailbox email or alias")
+	cmd.Flags().StringArrayVar(&include, "include", nil, "keyword that must appear in the normalized subject (repeatable, OR semantics)")
+	cmd.Flags().StringArrayVar(&exclude, "exclude", nil, "keyword that must not appear in the normalized subject (repeatable)")
+	cmd.Flags().StringArrayVar(&excludeCategory, "exclude-category", nil, "skip messages whose persisted classification matches this category (repeatable)")
+	cmd.Flags().StringVar(&category, "category", "", "category to assign on match (required)")
+	cmd.Flags().StringVar(&format, "format", "table", "output format: table or json")
+	cmd.Flags().BoolVar(&matchedOnly, "matched-only", true, "show only matched rows; suppress excluded and unmatched rows")
+	_ = cmd.MarkFlagRequired("account")
+	_ = cmd.MarkFlagRequired("category")
+	return cmd
+}
+
+// buildClassifyLabelAnalysisCmd returns the "classify label-analysis"
+// subcommand.
+func buildClassifyLabelAnalysisCmd(cfg config.Config) *cobra.Command {
+	var account string
+	var format string
+	var minCount int
+	var topDomains int
+
+	cmd := &cobra.Command{
+		Use:   "label-analysis",
+		Short: "Show Gmail label frequency to guide seed authoring",
+		RunE: func(cmd *cobra.Command, _ []string) error {
+			return runClassifyLabelAnalysis(cmd.Context(), cmd.OutOrStdout(), cfg, account, format, minCount, topDomains)
+		},
+	}
+	cmd.Flags().StringVar(&account, "account", "", "mailbox email or alias")
+	cmd.Flags().StringVar(&format, "format", "table", "output format: table, json")
+	cmd.Flags().IntVar(&minCount, "min-count", 1, "minimum message count to include a label")
+	cmd.Flags().IntVar(&topDomains, "top-domains", 0, "top domains to include per label")
+	_ = cmd.MarkFlagRequired("account")
 	return cmd
 }
 
@@ -586,17 +669,19 @@ func buildClassifyInferCmd(cfg config.Config) *cobra.Command {
 	var account string
 	var providerCommand string
 	var providerArgs []string
+	var batchSize int
 
 	cmd := &cobra.Command{
 		Use:   "infer",
 		Short: "Run AI-assisted inference for still-unknown mailbox messages",
 		RunE: func(cmd *cobra.Command, _ []string) error {
-			return runClassifyInfer(cmd.Context(), cmd.OutOrStdout(), cfg, account, providerCommand, providerArgs)
+			return runClassifyInfer(cmd.Context(), cmd.OutOrStdout(), cfg, account, providerCommand, providerArgs, batchSize)
 		},
 	}
 	cmd.Flags().StringVar(&account, "account", "", "mailbox email or alias")
 	cmd.Flags().StringVar(&providerCommand, "provider-command", "", "external command that returns structured inference candidates")
 	cmd.Flags().StringSliceVar(&providerArgs, "provider-arg", nil, "argument to pass to the inference provider command; repeatable")
+	cmd.Flags().IntVar(&batchSize, "batch-size", 10, "number of messages sent to the inference provider per batch (0 = no batching)")
 	_ = cmd.MarkFlagRequired("account")
 	cmd.AddCommand(buildClassifyInferSuggestionsCmd(cfg))
 	return cmd
@@ -825,6 +910,67 @@ func validateClassifyMessagesFormat(f string) (string, error) {
 	}
 }
 
+func gmailLabelName(id string) string {
+	switch id {
+	case "INBOX":
+		return "Inbox"
+	case "SENT":
+		return "Sent"
+	case "TRASH":
+		return "Trash"
+	case "SPAM":
+		return "Spam"
+	case "STARRED":
+		return "Starred"
+	case "YELLOW_STAR":
+		return "Yellow star"
+	case "BLUE_STAR":
+		return "Blue star"
+	case "RED_STAR":
+		return "Red star"
+	case "ORANGE_STAR":
+		return "Orange star"
+	case "GREEN_STAR":
+		return "Green star"
+	case "PURPLE_STAR":
+		return "Purple star"
+	case "IMPORTANT":
+		return "Important"
+	case "YELLOW_BANG":
+		return "Yellow bang"
+	case "RED_BANG":
+		return "Red bang"
+	case "ORANGE_BANG":
+		return "Orange bang"
+	case "GREEN_BANG":
+		return "Green bang"
+	case "BLUE_INFO":
+		return "Blue info"
+	case "PURPLE_QUESTION":
+		return "Purple question"
+	case "UNREAD":
+		return "Unread"
+	case "DRAFT":
+		return "Drafts"
+	case "ALL_MAIL":
+		return "All mail"
+	case "CHAT":
+		return "Chat"
+	case "CATEGORY_PROMOTIONS":
+		return "Promotions"
+	case "CATEGORY_SOCIAL":
+		return "Social"
+	case "CATEGORY_UPDATES":
+		return "Updates"
+	case "CATEGORY_FORUMS":
+		return "Forums"
+	case "CATEGORY_PERSONAL":
+		return "Personal"
+	default:
+		return id
+	}
+}
+
 // runClassifyRun executes mailbox-scoped classification for one mailbox.
 func runClassifyRun(ctx context.Context, w io.Writer, cfg config.Config, account string) error {
 	result, err := runClassify(ctx, cfg, account)
@@ -984,8 +1130,82 @@ func runClassifySuggestions(ctx context.Context, w io.Writer, cfg config.Config,
 	return tw.Flush()
 }
 
+// runClassifyLabelAnalysis renders mailbox-scoped Gmail label frequency rows
+// for manual operator review.
+func runClassifyLabelAnalysis(ctx context.Context, w io.Writer, cfg config.Config, account, format string, minCount, topDomains int) error {
+	f, err := validateClassifyFormat(format)
+	if err != nil {
+		return err
+	}
+	if topDomains > 0 {
+		return runClassifyLabelDomainAnalysis(ctx, w, cfg, account, f, minCount, topDomains)
+	}
+
+	result, err := engine.ListLabelStats(ctx, cfg, account, minCount)
+	if err != nil {
+		return err
+	}
+
+	if f == "json" {
+		enc := json.NewEncoder(w)
+		enc.SetIndent("", "  ")
+		return enc.Encode(result.Labels)
+	}
+
+	if len(result.Labels) == 0 {
+		_, _ = fmt.Fprintf(w, "No label stats found for %s.\n", result.MailboxID)
+		return nil
+	}
+
+	tw := tabwriter.NewWriter(w, 0, 0, 3, ' ', 0)
+	_, _ = fmt.Fprintln(tw, "LABEL ID\tNAME\tMESSAGES")
+	for _, row := range result.Labels {
+		name := row.DisplayName
+		if name == "" {
+			name = gmailLabelName(row.Label)
+		}
+		_, _ = fmt.Fprintf(tw, "%s\t%s\t%d\n", row.Label, name, row.MessageCount)
+	}
+	return tw.Flush()
+}
+
+// runClassifyLabelDomainAnalysis renders mailbox-scoped Gmail label rows
+// expanded into top domains for manual operator review.
+func runClassifyLabelDomainAnalysis(ctx context.Context, w io.Writer, cfg config.Config, account, format string, minCount, topDomains int) error {
+	result, err := engine.ListLabelDomainStats(ctx, cfg, account, minCount, topDomains)
+	if err != nil {
+		return err
+	}
+
+	for i := range result.Labels {
+		if result.Labels[i].Name == "" {
+			result.Labels[i].Name = gmailLabelName(result.Labels[i].Label)
+		}
+	}
+
+	if format == "json" {
+		enc := json.NewEncoder(w)
+		enc.SetIndent("", "  ")
+		return enc.Encode(result.Labels)
+	}
+
+	if len(result.Labels) == 0 {
+		_, _ = fmt.Fprintf(w, "No label stats found for %s.\n", result.MailboxID)
+		return nil
+	}
+
+	tw := tabwriter.NewWriter(w, 0, 0, 3, ' ', 0)
+	_, _ = fmt.Fprintln(tw, "LABEL ID\tNAME\tDOMAIN\tMESSAGES")
+	for _, row := range result.Labels {
+		for _, domain := range row.Domains {
+			_, _ = fmt.Fprintf(tw, "%s\t%s\t%s\t%d\n", row.Label, row.Name, domain.Domain, domain.MessageCount)
+		}
+	}
+	return tw.Flush()
+}
+
 // runClassifyInfer executes one mailbox-scoped AI inference pass.
-func runClassifyInfer(ctx context.Context, w io.Writer, cfg config.Config, account, providerCommand string, providerArgs []string) error {
+func runClassifyInfer(ctx context.Context, w io.Writer, cfg config.Config, account, providerCommand string, providerArgs []string, batchSize int) error {
 	command := strings.TrimSpace(providerCommand)
 	if command == "" {
 		command = strings.TrimSpace(os.Getenv("INBOXATLAS_INFERENCE_PROVIDER_CMD"))
@@ -994,7 +1214,7 @@ func runClassifyInfer(ctx context.Context, w io.Writer, cfg config.Config, accou
 		return fmt.Errorf("inference provider command is required via --provider-command or INBOXATLAS_INFERENCE_PROVIDER_CMD")
 	}
 
-	result, err := runInference(ctx, cfg, account, command, providerArgs)
+	result, err := runInference(ctx, cfg, account, command, providerArgs, batchSize)
 	if err != nil {
 		return err
 	}
@@ -1143,6 +1363,104 @@ func runClassifySeedsDelete(ctx context.Context, w io.Writer, cfg config.Config,
 	}
 	_, _ = fmt.Fprintf(w, "Deleted mailbox seed %d for %s.\n", seedID, account)
 	return nil
+}
+
+// runClassifySubjectEval executes a dry-run subject-rule evaluation and renders
+// the results as a table or JSON. No classifications are persisted.
+func runClassifySubjectEval(ctx context.Context, w io.Writer, cfg config.Config, account string, include, exclude, excludeCategory []string, category, format string, matchedOnly bool) error {
+	f, err := validateClassifyFormat(format)
+	if err != nil {
+		return err
+	}
+	if len(include) == 0 {
+		return fmt.Errorf("at least one --include keyword is required")
+	}
+	if err := validateClassificationCategoryRequired(category); err != nil {
+		return err
+	}
+	for _, cat := range excludeCategory {
+		if err := validateClassificationCategory(cat); err != nil {
+			return fmt.Errorf("--exclude-category: %w", err)
+		}
+	}
+
+	rules := []engine.SubjectEvalRule{
+		{
+			IncludeKeywords: include,
+			ExcludeKeywords: exclude,
+			Category:        category,
+			Priority:        100,
+		},
+	}
+
+	summary, err := engine.EvaluateSubjectRules(ctx, cfg, account, rules, excludeCategory)
+	if err != nil {
+		return err
+	}
+
+	// --matched-only: show only rows that matched and were not excluded by category filter.
+	results := summary.Results
+	if matchedOnly {
+		filtered := make([]engine.SubjectEvalResult, 0, len(results))
+		for _, r := range results {
+			if r.Matched && !r.Excluded {
+				filtered = append(filtered, r)
+			}
+		}
+		results = filtered
+	}
+
+	if f == "json" {
+		enc := json.NewEncoder(w)
+		enc.SetIndent("", "  ")
+		out := summary
+		out.Results = results
+		return enc.Encode(out)
+	}
+
+	if len(results) == 0 {
+		_, _ = fmt.Fprintf(w, "No messages matched for %s.\n", summary.MailboxID)
+		_, _ = fmt.Fprintf(w, "%d of %d messages matched.\n", summary.MatchedCount, summary.TotalMessages)
+		return nil
+	}
+
+	tw := tabwriter.NewWriter(w, 0, 0, 3, ' ', 0)
+	_, _ = fmt.Fprintln(tw, "MESSAGE_ID\tSUBJECT\tNORMALIZED\tCATEGORY\tMATCHED_RULE\tEXCLUDED_REASON")
+	for _, r := range results {
+		subject := r.Subject
+		if len(subject) > 40 {
+			subject = subject[:37] + "..."
+		}
+		normalized := r.Normalized
+		if len(normalized) > 40 {
+			normalized = normalized[:37] + "..."
+		}
+		_, _ = fmt.Fprintf(tw, "%s\t%s\t%s\t%s\t%s\t%s\n",
+			r.MessageID,
+			subject,
+			normalized,
+			r.Category,
+			r.MatchedRule,
+			r.ExcludedReason,
+		)
+	}
+	if err := tw.Flush(); err != nil {
+		return err
+	}
+	_, _ = fmt.Fprintf(w, "%d of %d messages matched.\n", summary.MatchedCount, summary.TotalMessages)
+	if summary.ExcludedCount > 0 {
+		_, _ = fmt.Fprintf(w, "%d messages excluded by category filter.\n", summary.ExcludedCount)
+	}
+	return nil
+}
+
+// validateClassificationCategoryRequired validates that category is non-empty
+// and refers to a known taxonomy constant.
+func validateClassificationCategoryRequired(category string) error {
+	if category == "" {
+		return fmt.Errorf("--category is required")
+	}
+	return validateClassificationCategory(category)
 }
 
 // runClassifyCategories writes the supported deterministic category names.

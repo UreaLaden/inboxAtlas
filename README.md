@@ -344,8 +344,11 @@ inboxatlas classify suggestions --account <id|alias> [--format table|json]
 # Review classified messages with optional filters
 inboxatlas classify messages --account <id|alias> [--category <category>] [--intent <intent>] [--since <RFC3339>] [--format table|csv|json] [--limit 100]
 
+# Review Gmail label frequency to guide manual seed authoring
+inboxatlas classify label-analysis --account <id|alias> [--format table|json] [--min-count 1] [--top-domains 0]
+
 # Run AI-assisted inference over still-unknown messages
-inboxatlas classify infer --account <id|alias> --provider-command <cmd> [--provider-arg <arg>...]
+inboxatlas classify infer --account <id|alias> --provider-command <cmd> [--provider-arg <arg>...] [--batch-size N]
 
 # Review persisted AI inference suggestions
 inboxatlas classify infer suggestions --account <id|alias> [--format table|json]
@@ -363,16 +366,26 @@ inboxatlas classify pattern-types
 
 # Promote one reviewed suggestion into the active mailbox-scoped seed set
 inboxatlas classify promote --account <id|alias> \
-  --pattern-type <domain|sender_email|sender_prefix|has_attachment|subject_term> \
+  --pattern-type <domain|sender_email|sender_prefix|label|has_attachment|subject_term> \
   --pattern-value <value> \
   --category <category> \
   [--priority 100]
+
+# Dry-run subject keyword rule evaluation (no classifications persisted)
+inboxatlas classify subject-eval --account <id|alias> \
+  --include <keyword> [--include <keyword>...] \
+  --category <category> \
+  [--exclude <keyword>...] \
+  [--exclude-category <category>...] \
+  [--format table|json] \
+  [--matched-only]
 ```
 
 | Command | Purpose |
 |---|---|
 | `classify run` | Loads synced message metadata for one mailbox, persists mailbox-scoped classifications, and prints a per-category breakdown with unknown percentage |
 | `classify messages` | Lists per-message classification rows with optional category, intent, and since filters, plus message IDs, attachment presence, and table/csv/json output |
+| `classify label-analysis` | Shows mailbox-scoped Gmail label frequency so operators can author manual `pattern-type=label` seeds from observed labels; known Gmail labels use synced display names when available, and `--top-domains N` expands each label into its top N sender domains |
 | `classify results` | Shows mailbox-scoped classification totals, per-category counts, and unknown percentage |
 | `classify suggestions` | Shows read-only mailbox bootstrap suggestions derived from observed mailbox discovery data, excluding patterns already covered by global defaults |
 | `classify infer` | Runs AI-assisted inference only for messages still classified as `unknown` and stages valid medium/high-confidence suggestions for review |
@@ -383,6 +396,7 @@ inboxatlas classify promote --account <id|alias> \
 | `classify intents` | Prints the valid deterministic intent values |
 | `classify pattern-types` | Prints the valid deterministic seed pattern types |
 | `classify promote` | Validates one suggestion for the target mailbox and persists it as an active mailbox-scoped operator seed |
+| `classify subject-eval` | Dry-run evaluation of a single subject keyword rule (include/exclude lists + category) against all synced messages; shows normalized subjects and matched rows without persisting any classifications |
 
 Notes:
 
@@ -392,9 +406,12 @@ Notes:
 - For automation, use `classify messages --intent <intent> --since <RFC3339> --format csv` so reruns stay bounded and downstream tools can deduplicate on `MessageID`.
 - `classify results` is read-only and reports on classifications already stored locally.
 - `classify suggestions` is read-only and does not activate any seed.
-- `classify infer` requires `--provider-command` or `INBOXATLAS_INFERENCE_PROVIDER_CMD`; it only submits messages that remain `unknown` after deterministic classification.
+- `classify infer` requires `--provider-command` or `INBOXATLAS_INFERENCE_PROVIDER_CMD`; it only submits messages that remain `unknown` after deterministic classification. Use `--batch-size N` (default 50) to control how many messages are sent per provider call — required for large mailboxes where sending all unknowns at once would exceed the AI model's context window.
 - `classify infer suggestions` is read-only and lists staged AI candidates rather than active seeds.
-- `classify categories` lists only relationship categories; `classify intents` lists additive intent values; `classify pattern-types` includes `has_attachment`.
+- `classify categories` lists only relationship categories; `classify intents` lists additive intent values; `classify pattern-types` includes `label` and `has_attachment`.
+- `classify label-analysis` is read-only and intended for manual workflow tuning rather than automatic suggestion generation.
+- `classify label-analysis` table output shows raw Gmail label IDs plus a friendly name from the synced Gmail label catalog when available; `--top-domains N` adds `DOMAIN` and per-domain `MESSAGES` columns while JSON nests domains under each label.
+- `classify subject-eval` is read-only and does not write classifications. It strips Re:/FW:/Fwd: and similar prefixes before keyword matching. Use `--matched-only=false` to see all rows including unmatched messages. Use `--format json` for a full `SubjectEvalSummary` payload. Use `--exclude-category <category>` (repeatable) to skip messages whose persisted classification matches a given category — excluded rows appear in output with an `EXCLUDED_REASON` but do not count toward `matched_count`.
 - `classify results` and `classify run` now show an `INTENT` column whenever any mailbox classification rows carry a non-empty intent.
 - The first-party inference provider binary added in this repo is `cmd/ai-inference-provider`.
 - Set `OPENAI_API_KEY` before running the first-party inference provider. Optional overrides are `OPENAI_INFERENCE_MODEL`, `OPENAI_MODEL`, `OPENAI_BASE_URL`, `OPENAI_TIMEOUT_SECONDS`, and `OPENAI_DEBUG`.
