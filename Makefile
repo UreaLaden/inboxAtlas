@@ -1,4 +1,4 @@
-.PHONY: fmt lint build test run coverage coverage-pkg coverage-func coverage-total sync classify-run classify-infer gen-reports gen-classify-reports gen-promote-unknowns pipeline
+.PHONY: fmt lint build test run coverage coverage-pkg coverage-func coverage-total sync classify-run classify-infer gen-reports gen-classify-reports gen-promote-unknowns pipeline gen-subject-eval
 CMD     := ./cmd/inboxatlas
 SUMMARY_PROVIDER := ./cmd/openai-summary-provider
 INFERENCE_PROVIDER := ./cmd/ai-inference-provider
@@ -150,3 +150,39 @@ gen-export-excel:
 		--summary-file $(REPORTS_DIR)/summary.md
 
 gen-exports: gen-export-html gen-export-excel
+
+# Generate a classify subject-eval command from a labeled CSV export.
+#
+# The CSV must have a header row with a "subject" column.
+# Strips RE:/FW:/Fwd:/AW: prefixes (mirrors NormalizeSubject), tokenizes on
+# whitespace + punctuation, lowercases, filters stop words and short tokens,
+# then emits the top TOP_N tokens as --include flags on a ready-to-run command.
+#
+# Usage:
+#   make gen-subject-eval ACCOUNT=acr CSV=.ai/references/reports/out/acr/payment_needed.csv CATEGORY=client
+#   make gen-subject-eval ACCOUNT=acr CSV=path/to/labels.csv CATEGORY=vendor TOP_N=15
+#
+# Optional overrides:
+#   TOP_N          — number of top tokens to include (default: 12)
+#   EXCLUDE_CAT    — --exclude-category value(s), space-separated (default: empty)
+#   MATCHED_ONLY   — pass --matched-only flag (default: true)
+CSV ?=
+CATEGORY ?= client
+TOP_N ?= 12
+EXCLUDE_CAT ?=
+MATCHED_ONLY ?= true
+
+PYTHON ?= $(shell python3 --version >/dev/null 2>&1 && echo python3 || echo python)
+
+gen-subject-eval:
+	@if [ -z "$(CSV)" ]; then \
+		echo "ERROR: CSV is required. Usage: make gen-subject-eval ACCOUNT=<acct> CSV=<path> CATEGORY=<cat>"; \
+		exit 1; \
+	fi
+	@$(PYTHON) .ai/scripts/gen_subject_eval.py \
+		--csv "$(CSV)" \
+		--account "$(ACCOUNT)" \
+		--category "$(CATEGORY)" \
+		--top-n $(TOP_N) \
+		$(foreach cat,$(EXCLUDE_CAT),--exclude-cat $(cat)) \
+		$(if $(filter false,$(MATCHED_ONLY)),--no-matched-only,)

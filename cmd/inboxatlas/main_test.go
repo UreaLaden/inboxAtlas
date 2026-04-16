@@ -3810,6 +3810,108 @@ func TestRunClassifySubjectEval_ExcludeCategory_MarksAndDoesNotCount(t *testing.
 	}
 }
 
+func TestRunClassifySubjectEval_MatchedOnly_ExcludedRowsHidden(t *testing.T) {
+	dir := t.TempDir()
+	dbPath := filepath.Join(dir, "test.db")
+
+	// m1 = invoice (social-excluded), m2 = invoice (unclassified → matches vendor).
+	st, err := storage.Open(dbPath)
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	ctx := context.Background()
+	if err := st.CreateMailbox(ctx, models.Mailbox{ID: "user@example.com", Provider: "gmail"}); err != nil {
+		t.Fatalf("CreateMailbox: %v", err)
+	}
+	now := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
+	for _, msg := range []models.MessageMeta{
+		{ProviderID: "m1", MailboxID: "user@example.com", Provider: "gmail", Subject: "Invoice notice", ReceivedAt: now},
+		{ProviderID: "m2", MailboxID: "user@example.com", Provider: "gmail", Subject: "Invoice pending", ReceivedAt: now},
+	} {
+		if err := st.UpsertMessage(ctx, msg); err != nil {
+			t.Fatalf("UpsertMessage: %v", err)
+		}
+	}
+	if err := st.SaveClassification(ctx, storage.Classification{
+		MessageID: "m1", MailboxID: "user@example.com", Category: "social", Source: "seed", ClassifiedAt: now,
+	}); err != nil {
+		t.Fatalf("SaveClassification: %v", err)
+	}
+	_ = st.Close()
+
+	cfg := config.Default()
+	cfg.StoragePath = dbPath
+
+	var buf bytes.Buffer
+	err = runClassifySubjectEval(context.Background(), &buf, cfg,
+		"user@example.com",
+		[]string{"invoice"}, nil, []string{"social"},
+		"vendor", "table", true,
+	)
+	if err != nil {
+		t.Fatalf("runClassifySubjectEval: %v", err)
+	}
+	out := buf.String()
+	// m2 matches vendor; m1 is excluded by category — must not appear in matched-only output.
+	if !strings.Contains(out, "m2") {
+		t.Errorf("expected m2 in output, got:\n%s", out)
+	}
+	if strings.Contains(out, "m1") {
+		t.Errorf("did not expect excluded row m1 in matched-only output, got:\n%s", out)
+	}
+}
+
+func TestRunClassifySubjectEval_MatchedOnly_JSON_FiltersExcluded(t *testing.T) {
+	dir := t.TempDir()
+	dbPath := filepath.Join(dir, "test.db")
+
+	// m1 = invoice (social-excluded), m2 = invoice (unclassified → matches vendor).
+	st, err := storage.Open(dbPath)
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	ctx := context.Background()
+	if err := st.CreateMailbox(ctx, models.Mailbox{ID: "user@example.com", Provider: "gmail"}); err != nil {
+		t.Fatalf("CreateMailbox: %v", err)
+	}
+	now := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
+	for _, msg := range []models.MessageMeta{
+		{ProviderID: "m1", MailboxID: "user@example.com", Provider: "gmail", Subject: "Invoice notice", ReceivedAt: now},
+		{ProviderID: "m2", MailboxID: "user@example.com", Provider: "gmail", Subject: "Invoice pending", ReceivedAt: now},
+	} {
+		if err := st.UpsertMessage(ctx, msg); err != nil {
+			t.Fatalf("UpsertMessage: %v", err)
+		}
+	}
+	if err := st.SaveClassification(ctx, storage.Classification{
+		MessageID: "m1", MailboxID: "user@example.com", Category: "social", Source: "seed", ClassifiedAt: now,
+	}); err != nil {
+		t.Fatalf("SaveClassification: %v", err)
+	}
+	_ = st.Close()
+
+	cfg := config.Default()
+	cfg.StoragePath = dbPath
+
+	var buf bytes.Buffer
+	err = runClassifySubjectEval(context.Background(), &buf, cfg,
+		"user@example.com",
+		[]string{"invoice"}, nil, []string{"social"},
+		"vendor", "json", true,
+	)
+	if err != nil {
+		t.Fatalf("runClassifySubjectEval: %v", err)
+	}
+	out := buf.String()
+	// JSON output with matched-only must not contain the excluded row m1.
+	if strings.Contains(out, `"m1"`) {
+		t.Errorf("did not expect excluded row m1 in matched-only JSON output, got:\n%s", out)
+	}
+	if !strings.Contains(out, `"m2"`) {
+		t.Errorf("expected matched row m2 in JSON output, got:\n%s", out)
+	}
+}
+
 func TestRunClassifySubjectEval_ExcludeCategory_UnknownCategoryFlagErrors(t *testing.T) {
 	cfg := config.Default()
 	err := runClassifySubjectEval(context.Background(), io.Discard, cfg,

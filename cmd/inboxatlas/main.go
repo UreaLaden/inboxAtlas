@@ -634,7 +634,7 @@ func buildClassifySubjectEvalCmd(cfg config.Config) *cobra.Command {
 	cmd.Flags().StringArrayVar(&excludeCategory, "exclude-category", nil, "skip messages whose persisted classification matches this category (repeatable)")
 	cmd.Flags().StringVar(&category, "category", "", "category to assign on match (required)")
 	cmd.Flags().StringVar(&format, "format", "table", "output format: table or json")
-	cmd.Flags().BoolVar(&matchedOnly, "matched-only", true, "show matched and excluded rows; suppress unmatched non-excluded rows")
+	cmd.Flags().BoolVar(&matchedOnly, "matched-only", true, "show only matched rows; suppress excluded and unmatched rows")
 	_ = cmd.MarkFlagRequired("account")
 	_ = cmd.MarkFlagRequired("category")
 	return cmd
@@ -1398,22 +1398,24 @@ func runClassifySubjectEval(ctx context.Context, w io.Writer, cfg config.Config,
 		return err
 	}
 
-	if f == "json" {
-		enc := json.NewEncoder(w)
-		enc.SetIndent("", "  ")
-		return enc.Encode(summary)
-	}
-
-	// --matched-only: show matched rows and excluded rows; suppress unmatched non-excluded rows.
+	// --matched-only: show only rows that matched and were not excluded by category filter.
 	results := summary.Results
 	if matchedOnly {
-		filtered := results[:0]
+		filtered := make([]engine.SubjectEvalResult, 0, len(results))
 		for _, r := range results {
-			if r.Matched || r.Excluded {
+			if r.Matched && !r.Excluded {
 				filtered = append(filtered, r)
 			}
 		}
 		results = filtered
+	}
+
+	if f == "json" {
+		enc := json.NewEncoder(w)
+		enc.SetIndent("", "  ")
+		out := summary
+		out.Results = results
+		return enc.Encode(out)
 	}
 
 	if len(results) == 0 {
