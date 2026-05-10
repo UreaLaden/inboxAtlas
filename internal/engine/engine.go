@@ -139,6 +139,36 @@ type ClassifiedMessagesSummary struct {
 	Messages  []ClassifiedMessageRow   `json:"messages"`
 }
 
+// PaymentBucketResult is one read-only payment bucket evaluation row for a
+// classified message.
+type PaymentBucketResult struct {
+	MessageID   string    `json:"message_id"`
+	ThreadID    string    `json:"thread_id"`
+	FromEmail   string    `json:"from_email"`
+	Domain      string    `json:"domain"`
+	Subject     string    `json:"subject"`
+	ReceivedAt  time.Time `json:"received_at"`
+	Category    string    `json:"category"`
+	Intent      string    `json:"intent"`
+	Bucket      string    `json:"bucket"`
+	MatchedRule string    `json:"matched_rule"`
+}
+
+// PaymentBucketOptions controls optional filtering and deduplication behaviour
+// for EvaluatePaymentBuckets.
+type PaymentBucketOptions struct {
+	ExcludeCategories []string
+	DedupeThreads     bool
+}
+
+// PaymentBucketEvalSummary is the result of EvaluatePaymentBuckets.
+type PaymentBucketEvalSummary struct {
+	MailboxID     string                `json:"mailbox_id"`
+	TotalMessages int                   `json:"total_messages"`
+	BucketedCount int                   `json:"bucketed_count"`
+	Results       []PaymentBucketResult `json:"results"`
+}
+
 // PromoteSuggestionRequest identifies a mailbox bootstrap suggestion to promote
 // into the active mailbox-scoped seed set.
 type PromoteSuggestionRequest struct {
@@ -466,6 +496,82 @@ func ListClassifiedMessages(ctx context.Context, cfg config.Config, account stri
 		MailboxID: mb.ID,
 		Filter:    filter,
 		Messages:  out,
+	}, nil
+}
+
+// EvaluatePaymentBuckets runs the deterministic payment bucket router against
+// persisted classified-message rows for one mailbox without persisting any
+// bucket output.
+func EvaluatePaymentBuckets(ctx context.Context, cfg config.Config, account string, matchedOnly bool, opts PaymentBucketOptions) (PaymentBucketEvalSummary, error) {
+	st, mb, err := openResolvedStore(ctx, cfg, account)
+	if err != nil {
+		return PaymentBucketEvalSummary{}, err
+	}
+	defer func() { _ = st.Close() }()
+
+	rows, err := st.QueryClassifiedMessages(ctx, mb.ID, storage.ClassifiedMessagesFilter{
+		Limit:             0,
+		ExcludeCategories: opts.ExcludeCategories,
+	})
+	if err != nil {
+		return PaymentBucketEvalSummary{}, fmt.Errorf("query classified messages: %w", err)
+	}
+
+	if opts.DedupeThreads {
+		seen := make(map[string]struct{}, len(rows))
+		deduped := rows[:0]
+		for _, row := range rows {
+			if row.ThreadID == "" {
+				deduped = append(deduped, row)
+				continue
+			}
+			if _, ok := seen[row.ThreadID]; !ok {
+				seen[row.ThreadID] = struct{}{}
+				deduped = append(deduped, row)
+			}
+		}
+		rows = deduped
+	}
+
+	router := classification.NewRuleBasedPaymentBucketRouter(classification.DefaultPaymentBucketRules())
+	results := make([]PaymentBucketResult, 0, len(rows))
+	bucketed := 0
+
+	for _, row := range rows {
+		msg := models.MessageMeta{
+			FromEmail: row.FromEmail,
+			Domain:    row.Domain,
+			Subject:   row.Subject,
+		}
+		bucket, matchedRule, err := router.AssignBucket(ctx, msg, row.Category, row.Intent)
+		if err != nil {
+			return PaymentBucketEvalSummary{}, fmt.Errorf("assign payment bucket for message %q: %w", row.MessageID, err)
+		}
+		if bucket != classification.BucketNone {
+			bucketed++
+		}
+		if matchedOnly && bucket == classification.BucketNone {
+			continue
+		}
+		results = append(results, PaymentBucketResult{
+			MessageID:   row.MessageID,
+			ThreadID:    row.ThreadID,
+			FromEmail:   row.FromEmail,
+			Domain:      row.Domain,
+			Subject:     row.Subject,
+			ReceivedAt:  row.ReceivedAt,
+			Category:    row.Category,
+			Intent:      row.Intent,
+			Bucket:      bucket,
+			MatchedRule: matchedRule,
+		})
+	}
+
+	return PaymentBucketEvalSummary{
+		MailboxID:     mb.ID,
+		TotalMessages: len(rows),
+		BucketedCount: bucketed,
+		Results:       results,
 	}, nil
 }
 

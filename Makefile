@@ -1,4 +1,4 @@
-.PHONY: fmt lint build test run coverage coverage-pkg coverage-func coverage-total sync classify-run classify-infer gen-reports gen-classify-reports gen-promote-unknowns pipeline gen-subject-eval
+.PHONY: fmt lint build test run coverage coverage-pkg coverage-func coverage-total sync classify-run classify-infer gen-reports gen-classify-reports gen-promote-unknowns pipeline gen-subject-eval validate-subject-eval test-scripts
 CMD     := ./cmd/inboxatlas
 SUMMARY_PROVIDER := ./cmd/openai-summary-provider
 INFERENCE_PROVIDER := ./cmd/ai-inference-provider
@@ -174,6 +174,10 @@ MATCHED_ONLY ?= true
 
 PYTHON ?= $(shell python3 --version >/dev/null 2>&1 && echo python3 || echo python)
 
+# Run unit tests for .ai/scripts Python utilities.
+test-scripts:
+	@$(PYTHON) .ai/scripts/test_validate_subject_eval.py
+
 gen-subject-eval:
 	@if [ -z "$(CSV)" ]; then \
 		echo "ERROR: CSV is required. Usage: make gen-subject-eval ACCOUNT=<acct> CSV=<path> CATEGORY=<cat>"; \
@@ -186,3 +190,46 @@ gen-subject-eval:
 		--top-n $(TOP_N) \
 		$(foreach cat,$(EXCLUDE_CAT),--exclude-cat $(cat)) \
 		$(if $(filter false,$(MATCHED_ONLY)),--no-matched-only,)
+
+# Validate subject-eval JSON recall against a labeled CSV export.
+#
+# Required:
+#   CSV            — labeled message export (labeled subset, not full mailbox)
+#   JSON           — subject-eval output from classify subject-eval --format json
+#
+# Optional:
+#   LABEL          — version label printed in provenance header (e.g. payment_needed_v2)
+#   EXPECTED_CAT   — InboxAtlas category expected for this Gmail label (enables conflict check)
+#   COMPARE_JSON   — baseline JSON to compare against (e.g. seed run); shows recovered subjects
+#   DOMAIN_ANALYSIS — set to true to add domain breakdown of missed messages
+#   DEBUG_SUBJECTS  — set to true to show normalization diagnostics for each missed subject
+#
+# Usage:
+#   make validate-subject-eval CSV=... JSON=... LABEL=payment_needed_v2
+#   make validate-subject-eval CSV=... JSON=... COMPARE_JSON=..._seed.json
+#   make validate-subject-eval CSV=... JSON=... EXPECTED_CAT=vendor DOMAIN_ANALYSIS=true
+JSON ?=
+LABEL ?=
+EXPECTED_CAT ?=
+COMPARE_JSON ?=
+DOMAIN_ANALYSIS ?= false
+DEBUG_SUBJECTS ?= false
+
+validate-subject-eval:
+	@if [ -z "$(CSV)" ]; then \
+		echo "ERROR: CSV is required. Usage: make validate-subject-eval CSV=<path> JSON=<path>"; \
+		exit 1; \
+	fi
+	@if [ -z "$(JSON)" ]; then \
+		echo "ERROR: JSON is required. Usage: make validate-subject-eval CSV=<path> JSON=<path>"; \
+		exit 1; \
+	fi
+	@$(PYTHON) .ai/scripts/validate_subject_eval.py \
+		--csv "$(CSV)" \
+		--json "$(JSON)" \
+		$(if $(LABEL),--label "$(LABEL)",) \
+		$(if $(ACCOUNT),--account "$(ACCOUNT)",) \
+		$(if $(EXPECTED_CAT),--expected-category "$(EXPECTED_CAT)",) \
+		$(if $(COMPARE_JSON),--compare-json "$(COMPARE_JSON)",) \
+		$(if $(filter true,$(DOMAIN_ANALYSIS)),--domain-analysis,) \
+		$(if $(filter true,$(DEBUG_SUBJECTS)),--debug-subjects,)

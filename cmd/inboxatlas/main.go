@@ -596,6 +596,7 @@ func buildClassifyCmd(cfg config.Config) *cobra.Command {
 	}
 	cmd.AddCommand(buildClassifyRunCmd(cfg))
 	cmd.AddCommand(buildClassifyMessagesCmd(cfg))
+	cmd.AddCommand(buildClassifyPaymentBucketsCmd(cfg))
 	cmd.AddCommand(buildClassifyLabelAnalysisCmd(cfg))
 	cmd.AddCommand(buildClassifyResultsCmd(cfg))
 	cmd.AddCommand(buildClassifySuggestionsCmd(cfg))
@@ -606,6 +607,32 @@ func buildClassifyCmd(cfg config.Config) *cobra.Command {
 	cmd.AddCommand(buildClassifyIntentsCmd())
 	cmd.AddCommand(buildClassifyPatternTypesCmd())
 	cmd.AddCommand(buildClassifySubjectEvalCmd(cfg))
+	return cmd
+}
+
+// buildClassifyPaymentBucketsCmd returns the "classify payment-buckets"
+// subcommand, which evaluates deterministic payment bucket routing over
+// persisted classification results without storing any bucket output.
+func buildClassifyPaymentBucketsCmd(cfg config.Config) *cobra.Command {
+	var account string
+	var format string
+	var matchedOnly bool
+	var excludeCategory []string
+	var dedupeThreads bool
+
+	cmd := &cobra.Command{
+		Use:   "payment-buckets",
+		Short: "Dry-run payment bucket routing against classified mailbox messages",
+		RunE: func(cmd *cobra.Command, _ []string) error {
+			return runClassifyPaymentBuckets(cmd.Context(), cmd.OutOrStdout(), cfg, account, format, matchedOnly, excludeCategory, dedupeThreads)
+		},
+	}
+	cmd.Flags().StringVar(&account, "account", "", "mailbox email or alias")
+	cmd.Flags().StringVar(&format, "format", "table", "output format: table, csv, or json")
+	cmd.Flags().BoolVar(&matchedOnly, "matched-only", true, "show only messages assigned to a payment bucket")
+	cmd.Flags().StringArrayVar(&excludeCategory, "exclude-category", nil, "omit messages whose category matches this value (repeatable)")
+	cmd.Flags().BoolVar(&dedupeThreads, "dedupe-threads", false, "keep only the latest message per thread")
+	_ = cmd.MarkFlagRequired("account")
 	return cmd
 }
 
@@ -1305,6 +1332,77 @@ func runClassifyResults(ctx context.Context, w io.Writer, cfg config.Config, acc
 
 	_, _ = fmt.Fprintf(w, "Total: %d\n", result.Total)
 	_, _ = fmt.Fprintf(w, "Unknown: %.1f%%\n", result.UnknownPct)
+	return nil
+}
+
+// runClassifyPaymentBuckets executes the payment bucket dry-run and renders the
+// results as a table, CSV, or JSON.
+func runClassifyPaymentBuckets(ctx context.Context, w io.Writer, cfg config.Config, account, format string, matchedOnly bool, excludeCategory []string, dedupeThreads bool) error {
+	f, err := validateClassifyMessagesFormat(format)
+	if err != nil {
+		return err
+	}
+
+	summary, err := engine.EvaluatePaymentBuckets(ctx, cfg, account, matchedOnly, engine.PaymentBucketOptions{
+		ExcludeCategories: excludeCategory,
+		DedupeThreads:     dedupeThreads,
+	})
+	if err != nil {
+		return err
+	}
+
+	if f == "json" {
+		enc := json.NewEncoder(w)
+		enc.SetIndent("", "  ")
+		return enc.Encode(summary)
+	}
+	if f == "csv" {
+		cw := csv.NewWriter(w)
+		if err := cw.Write([]string{"MessageID", "Timestamp", "Sender", "Domain", "Subject", "Intent", "Category", "Bucket", "MatchedRule"}); err != nil {
+			return err
+		}
+		for _, row := range summary.Results {
+			if err := cw.Write([]string{
+				row.MessageID,
+				row.ReceivedAt.Format(time.RFC3339),
+				row.FromEmail,
+				row.Domain,
+				row.Subject,
+				row.Intent,
+				row.Category,
+				row.Bucket,
+				row.MatchedRule,
+			}); err != nil {
+				return err
+			}
+		}
+		cw.Flush()
+		return cw.Error()
+	}
+
+	if len(summary.Results) == 0 {
+		if matchedOnly {
+			_, _ = fmt.Fprintf(w, "No payment buckets matched for %s.\n", summary.MailboxID)
+		} else {
+			_, _ = fmt.Fprintf(w, "No classified messages found for %s.\n", summary.MailboxID)
+		}
+		_, _ = fmt.Fprintf(w, "%d of %d messages bucketed.\n", summary.BucketedCount, summary.TotalMessages)
+		return nil
+	}
+
+	tw := tabwriter.NewWriter(w, 0, 0, 3, ' ', 0)
+	_, _ = fmt.Fprintln(tw, "MESSAGE_ID\tBUCKET\tCATEGORY\tDOMAIN\tSUBJECT")
+	for _, row := range summary.Results {
+		subject := row.Subject
+		if len(subject) > 60 {
+			subject = subject[:57] + "..."
+		}
+		_, _ = fmt.Fprintf(tw, "%s\t%s\t%s\t%s\t%s\n", row.MessageID, row.Bucket, row.Category, row.Domain, subject)
+	}
+	if err := tw.Flush(); err != nil {
+		return err
+	}
+	_, _ = fmt.Fprintf(w, "%d of %d messages bucketed.\n", summary.BucketedCount, summary.TotalMessages)
 	return nil
 }
 

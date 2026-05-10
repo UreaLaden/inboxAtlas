@@ -529,6 +529,7 @@ type ClassificationCount struct {
 // joining messages with their classification result.
 type ClassifiedMessage struct {
 	MessageID     string    `json:"message_id"`
+	ThreadID      string    `json:"thread_id"`
 	FromEmail     string    `json:"from_email"`
 	Domain        string    `json:"domain"`
 	Subject       string    `json:"subject"`
@@ -542,10 +543,11 @@ type ClassifiedMessage struct {
 // ClassifiedMessagesFilter constrains QueryClassifiedMessages results.
 // Empty string fields disable the corresponding filter. Limit 0 disables limit.
 type ClassifiedMessagesFilter struct {
-	Category string
-	Intent   string
-	Limit    int
-	Since    time.Time
+	Category         string
+	Intent           string
+	ExcludeCategories []string
+	Limit            int
+	Since            time.Time
 }
 
 // ClassificationSeed is a single rule stored in the classification_seeds table.
@@ -968,7 +970,7 @@ func (s *Store) ListMessageMetaByMailbox(ctx context.Context, mailboxID string) 
 // optionally filtered by category and intent. Results are ordered by received_at desc.
 func (s *Store) QueryClassifiedMessages(ctx context.Context, mailboxID string, filter ClassifiedMessagesFilter) ([]ClassifiedMessage, error) {
 	query := `
-		SELECT m.provider_id, m.from_email, m.domain, m.subject, m.received_at, m.has_attachment,
+		SELECT m.provider_id, m.thread_id, m.from_email, m.domain, m.subject, m.received_at, m.has_attachment,
 		       mc.category, mc.intent, mc.matched_rule
 		FROM messages m
 		JOIN message_classifications mc ON m.id = mc.message_id AND m.mailbox_id = mc.mailbox_id
@@ -980,6 +982,14 @@ func (s *Store) QueryClassifiedMessages(ctx context.Context, mailboxID string, f
 		query += `
 		  AND m.received_at >= ?`
 		args = append(args, filter.Since.UTC().Format(time.RFC3339))
+	}
+	if len(filter.ExcludeCategories) > 0 {
+		placeholders := strings.Repeat("?,", len(filter.ExcludeCategories))
+		placeholders = placeholders[:len(placeholders)-1]
+		query += "\n\t\t  AND mc.category NOT IN (" + placeholders + ")"
+		for _, c := range filter.ExcludeCategories {
+			args = append(args, c)
+		}
 	}
 	query += `
 		ORDER BY m.received_at DESC, m.provider_id ASC`
@@ -997,6 +1007,7 @@ func (s *Store) QueryClassifiedMessages(ctx context.Context, mailboxID string, f
 	var out []ClassifiedMessage
 	for rows.Next() {
 		var row ClassifiedMessage
+		var threadID sql.NullString
 		var fromEmail sql.NullString
 		var domain sql.NullString
 		var subject sql.NullString
@@ -1006,6 +1017,7 @@ func (s *Store) QueryClassifiedMessages(ctx context.Context, mailboxID string, f
 
 		if err := rows.Scan(
 			&row.MessageID,
+			&threadID,
 			&fromEmail,
 			&domain,
 			&subject,
@@ -1016,6 +1028,9 @@ func (s *Store) QueryClassifiedMessages(ctx context.Context, mailboxID string, f
 			&matchedRule,
 		); err != nil {
 			return nil, fmt.Errorf("scan classified message row: %w", err)
+		}
+		if threadID.Valid {
+			row.ThreadID = threadID.String
 		}
 		if fromEmail.Valid {
 			row.FromEmail = fromEmail.String

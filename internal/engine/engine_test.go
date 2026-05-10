@@ -1814,3 +1814,73 @@ func TestEvaluateSubjectRules_ExcludeCategory_LiteralUnknownExcluded(t *testing.
 		t.Errorf("MatchedCount: got %d, want 0 (excluded match must not count)", summary.MatchedCount)
 	}
 }
+
+func TestEvaluatePaymentBuckets(t *testing.T) {
+	cfg := engineTestConfig(t)
+	st := engineTestStore(t, cfg)
+	createEngineMailbox(t, st, "user@example.com")
+	now := time.Date(2026, 4, 20, 12, 0, 0, 0, time.UTC)
+
+	for _, msg := range []models.MessageMeta{
+		{ProviderID: "m1", MailboxID: "user@example.com", Provider: "gmail", FromEmail: "messenger@messaging.squareup.com", Domain: "messaging.squareup.com", Subject: "Invoice available", ReceivedAt: now},
+		{ProviderID: "m2", MailboxID: "user@example.com", Provider: "gmail", FromEmail: "agent@avanteins.com", Domain: "avanteins.com", Subject: "Coverage review", ReceivedAt: now.Add(1 * time.Hour)},
+		{ProviderID: "m3", MailboxID: "user@example.com", Provider: "gmail", FromEmail: "billing@vendor.example", Domain: "vendor.example", Subject: "Overdue balance notice", ReceivedAt: now.Add(2 * time.Hour)},
+		{ProviderID: "m4", MailboxID: "user@example.com", Provider: "gmail", FromEmail: "accounts@vendor.example", Domain: "vendor.example", Subject: "Invoice #44", ReceivedAt: now.Add(3 * time.Hour)},
+		{ProviderID: "m5", MailboxID: "user@example.com", Provider: "gmail", FromEmail: "hello@example.com", Domain: "example.com", Subject: "Weekly update", ReceivedAt: now.Add(4 * time.Hour)},
+	} {
+		engineSeedMessage(t, st, msg)
+	}
+
+	for _, c := range []storage.Classification{
+		{MessageID: "m1", MailboxID: "user@example.com", Category: classification.CategoryVendor, Intent: classification.IntentInvoice, Source: classification.SourceSeed, ClassifiedAt: now},
+		{MessageID: "m2", MailboxID: "user@example.com", Category: classification.CategoryVendor, Source: classification.SourceSeed, ClassifiedAt: now},
+		{MessageID: "m3", MailboxID: "user@example.com", Category: classification.CategoryVendor, Source: classification.SourceSeed, ClassifiedAt: now},
+		{MessageID: "m4", MailboxID: "user@example.com", Category: classification.CategoryVendor, Intent: classification.IntentInvoice, Source: classification.SourceSeed, ClassifiedAt: now},
+		{MessageID: "m5", MailboxID: "user@example.com", Category: classification.CategoryUnknown, Source: classification.SourceSeed, ClassifiedAt: now},
+	} {
+		if err := st.SaveClassification(context.Background(), c); err != nil {
+			t.Fatalf("SaveClassification(%s): %v", c.MessageID, err)
+		}
+	}
+
+	summary, err := EvaluatePaymentBuckets(context.Background(), cfg, "user@example.com", false, PaymentBucketOptions{})
+	if err != nil {
+		t.Fatalf("EvaluatePaymentBuckets: %v", err)
+	}
+	if summary.MailboxID != "user@example.com" {
+		t.Fatalf("MailboxID: got %q", summary.MailboxID)
+	}
+	if summary.TotalMessages != 5 {
+		t.Fatalf("TotalMessages: got %d, want 5", summary.TotalMessages)
+	}
+	if summary.BucketedCount != 4 {
+		t.Fatalf("BucketedCount: got %d, want 4", summary.BucketedCount)
+	}
+	if len(summary.Results) != 5 {
+		t.Fatalf("len(Results): got %d, want 5", len(summary.Results))
+	}
+
+	gotByID := make(map[string]PaymentBucketResult, len(summary.Results))
+	for _, row := range summary.Results {
+		gotByID[row.MessageID] = row
+	}
+
+	if gotByID["m1"].Bucket != classification.BucketPayableInvoiceAutomated {
+		t.Fatalf("m1 bucket: got %q", gotByID["m1"].Bucket)
+	}
+	if gotByID["m1"].MatchedRule != "bucket_rule:sender_email:messenger@messaging.squareup.com" {
+		t.Fatalf("m1 matched rule: got %q", gotByID["m1"].MatchedRule)
+	}
+	if gotByID["m2"].Bucket != classification.BucketPayableUrgentInsurance {
+		t.Fatalf("m2 bucket: got %q", gotByID["m2"].Bucket)
+	}
+	if gotByID["m3"].Bucket != classification.BucketPayableOverdueVendor {
+		t.Fatalf("m3 bucket: got %q", gotByID["m3"].Bucket)
+	}
+	if gotByID["m4"].Bucket != classification.BucketPayableInvoiceVendor {
+		t.Fatalf("m4 bucket: got %q", gotByID["m4"].Bucket)
+	}
+	if gotByID["m5"].Bucket != classification.BucketNone {
+		t.Fatalf("m5 bucket: got %q, want empty", gotByID["m5"].Bucket)
+	}
+}

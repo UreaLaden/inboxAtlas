@@ -15,6 +15,7 @@ import (
 	"golang.org/x/oauth2"
 
 	"github.com/UreaLaden/inboxatlas/internal/auth"
+	"github.com/UreaLaden/inboxatlas/internal/classification"
 	"github.com/UreaLaden/inboxatlas/internal/config"
 	"github.com/UreaLaden/inboxatlas/internal/engine"
 	exportpkg "github.com/UreaLaden/inboxatlas/internal/export"
@@ -3523,6 +3524,130 @@ func seedSubjectEvalData(t *testing.T, dbPath string) {
 		if err := st.UpsertMessage(ctx, msg); err != nil {
 			t.Fatalf("UpsertMessage(%s): %v", msg.ProviderID, err)
 		}
+	}
+}
+
+func seedPaymentBucketData(t *testing.T, dbPath string) {
+	t.Helper()
+	st, err := storage.Open(dbPath)
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	defer func() { _ = st.Close() }()
+	ctx := context.Background()
+	if err := st.CreateMailbox(ctx, models.Mailbox{ID: "user@example.com", Provider: "gmail"}); err != nil {
+		t.Fatalf("CreateMailbox: %v", err)
+	}
+	now := time.Date(2026, 4, 20, 12, 0, 0, 0, time.UTC)
+	for _, msg := range []models.MessageMeta{
+		{ProviderID: "m1", MailboxID: "user@example.com", Provider: "gmail", FromEmail: "messenger@messaging.squareup.com", Domain: "messaging.squareup.com", Subject: "Invoice available", ReceivedAt: now},
+		{ProviderID: "m2", MailboxID: "user@example.com", Provider: "gmail", FromEmail: "billing@vendor.example", Domain: "vendor.example", Subject: "Overdue balance notice", ReceivedAt: now.Add(1 * time.Hour)},
+		{ProviderID: "m3", MailboxID: "user@example.com", Provider: "gmail", FromEmail: "hello@example.com", Domain: "example.com", Subject: "Weekly update", ReceivedAt: now.Add(2 * time.Hour)},
+	} {
+		if err := st.UpsertMessage(ctx, msg); err != nil {
+			t.Fatalf("UpsertMessage(%s): %v", msg.ProviderID, err)
+		}
+	}
+	for _, c := range []storage.Classification{
+		{MessageID: "m1", MailboxID: "user@example.com", Category: classification.CategoryVendor, Intent: classification.IntentInvoice, Source: classification.SourceSeed, ClassifiedAt: now},
+		{MessageID: "m2", MailboxID: "user@example.com", Category: classification.CategoryVendor, Source: classification.SourceSeed, ClassifiedAt: now},
+		{MessageID: "m3", MailboxID: "user@example.com", Category: classification.CategoryUnknown, Source: classification.SourceSeed, ClassifiedAt: now},
+	} {
+		if err := st.SaveClassification(ctx, c); err != nil {
+			t.Fatalf("SaveClassification(%s): %v", c.MessageID, err)
+		}
+	}
+}
+
+func TestBuildClassifyPaymentBucketsCmd_RegisteredUnderClassify(t *testing.T) {
+	cmd := buildClassifyCmd(config.Default())
+	names := make(map[string]bool)
+	for _, sub := range cmd.Commands() {
+		names[sub.Name()] = true
+	}
+	if !names["payment-buckets"] {
+		t.Error("expected payment-buckets to be registered under classify")
+	}
+}
+
+func TestRunClassifyPaymentBuckets_JSON(t *testing.T) {
+	dir := t.TempDir()
+	dbPath := filepath.Join(dir, "test.db")
+	seedPaymentBucketData(t, dbPath)
+
+	cfg := config.Default()
+	cfg.StoragePath = dbPath
+
+	var buf bytes.Buffer
+	if err := runClassifyPaymentBuckets(context.Background(), &buf, cfg, "user@example.com", "json", true, nil, false); err != nil {
+		t.Fatalf("runClassifyPaymentBuckets: %v", err)
+	}
+	out := buf.String()
+	if !strings.Contains(out, `"mailbox_id": "user@example.com"`) {
+		t.Fatalf("expected mailbox_id in output, got %q", out)
+	}
+	if !strings.Contains(out, `"bucketed_count": 2`) {
+		t.Fatalf("expected bucketed_count in output, got %q", out)
+	}
+	if strings.Contains(out, `"message_id": "m3"`) {
+		t.Fatalf("did not expect unmatched row in matched-only json output, got %q", out)
+	}
+}
+
+func TestRunClassifyPaymentBuckets_Table(t *testing.T) {
+	dir := t.TempDir()
+	dbPath := filepath.Join(dir, "test.db")
+	seedPaymentBucketData(t, dbPath)
+
+	cfg := config.Default()
+	cfg.StoragePath = dbPath
+
+	var buf bytes.Buffer
+	if err := runClassifyPaymentBuckets(context.Background(), &buf, cfg, "user@example.com", "table", false, nil, false); err != nil {
+		t.Fatalf("runClassifyPaymentBuckets: %v", err)
+	}
+	out := buf.String()
+	if !strings.Contains(out, "MESSAGE_ID") || !strings.Contains(out, "BUCKET") {
+		t.Fatalf("expected table headers, got %q", out)
+	}
+	if !strings.Contains(out, "m1") || !strings.Contains(out, "payable-invoice-automated") {
+		t.Fatalf("expected automated invoice row, got %q", out)
+	}
+	if !strings.Contains(out, "m3") {
+		t.Fatalf("expected unmatched row when matched-only=false, got %q", out)
+	}
+	if !strings.Contains(out, "2 of 3 messages bucketed.") {
+		t.Fatalf("expected summary line, got %q", out)
+	}
+}
+
+func TestRunClassifyPaymentBuckets_CSV(t *testing.T) {
+	dir := t.TempDir()
+	dbPath := filepath.Join(dir, "test.db")
+	seedPaymentBucketData(t, dbPath)
+
+	cfg := config.Default()
+	cfg.StoragePath = dbPath
+
+	var buf bytes.Buffer
+	if err := runClassifyPaymentBuckets(context.Background(), &buf, cfg, "user@example.com", "csv", false, nil, false); err != nil {
+		t.Fatalf("runClassifyPaymentBuckets: %v", err)
+	}
+	out := buf.String()
+	if !strings.Contains(out, "MessageID,Timestamp,Sender,Domain,Subject,Intent,Category,Bucket,MatchedRule") {
+		t.Fatalf("expected csv headers, got %q", out)
+	}
+	if !strings.Contains(out, "m1,2026-04-20T12:00:00Z,messenger@messaging.squareup.com,messaging.squareup.com,Invoice available,invoice,vendor,payable-invoice-automated,bucket_rule:sender_email:messenger@messaging.squareup.com") {
+		t.Fatalf("expected deterministic bucket row, got %q", out)
+	}
+	if !strings.Contains(out, "m2,2026-04-20T13:00:00Z,billing@vendor.example,vendor.example,Overdue balance notice,,vendor,payable-overdue-vendor,\"bucket_rule:subject_keywords:overdue,obligation\"") {
+		t.Fatalf("expected quoted matched-rule csv row, got %q", out)
+	}
+	if !strings.Contains(out, "m3,2026-04-20T14:00:00Z,hello@example.com,example.com,Weekly update,,unknown,,") {
+		t.Fatalf("expected unmatched row in csv output when matched-only=false, got %q", out)
+	}
+	if strings.Contains(out, "messages bucketed.") {
+		t.Fatalf("did not expect table summary line in csv output, got %q", out)
 	}
 }
 
