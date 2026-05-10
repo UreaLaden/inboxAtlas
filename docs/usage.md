@@ -88,6 +88,7 @@ inboxatlas classify promote --account <id|alias> \
 # Run and review
 inboxatlas classify run     --account <id|alias>
 inboxatlas classify messages --account <id|alias> [--category <category>] [--intent <intent>] [--since <RFC3339>] [--format table|csv|json] [--limit 100]
+inboxatlas classify payment-buckets --account <id|alias> [--format table|csv|json] [--matched-only]
 inboxatlas classify label-analysis --account <id|alias> [--format table|json] [--min-count 1]
 inboxatlas classify results --account <id|alias> [--format table|json]
 
@@ -135,6 +136,7 @@ inboxatlas classify promote \
   --pattern-type domain \
   --pattern-value law360.com \
   --category newsletter/marketing
+```
 
 **5. Review classified messages directly when you need automation-friendly output.**
 Use `classify messages` when you need per-message rows instead of aggregate counts. Combine
@@ -157,12 +159,12 @@ label ID and a friendly name for known Gmail system labels; user-created
 
 ```bash
 inboxatlas classify label-analysis --account your@email.com --min-count 5
+
 inboxatlas classify promote \
   --account your@email.com \
   --pattern-type label \
   --pattern-value CATEGORY_PROMOTIONS \
   --category newsletter/marketing
-```
 
 inboxatlas classify promote \
   --account your@email.com \
@@ -199,6 +201,20 @@ inboxatlas classify results --account your@email.com
 ```
 
 A high unknown percentage means many messages did not match any rule. Promote more seeds and re-run.
+
+**8. Dry-run payment-handling routing over persisted classifications.**
+
+```bash
+inboxatlas classify payment-buckets --account your@email.com --matched-only
+inboxatlas classify payment-buckets --account your@email.com --format csv --matched-only=false
+inboxatlas classify payment-buckets --account your@email.com --format json --matched-only=false
+```
+
+`classify payment-buckets` is read-only. It evaluates only messages that
+already have a persisted classification row and maps them into the deterministic
+payment playbook buckets for operator review or downstream automation dry-runs.
+`--format csv` emits deterministic spreadsheet-friendly rows with message,
+sender, category, bucket, and matched-rule fields.
 
 ### Iteration loop
 
@@ -273,6 +289,7 @@ cannot be promoted — this is expected and represents a natural classification 
 
 - `--account` is required for all mailbox-scoped classify commands.
 - `classify run` does not trigger a sync — it operates only on messages already stored locally.
+- `classify payment-buckets` is read-only and depends on persisted classification rows; it does not classify messages by itself.
 - `classify results` is read-only and reports on classifications already stored.
 - `classify suggestions` is read-only and does not activate any seed.
 - `classify seeds list` and `classify seeds delete` operate only on mailbox-scoped seeds; global built-in defaults are protected from deletion.
