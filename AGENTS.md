@@ -130,3 +130,13 @@ For workflow state, prefer these artifacts in order:
 5. `.ai/references/repo-map.md`
 
 Do not rely on chat memory when repository artifacts provide the answer.
+
+## AI Hub runtime
+
+InboxAtlas is registered as an AI Hub managed repo.
+
+- Runtime contract: `.ai/runtime.yaml`
+- Agent onboarding: `.ai/agent-startup.md`
+
+At session start, load `runtime.yaml` to resolve shared vs repo-local instructions.
+Repo-local files always take precedence over AI Hub shared assets.
