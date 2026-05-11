@@ -52,3 +52,32 @@ GROUP BY m.domain, m.from_email
 ORDER BY message_count DESC, m.domain ASC;
 
   ```
+
+```sql
+  -- ============================================================
+-- Payment Needed label report
+-- UPDATE the date below each month before running
+-- ============================================================
+WITH params AS (
+  SELECT '2026-04-08T00:00:00Z' AS since
+)
+SELECT
+  m.received_at,
+  m.from_email,
+  m.domain,
+  m.subject,
+  COALESCE(mc.category, 'unclassified') AS category,
+  COALESCE(mc.intent,   '')             AS intent,
+  COALESCE(mc.matched_rule, '')         AS matched_rule,
+  m.has_attachment
+FROM messages m
+JOIN json_each(m.labels) je
+  ON je.value = 'Label_5138635088577405590'
+LEFT JOIN message_classifications mc
+  ON mc.message_id = m.id AND mc.mailbox_id = m.mailbox_id
+CROSS JOIN params
+WHERE m.mailbox_id = (SELECT id FROM mailboxes WHERE alias = 'acr')
+  AND m.received_at >= params.since
+  AND COALESCE(mc.category, '') != 'internal'
+ORDER BY m.received_at DESC;
+```
